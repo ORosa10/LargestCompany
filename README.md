@@ -11,22 +11,21 @@ The goal is not to predict stock prices and not to outperform the option market.
 Current data sources:
 
 - Current market capitalization: manual placeholder input
-- Annualized implied volatility: manual placeholder input
-- Polymarket YES price: manual placeholder input
+- Annualized implied volatility: manual input or Yahoo Finance option-chain near-ATM IV via `yfinance`
+- Polymarket YES price: manual input
 - Correlation matrix: Yahoo Finance historical adjusted close prices via `yfinance`, or manual input
 - Target date / maturity: user-selected date
 
-The next important product step is to replace manual market cap, IV, and Polymarket placeholders with explicit data pipelines or uploaded snapshots.
+The next important product step is to replace manual market cap and Polymarket placeholders with explicit data pipelines or uploaded snapshots.
 
 ## Phase 1 Scope
 
-This phase builds the probability engine and historical correlation estimation.
+This phase builds the probability engine, historical correlation estimation, and an MVP implied-volatility source.
 
 It does not include:
 
 - live market-cap ingestion
-- live option-surface ingestion
-- volatility skew or smile calibration
+- full volatility skew or smile calibration
 - hedging logic
 - option payoff heatmaps
 - portfolio optimization
@@ -59,6 +58,25 @@ Where:
 - `T = days_to_target / 365`
 - `days_to_target = target_date - today`
 - `Z` is a correlated normal shock
+
+## Implied Volatility Source
+
+The app supports two IV modes:
+
+1. Manual IV inputs
+2. Yahoo option-chain near-ATM IV
+
+Yahoo IV mode uses `yfinance` option chains:
+
+- map app tickers to Yahoo symbols, e.g. `BRK.B` to `BRK-B`
+- fetch available option expiries
+- select the expiry closest to the target date
+- fetch the option chain for that expiry
+- find the strike nearest current spot
+- read call and put implied volatility at the near-ATM strike
+- use the average of call IV and put IV as the annualized IV input
+
+This is an MVP near-ATM estimate. It is not a full volatility smile/surface calibration. Future versions should ingest full option chains, clean bid/ask quotes, fit an IV surface, and derive terminal distributions from the surface.
 
 ## Correlation Estimation
 
@@ -123,24 +141,9 @@ The simulation diagnostics include terminal market-cap distribution statistics f
 - 95th percentile
 - 99th percentile
 
-## IV Surface Roadmap
-
-Volatility skew/smile is not modeled yet. The current engine uses one flat annualized implied volatility per company.
-
-Possible live or near-live IV sources for a future module:
-
-- Polygon.io options snapshots and Greeks
-- Tradier options chains
-- Interactive Brokers market data, if an IBKR account/data subscription is available
-- Cboe DataShop, usually better for paid/institutional workflows
-- Nasdaq Data Link / ORATS, usually paid but more research-friendly
-- Yahoo Finance option chains via `yfinance`, useful for MVP experiments but not ideal as a robust production source
-
-The future IV module should select an option expiry near the Polymarket target date, ingest option chains, clean bid/ask quotes, infer or read implied vols, and calibrate a terminal distribution instead of using one flat IV input.
-
 ## Polymarket Odds
 
-Polymarket YES prices can remain manual for now. A later module can ingest market prices from Polymarket APIs and still allow manual overrides.
+Polymarket YES prices remain manual for now. A later module can ingest market prices from Polymarket APIs and still allow manual overrides.
 
 ## Run
 
@@ -155,6 +158,7 @@ streamlit run app.py
 app.py            Streamlit dashboard
 model.py          Probability engine
 correlations.py   Historical correlation estimation
+iv_surfaces.py    Yahoo option-chain near-ATM IV extraction
 requirements.txt  Python dependencies
 ```
 
