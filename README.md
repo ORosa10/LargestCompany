@@ -43,6 +43,8 @@ It does not include:
 - BRK.B
 - LLY
 
+The universe is editable in the app under `Inputs & Data`.
+
 ## Model
 
 The app uses correlated lognormal simulations of future market capitalizations:
@@ -128,6 +130,14 @@ The results table focuses on statistical ranking analysis:
 - average simulated rank
 - probability of finishing Top 2
 - probability of finishing Top 3
+
+The app also includes:
+
+- ticker drilldown directly on the main Results tab
+- selected ticker rank distribution
+- interactive company comparison box plot
+- terminal market-cap distribution percentiles for every company
+- exact rank probability matrix, showing probability of Rank 1, Rank 2, Rank 3, etc.
 
 The simulation diagnostics include terminal market-cap distribution statistics for every company:
 
