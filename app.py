@@ -7,6 +7,7 @@ import plotly.express as px
 import streamlit as st
 
 from correlations import ewma_correlation, fetch_adjusted_close, rolling_correlation
+from iv_surfaces import apply_iv_estimates, estimate_atm_ivs
 from model import default_company_inputs, default_correlation_matrix, run_probability_engine
 
 
@@ -16,8 +17,9 @@ st.title("LargestCompany")
 st.caption("Phase 1: statistical probability engine for largest future market capitalization.")
 
 st.warning(
-    "Prototype status: market cap, implied volatility, and Polymarket price inputs are still "
-    "manual placeholders. Correlations can now be estimated from Yahoo Finance historical prices."
+    "Prototype status: market cap and Polymarket price inputs are still manual placeholders. "
+    "Correlations can be estimated from Yahoo historical prices. IV can be manual or estimated "
+    "from Yahoo option-chain near-ATM implied vols."
 )
 
 st.info(
@@ -30,6 +32,11 @@ st.info(
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def load_adjusted_close(tickers: tuple[str, ...], period: str) -> pd.DataFrame:
     return fetch_adjusted_close(list(tickers), period=period)
+
+
+@st.cache_data(show_spinner=False, ttl=30 * 60)
+def load_yahoo_atm_ivs(tickers: tuple[str, ...], target_date_iso: str) -> pd.DataFrame:
+    return estimate_atm_ivs(list(tickers), date.fromisoformat(target_date_iso))
 
 
 def dollars_trillions(value: float) -> str:
@@ -53,6 +60,27 @@ def display_results(results: pd.DataFrame) -> pd.DataFrame:
         display[column] = display[column].map(lambda value: "" if value != value else f"{value:.2%}")
     display["Avg rank"] = display["Avg rank"].map(lambda value: f"{value:.2f}")
     return display[["Ticker", "Mkt cap", "IV", "Poly price", "Model prob", "Edge", "Avg rank", "Top 2", "Top 3"]]
+
+
+def display_iv_estimates(iv_estimates: pd.DataFrame) -> pd.DataFrame:
+    display = iv_estimates.copy().rename(
+        columns={
+            "ticker": "Ticker",
+            "yahoo_ticker": "Yahoo ticker",
+            "expiry": "Option expiry used",
+            "target_date": "Target date",
+            "spot": "Spot",
+            "atm_strike": "ATM strike",
+            "implied_volatility": "ATM IV",
+            "call_iv": "Call IV",
+            "put_iv": "Put IV",
+        }
+    )
+    for column in ["Spot", "ATM strike"]:
+        display[column] = display[column].map(lambda value: f"${value:,.2f}")
+    for column in ["ATM IV", "Call IV", "Put IV"]:
+        display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{value:.2%}")
+    return display[["Ticker", "Yahoo ticker", "Target date", "Option expiry used", "Spot", "ATM strike", "ATM IV", "Call IV", "Put IV"]]
 
 
 def market_cap_percentile_table(result) -> pd.DataFrame:
@@ -108,6 +136,8 @@ if "last_result" not in st.session_state:
     st.session_state.last_run = None
     st.session_state.last_corr_source = None
     st.session_state.last_price_info = None
+    st.session_state.last_iv_source = None
+    st.session_state.last_iv_estimates = None
 
 
 today = date.today()
@@ -122,6 +152,13 @@ with st.sidebar:
 
     simulations = st.number_input("Monte Carlo simulations", min_value=1_000, max_value=2_000_000, value=100_000, step=10_000)
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
+
+    st.header("IV source")
+    iv_source = st.selectbox(
+        "Implied volatility source",
+        ["Manual IV inputs", "Yahoo option-chain near-ATM IV"],
+        index=0,
+    )
 
     st.header("Correlation source")
     correlation_source = st.selectbox(
@@ -145,7 +182,7 @@ with inputs_tab:
         pd.DataFrame(
             [
                 {"Input": "Current market capitalization", "Current source": "Manual placeholder", "Future source": "Market data API or uploaded snapshot"},
-                {"Input": "Annualized implied volatility", "Current source": "Manual placeholder", "Future source": "Option chain / IV surface feed"},
+                {"Input": "Annualized implied volatility", "Current source": "Manual input or Yahoo option-chain near-ATM IV", "Future source": "Robust IV surface provider"},
                 {"Input": "Polymarket YES price", "Current source": "Manual placeholder", "Future source": "Polymarket market API or manual override"},
                 {"Input": "Correlation matrix", "Current source": "Yahoo Finance historical adjusted close prices or manual input", "Future source": "Configurable institutional data provider"},
                 {"Input": "Target date / maturity", "Current source": "User-selected date", "Future source": "Parsed from prediction-market event rules"},
@@ -156,6 +193,7 @@ with inputs_tab:
     )
 
     st.subheader("Company inputs")
+    st.write("Manual IV values are used only when **Manual IV inputs** is selected in the sidebar.")
     company_inputs = st.data_editor(
         st.session_state.company_inputs,
         num_rows="dynamic",
@@ -198,6 +236,15 @@ if run_button or st.session_state.last_result is None:
             clean_tickers = company_inputs["Ticker"].astype(str).str.strip().tolist()
             clean_tickers = [ticker for ticker in clean_tickers if ticker]
 
+            iv_estimates = None
+            simulation_inputs = company_inputs.copy()
+            if iv_source == "Yahoo option-chain near-ATM IV":
+                iv_estimates = load_yahoo_atm_ivs(tuple(clean_tickers), target_date.isoformat())
+                simulation_inputs = apply_iv_estimates(simulation_inputs, iv_estimates)
+                iv_source_label = "Yahoo Finance option-chain near-ATM IV; expiry closest to target date"
+            else:
+                iv_source_label = "Manual IV inputs"
+
             price_info = None
             if correlation_source == "Manual correlation matrix":
                 selected_correlation_matrix = manual_correlation_matrix
@@ -218,7 +265,7 @@ if run_button or st.session_state.last_result is None:
                     corr_source_label = f"Rolling historical correlation, {rolling_lookback} trading days, Yahoo Finance {price_history_period}"
 
             st.session_state.last_result = run_probability_engine(
-                company_inputs,
+                simulation_inputs,
                 selected_correlation_matrix,
                 days_to_target=int(days_to_target),
                 simulations=int(simulations),
@@ -227,6 +274,8 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_error = None
             st.session_state.last_corr_source = corr_source_label
             st.session_state.last_price_info = price_info
+            st.session_state.last_iv_source = iv_source_label
+            st.session_state.last_iv_estimates = iv_estimates
             st.session_state.last_run = {
                 "time": datetime.now().strftime("%H:%M:%S"),
                 "target_date": target_date.isoformat(),
@@ -241,6 +290,8 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_run = None
             st.session_state.last_corr_source = None
             st.session_state.last_price_info = None
+            st.session_state.last_iv_source = None
+            st.session_state.last_iv_estimates = None
 
 
 result = st.session_state.last_result
@@ -261,10 +312,15 @@ with results_tab:
             f" | seed {run.get('seed', seed)}"
             f" | last run {run.get('time', 'now')}"
         )
+        st.caption(f"IV source: {st.session_state.last_iv_source}")
         st.caption(f"Correlation source: {st.session_state.last_corr_source}")
         if st.session_state.last_price_info:
             info = st.session_state.last_price_info
             st.caption(f"Yahoo adjusted close sample: {info['rows']} daily rows from {info['start']} to {info['end']} ({info['period']}).")
+
+        if st.session_state.last_iv_estimates is not None:
+            with st.expander("Yahoo option-chain IV estimates used"):
+                st.dataframe(display_iv_estimates(st.session_state.last_iv_estimates), use_container_width=True, hide_index=True)
 
         for warning in result.warnings:
             st.warning(warning)
@@ -348,6 +404,11 @@ with methodology_tab:
         "The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company, ranks companies from largest to smallest, and stores the winner and full rank vector."
     )
 
+    st.subheader("IV source")
+    st.write(
+        "Manual IV remains available. The Yahoo option-chain mode fetches option chains with yfinance, selects the expiry closest to the target date, finds the strike nearest spot, and averages call/put implied volatility at that strike. This is a near-ATM IV estimate, not a full smile/surface calibration."
+    )
+
     st.subheader("Correlation estimation")
     st.write(
         "EWMA is the default method. The app downloads adjusted close prices from Yahoo Finance via yfinance, calculates daily log returns, demeans returns, estimates EWMA covariance, and converts covariance to correlation. Rolling correlation uses Pearson correlation of log returns over the selected trailing lookback window."
@@ -359,5 +420,5 @@ with methodology_tab:
 
     st.subheader("What is not modeled yet")
     st.write(
-        "Volatility skew/smile is not used in this Phase 1 prototype. Each company currently has one annualized implied volatility input. A later version should replace that flat IV with an option-surface calibration module."
+        "Volatility skew/smile is not fully modeled yet. Yahoo option-chain mode gives a first live near-ATM IV estimate, but future versions should ingest full option chains, clean bid/ask quotes, and calibrate a full IV surface or terminal risk-neutral distribution."
     )
