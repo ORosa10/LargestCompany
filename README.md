@@ -80,6 +80,18 @@ The results table focuses on statistical ranking analysis:
 - probability of finishing Top 2
 - probability of finishing Top 3
 
+The simulation diagnostics include terminal market-cap distribution statistics for every company:
+
+- mean
+- standard deviation
+- 1st percentile
+- 5th percentile
+- 25th percentile
+- 50th percentile / median
+- 75th percentile
+- 95th percentile
+- 99th percentile
+
 The dashboard also shows:
 
 - selected target date and time horizon
@@ -88,6 +100,7 @@ The dashboard also shows:
 - correlation assumption heatmap
 - rank distribution for selected ticker
 - simulated market capitalization distribution for selected ticker
+- box plot of simulated terminal market-cap distributions across all tickers
 - selected ticker simulation summary statistics
 
 ## Missing Research Modules
