@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pandas as pd
 import plotly.express as px
 import streamlit as st
 
@@ -11,7 +12,13 @@ from model import default_company_inputs, default_correlation_matrix, run_probab
 st.set_page_config(page_title="LargestCompany", layout="wide")
 
 st.title("LargestCompany")
-st.caption("Phase 1: option-implied probability engine for largest future market capitalization.")
+st.caption("Phase 1: statistical probability engine for largest future market capitalization.")
+
+st.warning(
+    "Prototype status: all market cap, implied volatility, Polymarket price, and correlation "
+    "inputs are manual placeholders until data connectors are added. Treat current values as "
+    "editable assumptions, not live market data."
+)
 
 st.info(
     "This app does not predict stock prices. It translates current market caps, implied "
@@ -20,39 +27,38 @@ st.info(
 )
 
 
-def display_results(results):
-    display = results.copy()
-    display = display.rename(
+def display_results(results: pd.DataFrame) -> pd.DataFrame:
+    display = results.copy().rename(
         columns={
             "Current market cap": "Mkt cap",
             "Implied volatility": "IV",
             "Polymarket YES price": "Poly price",
             "Model probability": "Model prob",
-            "Expected value": "EV",
             "Average rank": "Avg rank",
             "Probability Top 2": "Top 2",
             "Probability Top 3": "Top 3",
         }
     )
     display["Mkt cap"] = display["Mkt cap"].map(lambda value: f"${value / 1e12:,.2f}T")
-    for column in ["IV", "Poly price", "Model prob", "Edge", "EV", "ROI", "Top 2", "Top 3"]:
+    for column in ["IV", "Poly price", "Model prob", "Edge", "Top 2", "Top 3"]:
         display[column] = display[column].map(lambda value: "" if value != value else f"{value:.2%}")
     display["Avg rank"] = display["Avg rank"].map(lambda value: f"{value:.2f}")
-    return display[
+    return display[["Ticker", "Mkt cap", "IV", "Poly price", "Model prob", "Edge", "Avg rank", "Top 2", "Top 3"]]
+
+
+def selected_ticker_summary(result, ticker: str) -> pd.DataFrame:
+    caps = result.terminal_market_caps[ticker]
+    ranks = result.ranks[ticker]
+    return pd.DataFrame(
         [
-            "Ticker",
-            "Mkt cap",
-            "Poly price",
-            "Model prob",
-            "Edge",
-            "EV",
-            "ROI",
-            "Avg rank",
-            "Top 2",
-            "Top 3",
-            "IV",
+            {"Metric": "Simulated market cap mean", "Value": f"${caps.mean() / 1e12:,.2f}T"},
+            {"Metric": "Simulated market cap median", "Value": f"${caps.median() / 1e12:,.2f}T"},
+            {"Metric": "5th percentile market cap", "Value": f"${caps.quantile(0.05) / 1e12:,.2f}T"},
+            {"Metric": "95th percentile market cap", "Value": f"${caps.quantile(0.95) / 1e12:,.2f}T"},
+            {"Metric": "Average simulated rank", "Value": f"{ranks.mean():.2f}"},
+            {"Metric": "Median simulated rank", "Value": f"{ranks.median():.0f}"},
         ]
-    ]
+    )
 
 
 if "company_inputs" not in st.session_state:
@@ -87,14 +93,31 @@ with st.sidebar:
 
 
 results_tab, inputs_tab, diagnostics_tab, methodology_tab = st.tabs(
-    ["Results", "Inputs", "Diagnostics", "Methodology"]
+    ["Results", "Inputs & Data", "Simulation Diagnostics", "Methodology"]
 )
 
 
 with inputs_tab:
+    st.subheader("Data provenance")
+    st.write(
+        "Current version has no live data pipeline. The default rows are seed assumptions "
+        "inside `model.py`, and every value should be edited or replaced by the user."
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"Input": "Current market capitalization", "Current source": "Manual placeholder", "Future source": "Market data API or uploaded snapshot"},
+                {"Input": "Annualized implied volatility", "Current source": "Manual placeholder", "Future source": "Option chain / IV surface feed"},
+                {"Input": "Polymarket YES price", "Current source": "Manual placeholder", "Future source": "Polymarket market API"},
+                {"Input": "Correlation matrix", "Current source": "Manual assumption", "Future source": "Historical return correlation estimator"},
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
     st.subheader("Company inputs")
     st.write("Edit the assumptions below, then click **Run / refresh simulation** in the sidebar.")
-
     company_inputs = st.data_editor(
         st.session_state.company_inputs,
         num_rows="dynamic",
@@ -102,20 +125,9 @@ with inputs_tab:
         hide_index=True,
         column_config={
             "Ticker": st.column_config.TextColumn(required=True),
-            "Current market cap": st.column_config.NumberColumn(
-                min_value=1.0,
-                step=10_000_000_000.0,
-            ),
-            "Implied volatility": st.column_config.NumberColumn(
-                min_value=0.0001,
-                max_value=5.0,
-                step=0.01,
-            ),
-            "Polymarket YES price": st.column_config.NumberColumn(
-                min_value=0.0,
-                max_value=1.0,
-                step=0.01,
-            ),
+            "Current market cap": st.column_config.NumberColumn(min_value=1.0, step=10_000_000_000.0),
+            "Implied volatility": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01),
+            "Polymarket YES price": st.column_config.NumberColumn(min_value=0.0, max_value=1.0, step=0.01),
         },
     )
     st.session_state.company_inputs = company_inputs
@@ -131,7 +143,10 @@ with inputs_tab:
         current_corr = st.session_state.correlation_matrix
 
     st.subheader("Correlation matrix")
-    st.write("The matrix should be symmetric, have 1.0 on the diagonal, and values between -1 and 1.")
+    st.write(
+        "This matrix is currently an assumption, not a historical estimate. It should be symmetric, "
+        "have 1.0 on the diagonal, and values between -1 and 1."
+    )
     correlation_matrix = st.data_editor(
         current_corr,
         use_container_width=True,
@@ -191,30 +206,21 @@ with results_tab:
 
         probability_sum = result.results["Model probability"].sum()
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric(
-            "Most undervalued",
-            result.most_undervalued["Ticker"],
-            f'{result.most_undervalued["Edge"]:.2%} edge',
-        )
-        c2.metric(
-            "Most overvalued",
-            result.most_overvalued["Ticker"],
-            f'{result.most_overvalued["Edge"]:.2%} edge',
-        )
-        c3.metric("Probability check", f"{probability_sum:.2%}")
-        c4.metric("Companies", f"{len(result.results)}")
+        c1.metric("Highest model probability", result.results.sort_values("Model probability", ascending=False).iloc[0]["Ticker"])
+        c2.metric("Largest positive edge", result.most_undervalued["Ticker"], f'{result.most_undervalued["Edge"]:.2%}')
+        c3.metric("Largest negative edge", result.most_overvalued["Ticker"], f'{result.most_overvalued["Edge"]:.2%}')
+        c4.metric("Probability check", f"{probability_sum:.2%}")
 
-        st.subheader("Ranking probabilities")
+        st.subheader("Statistical ranking probabilities")
         st.dataframe(display_results(result.results), use_container_width=True, hide_index=True)
 
         st.subheader("Interpretation")
         best = result.most_undervalued
         worst = result.most_overvalued
         st.write(
-            f"Under the current inputs, **{best['Ticker']}** has the largest positive gap "
-            f"between model probability and Polymarket price. **{worst['Ticker']}** has the "
-            "largest negative gap. Treat this as a relative-value signal under the stated "
-            "volatility and correlation assumptions, not as a price forecast."
+            f"Under the current assumptions, **{best['Ticker']}** has the largest positive "
+            f"model-vs-Polymarket gap. **{worst['Ticker']}** has the largest negative gap. "
+            "This is a statistical relative-value comparison under the supplied inputs."
         )
 
 with diagnostics_tab:
@@ -225,8 +231,10 @@ with diagnostics_tab:
         if selected_ticker not in available_tickers:
             selected_ticker = available_tickers[0]
 
-        chart_left, chart_right = st.columns(2)
+        st.subheader(f"Simulation detail: {selected_ticker}")
+        st.dataframe(selected_ticker_summary(result, selected_ticker), use_container_width=True, hide_index=True)
 
+        chart_left, chart_right = st.columns(2)
         with chart_left:
             probability_chart = px.scatter(
                 result.results,
@@ -237,14 +245,7 @@ with diagnostics_tab:
                 range_x=[0, max(0.01, result.results["Polymarket YES price"].max() * 1.15)],
                 range_y=[0, max(0.01, result.results["Model probability"].max() * 1.15)],
             )
-            probability_chart.add_shape(
-                type="line",
-                x0=0,
-                y0=0,
-                x1=1,
-                y1=1,
-                line={"dash": "dash", "color": "gray"},
-            )
+            probability_chart.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line={"dash": "dash", "color": "gray"})
             probability_chart.update_traces(textposition="top center")
             st.plotly_chart(probability_chart, use_container_width=True)
 
@@ -253,33 +254,27 @@ with diagnostics_tab:
                 result.results.sort_values("Edge"),
                 x="Ticker",
                 y="Edge",
-                title="Edge by Ticker",
+                title="Model Probability minus Polymarket Price",
                 color="Edge",
                 color_continuous_scale="RdYlGn",
             )
             st.plotly_chart(edge_chart, use_container_width=True)
 
         heatmap_left, dist_right = st.columns(2)
-
         with heatmap_left:
             corr_chart = px.imshow(
                 result.cleaned_correlation,
                 zmin=-1,
                 zmax=1,
                 color_continuous_scale="RdBu",
-                title="Correlation Matrix",
+                title="Correlation Assumption Matrix",
                 text_auto=".2f",
             )
             st.plotly_chart(corr_chart, use_container_width=True)
 
         with dist_right:
             rank_data = result.rank_distribution[result.rank_distribution["Ticker"] == selected_ticker]
-            rank_chart = px.bar(
-                rank_data,
-                x="Rank",
-                y="Probability",
-                title=f"Rank Distribution: {selected_ticker}",
-            )
+            rank_chart = px.bar(rank_data, x="Rank", y="Probability", title=f"Rank Distribution: {selected_ticker}")
             st.plotly_chart(rank_chart, use_container_width=True)
 
         cap_chart = px.histogram(
@@ -292,15 +287,22 @@ with diagnostics_tab:
         st.plotly_chart(cap_chart, use_container_width=True)
 
 with methodology_tab:
-    st.subheader("Model")
+    st.subheader("Phase 1 model")
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
     st.write(
-        "For each simulation path, the app simulates one future market capitalization per "
-        "company, ranks companies from largest to smallest, and stores the winner and ranks. "
-        "The reported probabilities are frequencies across Monte Carlo paths."
+        "For each simulation path, the app simulates one future market capitalization per company, "
+        "ranks companies from largest to smallest, and stores the winner and full rank vector. "
+        "The reported probabilities are Monte Carlo frequencies."
+    )
+
+    st.subheader("What is not modeled yet")
+    st.write(
+        "Volatility skew/smile is not used in this Phase 1 prototype. Each company currently has "
+        "one annualized implied volatility input. A later version should replace that flat IV with "
+        "an option-surface calibration module."
     )
     st.write(
-        "Current market capitalization and implied volatility are treated as inputs. "
-        "Correlations are model assumptions. The Cholesky decomposition transforms independent "
-        "normal shocks into correlated normal shocks."
+        "Historical correlations are not computed yet. The current correlation matrix is a user-supplied "
+        "model assumption. A later version should estimate correlations from historical log returns over "
+        "an explicit lookback window and allow stress scenarios."
     )
