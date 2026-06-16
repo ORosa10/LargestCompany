@@ -27,6 +27,10 @@ st.info(
 )
 
 
+def dollars_trillions(value: float) -> str:
+    return f"${value / 1e12:,.2f}T"
+
+
 def display_results(results: pd.DataFrame) -> pd.DataFrame:
     display = results.copy().rename(
         columns={
@@ -39,11 +43,47 @@ def display_results(results: pd.DataFrame) -> pd.DataFrame:
             "Probability Top 3": "Top 3",
         }
     )
-    display["Mkt cap"] = display["Mkt cap"].map(lambda value: f"${value / 1e12:,.2f}T")
+    display["Mkt cap"] = display["Mkt cap"].map(dollars_trillions)
     for column in ["IV", "Poly price", "Model prob", "Edge", "Top 2", "Top 3"]:
         display[column] = display[column].map(lambda value: "" if value != value else f"{value:.2%}")
     display["Avg rank"] = display["Avg rank"].map(lambda value: f"{value:.2f}")
     return display[["Ticker", "Mkt cap", "IV", "Poly price", "Model prob", "Edge", "Avg rank", "Top 2", "Top 3"]]
+
+
+def market_cap_percentile_table(result) -> pd.DataFrame:
+    rows = []
+    percentiles = {
+        "P1": 0.01,
+        "P5": 0.05,
+        "P25": 0.25,
+        "P50": 0.50,
+        "P75": 0.75,
+        "P95": 0.95,
+        "P99": 0.99,
+    }
+    for ticker in result.terminal_market_caps.columns:
+        caps = result.terminal_market_caps[ticker]
+        row = {
+            "Ticker": ticker,
+            "Mean": caps.mean(),
+            "Std dev": caps.std(),
+        }
+        for label, quantile in percentiles.items():
+            row[label] = caps.quantile(quantile)
+        rows.append(row)
+
+    table = pd.DataFrame(rows)
+    rank_lookup = result.results.set_index("Ticker")["Average rank"]
+    table["Average rank"] = table["Ticker"].map(rank_lookup)
+    return table.sort_values("P50", ascending=False, ignore_index=True)
+
+
+def display_market_cap_percentiles(percentiles: pd.DataFrame) -> pd.DataFrame:
+    display = percentiles.copy()
+    for column in ["Mean", "Std dev", "P1", "P5", "P25", "P50", "P75", "P95", "P99"]:
+        display[column] = display[column].map(dollars_trillions)
+    display["Average rank"] = display["Average rank"].map(lambda value: f"{value:.2f}")
+    return display
 
 
 def selected_ticker_summary(result, ticker: str) -> pd.DataFrame:
@@ -51,10 +91,12 @@ def selected_ticker_summary(result, ticker: str) -> pd.DataFrame:
     ranks = result.ranks[ticker]
     return pd.DataFrame(
         [
-            {"Metric": "Simulated market cap mean", "Value": f"${caps.mean() / 1e12:,.2f}T"},
-            {"Metric": "Simulated market cap median", "Value": f"${caps.median() / 1e12:,.2f}T"},
-            {"Metric": "5th percentile market cap", "Value": f"${caps.quantile(0.05) / 1e12:,.2f}T"},
-            {"Metric": "95th percentile market cap", "Value": f"${caps.quantile(0.95) / 1e12:,.2f}T"},
+            {"Metric": "Simulated market cap mean", "Value": dollars_trillions(caps.mean())},
+            {"Metric": "Simulated market cap median", "Value": dollars_trillions(caps.median())},
+            {"Metric": "1st percentile market cap", "Value": dollars_trillions(caps.quantile(0.01))},
+            {"Metric": "5th percentile market cap", "Value": dollars_trillions(caps.quantile(0.05))},
+            {"Metric": "95th percentile market cap", "Value": dollars_trillions(caps.quantile(0.95))},
+            {"Metric": "99th percentile market cap", "Value": dollars_trillions(caps.quantile(0.99))},
             {"Metric": "Average simulated rank", "Value": f"{ranks.mean():.2f}"},
             {"Metric": "Median simulated rank", "Value": f"{ranks.median():.0f}"},
         ]
@@ -248,8 +290,27 @@ with diagnostics_tab:
         if selected_ticker not in available_tickers:
             selected_ticker = available_tickers[0]
 
+        percentiles = market_cap_percentile_table(result)
+        st.subheader("Terminal market-cap distribution percentiles")
+        st.write(
+            "Each row summarizes the simulated terminal market-cap distribution for one company. "
+            "P1 means the 1st percentile, P50 is the median, and P99 is the 99th percentile."
+        )
+        st.dataframe(display_market_cap_percentiles(percentiles), use_container_width=True, hide_index=True)
+
         st.subheader(f"Simulation detail: {selected_ticker}")
         st.dataframe(selected_ticker_summary(result, selected_ticker), use_container_width=True, hide_index=True)
+
+        cap_long = result.terminal_market_caps.melt(var_name="Ticker", value_name="Simulated market cap")
+        cap_long["Simulated market cap ($T)"] = cap_long["Simulated market cap"] / 1e12
+        box_chart = px.box(
+            cap_long,
+            x="Ticker",
+            y="Simulated market cap ($T)",
+            points=False,
+            title="Simulated Terminal Market-Cap Distributions by Ticker",
+        )
+        st.plotly_chart(box_chart, use_container_width=True)
 
         chart_left, chart_right = st.columns(2)
         with chart_left:
@@ -311,6 +372,13 @@ with methodology_tab:
         "simulation path, the app simulates one future market capitalization per company, ranks "
         "companies from largest to smallest, and stores the winner and full rank vector. The "
         "reported probabilities are Monte Carlo frequencies."
+    )
+
+    st.subheader("Distribution statistics")
+    st.write(
+        "The diagnostics tab reports terminal market-cap percentiles for every company: P1, P5, "
+        "P25, P50, P75, P95, and P99. These describe the simulated distribution of future market "
+        "capitalization, not a point forecast."
     )
 
     st.subheader("What is not modeled yet")
