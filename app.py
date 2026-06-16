@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from correlations import ewma_correlation, fetch_adjusted_close, rolling_correlation
 from model import default_company_inputs, default_correlation_matrix, run_probability_engine
 
 
@@ -15,9 +16,8 @@ st.title("LargestCompany")
 st.caption("Phase 1: statistical probability engine for largest future market capitalization.")
 
 st.warning(
-    "Prototype status: all market cap, implied volatility, Polymarket price, and correlation "
-    "inputs are manual placeholders until data connectors are added. Treat current values as "
-    "editable assumptions, not live market data."
+    "Prototype status: market cap, implied volatility, and Polymarket price inputs are still "
+    "manual placeholders. Correlations can now be estimated from Yahoo Finance historical prices."
 )
 
 st.info(
@@ -25,6 +25,11 @@ st.info(
     "volatility, target-date horizon, and correlation assumptions into fair ranking probabilities, "
     "then compares them with Polymarket YES prices."
 )
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)
+def load_adjusted_close(tickers: tuple[str, ...], period: str) -> pd.DataFrame:
+    return fetch_adjusted_close(list(tickers), period=period)
 
 
 def dollars_trillions(value: float) -> str:
@@ -52,26 +57,13 @@ def display_results(results: pd.DataFrame) -> pd.DataFrame:
 
 def market_cap_percentile_table(result) -> pd.DataFrame:
     rows = []
-    percentiles = {
-        "P1": 0.01,
-        "P5": 0.05,
-        "P25": 0.25,
-        "P50": 0.50,
-        "P75": 0.75,
-        "P95": 0.95,
-        "P99": 0.99,
-    }
+    percentiles = {"P1": 0.01, "P5": 0.05, "P25": 0.25, "P50": 0.50, "P75": 0.75, "P95": 0.95, "P99": 0.99}
     for ticker in result.terminal_market_caps.columns:
         caps = result.terminal_market_caps[ticker]
-        row = {
-            "Ticker": ticker,
-            "Mean": caps.mean(),
-            "Std dev": caps.std(),
-        }
+        row = {"Ticker": ticker, "Mean": caps.mean(), "Std dev": caps.std()}
         for label, quantile in percentiles.items():
             row[label] = caps.quantile(quantile)
         rows.append(row)
-
     table = pd.DataFrame(rows)
     rank_lookup = result.results.set_index("Ticker")["Average rank"]
     table["Average rank"] = table["Ticker"].map(rank_lookup)
@@ -114,6 +106,8 @@ if "last_result" not in st.session_state:
     st.session_state.last_result = None
     st.session_state.last_error = None
     st.session_state.last_run = None
+    st.session_state.last_corr_source = None
+    st.session_state.last_price_info = None
 
 
 today = date.today()
@@ -121,48 +115,39 @@ default_target_date = today + timedelta(days=365)
 
 with st.sidebar:
     st.header("Simulation controls")
-    target_date = st.date_input(
-        "Target date / maturity",
-        value=default_target_date,
-        min_value=today + timedelta(days=1),
-    )
+    target_date = st.date_input("Target date / maturity", value=default_target_date, min_value=today + timedelta(days=1))
     days_to_target = max((target_date - today).days, 1)
     horizon_years = days_to_target / 365.0
     st.caption(f"Horizon: {days_to_target} days ({horizon_years:.2f} years)")
 
-    simulations = st.number_input(
-        "Monte Carlo simulations",
-        min_value=1_000,
-        max_value=2_000_000,
-        value=100_000,
-        step=10_000,
-    )
+    simulations = st.number_input("Monte Carlo simulations", min_value=1_000, max_value=2_000_000, value=100_000, step=10_000)
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
-    selected_ticker = st.selectbox(
-        "Selected ticker for diagnostics",
-        st.session_state.company_inputs["Ticker"].astype(str).tolist(),
+
+    st.header("Correlation source")
+    correlation_source = st.selectbox(
+        "Correlation method",
+        ["EWMA historical correlation", "Rolling historical correlation", "Manual correlation matrix"],
+        index=0,
     )
+    price_history_period = st.selectbox("Yahoo Finance price history", ["2y", "5y", "10y"], index=1)
+    ewma_lambda = st.selectbox("EWMA lambda", [0.94, 0.97], index=1)
+    rolling_lookback = st.selectbox("Rolling lookback days", [63, 126, 252, 504, 756], index=2)
+
+    selected_ticker = st.selectbox("Selected ticker for diagnostics", st.session_state.company_inputs["Ticker"].astype(str).tolist())
     run_button = st.button("Run / refresh simulation", type="primary", use_container_width=True)
 
 
-results_tab, inputs_tab, diagnostics_tab, methodology_tab = st.tabs(
-    ["Results", "Inputs & Data", "Simulation Diagnostics", "Methodology"]
-)
-
+results_tab, inputs_tab, diagnostics_tab, methodology_tab = st.tabs(["Results", "Inputs & Data", "Simulation Diagnostics", "Methodology"])
 
 with inputs_tab:
     st.subheader("Data provenance")
-    st.write(
-        "Current version has no live data pipeline. The default rows are seed assumptions "
-        "inside `model.py`, and every value should be edited or replaced by the user."
-    )
     st.dataframe(
         pd.DataFrame(
             [
                 {"Input": "Current market capitalization", "Current source": "Manual placeholder", "Future source": "Market data API or uploaded snapshot"},
                 {"Input": "Annualized implied volatility", "Current source": "Manual placeholder", "Future source": "Option chain / IV surface feed"},
-                {"Input": "Polymarket YES price", "Current source": "Manual placeholder", "Future source": "Polymarket market API"},
-                {"Input": "Correlation matrix", "Current source": "Manual assumption", "Future source": "Historical return correlation estimator"},
+                {"Input": "Polymarket YES price", "Current source": "Manual placeholder", "Future source": "Polymarket market API or manual override"},
+                {"Input": "Correlation matrix", "Current source": "Yahoo Finance historical adjusted close prices or manual input", "Future source": "Configurable institutional data provider"},
                 {"Input": "Target date / maturity", "Current source": "User-selected date", "Future source": "Parsed from prediction-market event rules"},
             ]
         ),
@@ -171,7 +156,6 @@ with inputs_tab:
     )
 
     st.subheader("Company inputs")
-    st.write("Edit the assumptions below, then click **Run / refresh simulation** in the sidebar.")
     company_inputs = st.data_editor(
         st.session_state.company_inputs,
         num_rows="dynamic",
@@ -188,7 +172,6 @@ with inputs_tab:
 
     tickers = company_inputs["Ticker"].astype(str).str.strip().tolist()
     tickers = [ticker for ticker in tickers if ticker]
-
     if tickers:
         current_corr = st.session_state.correlation_matrix.reindex(index=tickers, columns=tickers)
         fallback_corr = default_correlation_matrix(tickers)
@@ -196,36 +179,54 @@ with inputs_tab:
     else:
         current_corr = st.session_state.correlation_matrix
 
-    st.subheader("Correlation matrix")
-    st.write(
-        "This matrix is currently an assumption, not a historical estimate. It should be symmetric, "
-        "have 1.0 on the diagonal, and values between -1 and 1."
-    )
+    st.subheader("Manual correlation matrix")
+    st.write("Used only when **Manual correlation matrix** is selected in the sidebar.")
     correlation_matrix = st.data_editor(
         current_corr,
         use_container_width=True,
-        column_config={
-            ticker: st.column_config.NumberColumn(min_value=-1.0, max_value=1.0, step=0.05)
-            for ticker in tickers
-        },
+        column_config={ticker: st.column_config.NumberColumn(min_value=-1.0, max_value=1.0, step=0.05) for ticker in tickers},
     )
     st.session_state.correlation_matrix = correlation_matrix
 
 
 company_inputs = st.session_state.company_inputs
-correlation_matrix = st.session_state.correlation_matrix
+manual_correlation_matrix = st.session_state.correlation_matrix
 
 if run_button or st.session_state.last_result is None:
     with st.spinner("Running Monte Carlo simulation..."):
         try:
+            clean_tickers = company_inputs["Ticker"].astype(str).str.strip().tolist()
+            clean_tickers = [ticker for ticker in clean_tickers if ticker]
+
+            price_info = None
+            if correlation_source == "Manual correlation matrix":
+                selected_correlation_matrix = manual_correlation_matrix
+                corr_source_label = "Manual correlation matrix"
+            else:
+                prices = load_adjusted_close(tuple(clean_tickers), price_history_period)
+                price_info = {
+                    "rows": len(prices),
+                    "start": prices.index.min().date().isoformat(),
+                    "end": prices.index.max().date().isoformat(),
+                    "period": price_history_period,
+                }
+                if correlation_source == "EWMA historical correlation":
+                    selected_correlation_matrix = ewma_correlation(prices, float(ewma_lambda))
+                    corr_source_label = f"EWMA historical correlation, lambda={ewma_lambda}, Yahoo Finance {price_history_period}"
+                else:
+                    selected_correlation_matrix = rolling_correlation(prices, int(rolling_lookback))
+                    corr_source_label = f"Rolling historical correlation, {rolling_lookback} trading days, Yahoo Finance {price_history_period}"
+
             st.session_state.last_result = run_probability_engine(
                 company_inputs,
-                correlation_matrix,
+                selected_correlation_matrix,
                 days_to_target=int(days_to_target),
                 simulations=int(simulations),
                 seed=int(seed),
             )
             st.session_state.last_error = None
+            st.session_state.last_corr_source = corr_source_label
+            st.session_state.last_price_info = price_info
             st.session_state.last_run = {
                 "time": datetime.now().strftime("%H:%M:%S"),
                 "target_date": target_date.isoformat(),
@@ -238,6 +239,8 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_result = None
             st.session_state.last_error = str(exc)
             st.session_state.last_run = None
+            st.session_state.last_corr_source = None
+            st.session_state.last_price_info = None
 
 
 result = st.session_state.last_result
@@ -258,6 +261,10 @@ with results_tab:
             f" | seed {run.get('seed', seed)}"
             f" | last run {run.get('time', 'now')}"
         )
+        st.caption(f"Correlation source: {st.session_state.last_corr_source}")
+        if st.session_state.last_price_info:
+            info = st.session_state.last_price_info
+            st.caption(f"Yahoo adjusted close sample: {info['rows']} daily rows from {info['start']} to {info['end']} ({info['period']}).")
 
         for warning in result.warnings:
             st.warning(warning)
@@ -272,14 +279,13 @@ with results_tab:
         st.subheader("Statistical ranking probabilities")
         st.dataframe(display_results(result.results), use_container_width=True, hide_index=True)
 
-        st.subheader("Interpretation")
         best = result.most_undervalued
         worst = result.most_overvalued
+        st.subheader("Interpretation")
         st.write(
             f"Under the current assumptions and target date **{run.get('target_date', target_date.isoformat())}**, "
             f"**{best['Ticker']}** has the largest positive model-vs-Polymarket gap. "
-            f"**{worst['Ticker']}** has the largest negative gap. This is a statistical "
-            "relative-value comparison under the supplied inputs."
+            f"**{worst['Ticker']}** has the largest negative gap. This is a statistical relative-value comparison under the supplied inputs."
         )
 
 with diagnostics_tab:
@@ -292,10 +298,6 @@ with diagnostics_tab:
 
         percentiles = market_cap_percentile_table(result)
         st.subheader("Terminal market-cap distribution percentiles")
-        st.write(
-            "Each row summarizes the simulated terminal market-cap distribution for one company. "
-            "P1 means the 1st percentile, P50 is the median, and P99 is the 99th percentile."
-        )
         st.dataframe(display_market_cap_percentiles(percentiles), use_container_width=True, hide_index=True)
 
         st.subheader(f"Simulation detail: {selected_ticker}")
@@ -303,13 +305,7 @@ with diagnostics_tab:
 
         cap_long = result.terminal_market_caps.melt(var_name="Ticker", value_name="Simulated market cap")
         cap_long["Simulated market cap ($T)"] = cap_long["Simulated market cap"] / 1e12
-        box_chart = px.box(
-            cap_long,
-            x="Ticker",
-            y="Simulated market cap ($T)",
-            points=False,
-            title="Simulated Terminal Market-Cap Distributions by Ticker",
-        )
+        box_chart = px.box(cap_long, x="Ticker", y="Simulated market cap ($T)", points=False, title="Simulated Terminal Market-Cap Distributions by Ticker")
         st.plotly_chart(box_chart, use_container_width=True)
 
         chart_left, chart_right = st.columns(2)
@@ -328,26 +324,12 @@ with diagnostics_tab:
             st.plotly_chart(probability_chart, use_container_width=True)
 
         with chart_right:
-            edge_chart = px.bar(
-                result.results.sort_values("Edge"),
-                x="Ticker",
-                y="Edge",
-                title="Model Probability minus Polymarket Price",
-                color="Edge",
-                color_continuous_scale="RdYlGn",
-            )
+            edge_chart = px.bar(result.results.sort_values("Edge"), x="Ticker", y="Edge", title="Model Probability minus Polymarket Price", color="Edge", color_continuous_scale="RdYlGn")
             st.plotly_chart(edge_chart, use_container_width=True)
 
         heatmap_left, dist_right = st.columns(2)
         with heatmap_left:
-            corr_chart = px.imshow(
-                result.cleaned_correlation,
-                zmin=-1,
-                zmax=1,
-                color_continuous_scale="RdBu",
-                title="Correlation Assumption Matrix",
-                text_auto=".2f",
-            )
+            corr_chart = px.imshow(result.cleaned_correlation, zmin=-1, zmax=1, color_continuous_scale="RdBu", title="Selected Correlation Matrix", text_auto=".2f")
             st.plotly_chart(corr_chart, use_container_width=True)
 
         with dist_right:
@@ -355,12 +337,7 @@ with diagnostics_tab:
             rank_chart = px.bar(rank_data, x="Rank", y="Probability", title=f"Rank Distribution: {selected_ticker}")
             st.plotly_chart(rank_chart, use_container_width=True)
 
-        cap_chart = px.histogram(
-            result.terminal_market_caps,
-            x=selected_ticker,
-            nbins=80,
-            title=f"Simulated Market Capitalization Distribution: {selected_ticker}",
-        )
+        cap_chart = px.histogram(result.terminal_market_caps, x=selected_ticker, nbins=80, title=f"Simulated Market Capitalization Distribution: {selected_ticker}")
         cap_chart.update_layout(xaxis_title="Simulated market capitalization")
         st.plotly_chart(cap_chart, use_container_width=True)
 
@@ -368,27 +345,19 @@ with methodology_tab:
     st.subheader("Phase 1 model")
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
     st.write(
-        "The target date determines the time horizon `T = days_to_target / 365`. For each "
-        "simulation path, the app simulates one future market capitalization per company, ranks "
-        "companies from largest to smallest, and stores the winner and full rank vector. The "
-        "reported probabilities are Monte Carlo frequencies."
+        "The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company, ranks companies from largest to smallest, and stores the winner and full rank vector."
     )
 
-    st.subheader("Distribution statistics")
+    st.subheader("Correlation estimation")
     st.write(
-        "The diagnostics tab reports terminal market-cap percentiles for every company: P1, P5, "
-        "P25, P50, P75, P95, and P99. These describe the simulated distribution of future market "
-        "capitalization, not a point forecast."
+        "EWMA is the default method. The app downloads adjusted close prices from Yahoo Finance via yfinance, calculates daily log returns, demeans returns, estimates EWMA covariance, and converts covariance to correlation. Rolling correlation uses Pearson correlation of log returns over the selected trailing lookback window."
     )
+    st.code("r_t = log(P_t / P_{t-1})\nCov_t = lambda * Cov_{t-1} + (1 - lambda) * r_t r_t'\nCorr_ij = Cov_ij / sqrt(Cov_ii * Cov_jj)")
+
+    st.subheader("Distribution statistics")
+    st.write("The diagnostics tab reports terminal market-cap percentiles for every company: P1, P5, P25, P50, P75, P95, and P99.")
 
     st.subheader("What is not modeled yet")
     st.write(
-        "Volatility skew/smile is not used in this Phase 1 prototype. Each company currently has "
-        "one annualized implied volatility input. A later version should replace that flat IV with "
-        "an option-surface calibration module."
-    )
-    st.write(
-        "Historical correlations are not computed yet. The current correlation matrix is a user-supplied "
-        "model assumption. A later version should estimate correlations from historical log returns over "
-        "an explicit lookback window and allow stress scenarios."
+        "Volatility skew/smile is not used in this Phase 1 prototype. Each company currently has one annualized implied volatility input. A later version should replace that flat IV with an option-surface calibration module."
     )
