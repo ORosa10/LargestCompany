@@ -6,12 +6,28 @@ This is an experimental quantitative research app for estimating fair probabilit
 
 The goal is not to predict stock prices and not to outperform the option market. The goal is to translate current market capitalization, option-implied volatility, and correlation assumptions into ranking probabilities, then compare those probabilities with Polymarket YES prices.
 
+## Prototype Status
+
+The current version is a manual-input prototype.
+
+Current data sources:
+
+- Current market capitalization: manual placeholder input
+- Annualized implied volatility: manual placeholder input
+- Polymarket YES price: manual placeholder input
+- Correlation matrix: manual model assumption
+
+These are not live market data yet. The next important product step is to replace manual placeholders with explicit data pipelines or uploaded snapshots.
+
 ## Phase 1 Scope
 
 This phase only builds the probability engine.
 
 It does not include:
 
+- live market data ingestion
+- volatility skew or smile calibration
+- historical correlation estimation
 - hedging logic
 - option payoff heatmaps
 - portfolio optimization
@@ -48,27 +64,32 @@ The correlation matrix is validated, symmetrized if needed, and passed through C
 
 ## Outputs
 
-The results table includes:
+The results table focuses on statistical ranking analysis:
 
 - ticker
 - current market cap
 - implied volatility
 - Polymarket YES price
-- model probability
-- edge
-- expected value
-- ROI
-- average rank
-- probability Top 2
-- probability Top 3
+- model probability of finishing #1
+- model probability minus Polymarket price
+- average simulated rank
+- probability of finishing Top 2
+- probability of finishing Top 3
 
 The dashboard also shows:
 
 - model probability vs Polymarket probability
 - edge by ticker
-- correlation matrix heatmap
+- correlation assumption heatmap
 - rank distribution for selected ticker
 - simulated market capitalization distribution for selected ticker
+- selected ticker simulation summary statistics
+
+## Missing Research Modules
+
+Volatility skew/smile is not modeled yet. The current engine uses one flat annualized implied volatility per company. A future module should calibrate terminal distributions from option chains or IV surfaces.
+
+Historical correlations are not computed yet. The current matrix is a user-supplied assumption. A future module should estimate correlations from historical log returns over a visible lookback window and allow stress scenarios.
 
 ## Run
 
