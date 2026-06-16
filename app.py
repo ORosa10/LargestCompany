@@ -8,6 +8,7 @@ import streamlit as st
 
 from correlations import ewma_correlation, fetch_adjusted_close, rolling_correlation
 from iv_surfaces import apply_iv_estimates, estimate_atm_ivs
+from market_data import apply_market_caps, fetch_market_caps
 from model import default_company_inputs, default_correlation_matrix, run_probability_engine
 
 
@@ -17,9 +18,8 @@ st.title("LargestCompany")
 st.caption("Phase 1: statistical probability engine for largest future market capitalization.")
 
 st.warning(
-    "Prototype status: market cap and Polymarket price inputs are still manual placeholders. "
-    "Correlations can be estimated from Yahoo historical prices. IV can be manual or estimated "
-    "from Yahoo option-chain near-ATM implied vols."
+    "Prototype status: Polymarket price inputs are still manual placeholders. Market caps, "
+    "correlations, and near-ATM IV can be sourced from Yahoo Finance."
 )
 
 st.info(
@@ -39,8 +39,21 @@ def load_yahoo_atm_ivs(tickers: tuple[str, ...], target_date_iso: str) -> pd.Dat
     return estimate_atm_ivs(list(tickers), date.fromisoformat(target_date_iso))
 
 
+@st.cache_data(show_spinner=False, ttl=15 * 60)
+def load_yahoo_market_caps(tickers: tuple[str, ...]) -> pd.DataFrame:
+    return fetch_market_caps(list(tickers))
+
+
 def dollars_trillions(value: float) -> str:
     return f"${value / 1e12:,.2f}T"
+
+
+def display_market_caps(market_caps: pd.DataFrame) -> pd.DataFrame:
+    display = market_caps.copy().rename(
+        columns={"ticker": "Ticker", "yahoo_ticker": "Yahoo ticker", "market_cap": "Market cap", "source": "Source"}
+    )
+    display["Market cap"] = display["Market cap"].map(dollars_trillions)
+    return display[["Ticker", "Yahoo ticker", "Market cap", "Source"]]
 
 
 def display_results(results: pd.DataFrame) -> pd.DataFrame:
@@ -167,6 +180,8 @@ if "last_result" not in st.session_state:
     st.session_state.last_price_info = None
     st.session_state.last_iv_source = None
     st.session_state.last_iv_estimates = None
+    st.session_state.last_market_cap_source = None
+    st.session_state.last_market_caps = None
 
 
 today = date.today()
@@ -181,6 +196,9 @@ with st.sidebar:
 
     simulations = st.number_input("Monte Carlo simulations", min_value=1_000, max_value=2_000_000, value=100_000, step=10_000)
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
+
+    st.header("Market cap source")
+    market_cap_source = st.selectbox("Current market capitalization source", ["Yahoo Finance current market cap", "Manual market cap inputs"], index=0)
 
     st.header("IV source")
     iv_source = st.selectbox("Implied volatility source", ["Manual IV inputs", "Yahoo option-chain near-ATM IV"], index=0)
@@ -202,7 +220,7 @@ with inputs_tab:
     st.dataframe(
         pd.DataFrame(
             [
-                {"Input": "Current market capitalization", "Current source": "Manual placeholder", "Future source": "Market data API or uploaded snapshot"},
+                {"Input": "Current market capitalization", "Current source": "Yahoo Finance current market cap or manual input", "Future source": "Configurable market data provider"},
                 {"Input": "Annualized implied volatility", "Current source": "Manual input or Yahoo option-chain near-ATM IV", "Future source": "Robust IV surface provider"},
                 {"Input": "Polymarket YES price", "Current source": "Manual placeholder", "Future source": "Polymarket market API or manual override"},
                 {"Input": "Correlation matrix", "Current source": "Yahoo Finance historical adjusted close prices or manual input", "Future source": "Configurable institutional data provider"},
@@ -214,7 +232,7 @@ with inputs_tab:
     )
 
     st.subheader("Company inputs")
-    st.write("Edit tickers here to change the company universe. Manual IV values are used only when **Manual IV inputs** is selected in the sidebar.")
+    st.write("Edit tickers here to change the company universe. Manual market cap / IV values are used only when manual sources are selected in the sidebar.")
     company_inputs = st.data_editor(
         st.session_state.company_inputs,
         num_rows="dynamic",
@@ -257,8 +275,16 @@ if run_button or st.session_state.last_result is None:
             clean_tickers = company_inputs["Ticker"].astype(str).str.strip().tolist()
             clean_tickers = [ticker for ticker in clean_tickers if ticker]
 
-            iv_estimates = None
             simulation_inputs = company_inputs.copy()
+            market_caps = None
+            if market_cap_source == "Yahoo Finance current market cap":
+                market_caps = load_yahoo_market_caps(tuple(clean_tickers))
+                simulation_inputs = apply_market_caps(simulation_inputs, market_caps)
+                market_cap_source_label = "Yahoo Finance current market cap"
+            else:
+                market_cap_source_label = "Manual market cap inputs"
+
+            iv_estimates = None
             if iv_source == "Yahoo option-chain near-ATM IV":
                 iv_estimates = load_yahoo_atm_ivs(tuple(clean_tickers), target_date.isoformat())
                 simulation_inputs = apply_iv_estimates(simulation_inputs, iv_estimates)
@@ -286,6 +312,8 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_price_info = price_info
             st.session_state.last_iv_source = iv_source_label
             st.session_state.last_iv_estimates = iv_estimates
+            st.session_state.last_market_cap_source = market_cap_source_label
+            st.session_state.last_market_caps = market_caps
             st.session_state.last_run = {"time": datetime.now().strftime("%H:%M:%S"), "target_date": target_date.isoformat(), "days_to_target": int(days_to_target), "horizon_years": horizon_years, "simulations": int(simulations), "seed": int(seed)}
         except Exception as exc:
             st.session_state.last_result = None
@@ -295,6 +323,8 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_price_info = None
             st.session_state.last_iv_source = None
             st.session_state.last_iv_estimates = None
+            st.session_state.last_market_cap_source = None
+            st.session_state.last_market_caps = None
 
 
 result = st.session_state.last_result
@@ -319,11 +349,16 @@ with results_tab:
             f" | seed {run.get('seed', seed)}"
             f" | last run {run.get('time', 'now')}"
         )
+        st.caption(f"Market cap source: {st.session_state.last_market_cap_source}")
         st.caption(f"IV source: {st.session_state.last_iv_source}")
         st.caption(f"Correlation source: {st.session_state.last_corr_source}")
         if st.session_state.last_price_info:
             info = st.session_state.last_price_info
             st.caption(f"Yahoo adjusted close sample: {info['rows']} daily rows from {info['start']} to {info['end']} ({info['period']}).")
+
+        if st.session_state.last_market_caps is not None:
+            with st.expander("Yahoo market caps used"):
+                st.dataframe(display_market_caps(st.session_state.last_market_caps), use_container_width=True, hide_index=True)
 
         if st.session_state.last_iv_estimates is not None:
             with st.expander("Yahoo option-chain IV estimates used"):
@@ -432,6 +467,9 @@ with methodology_tab:
     st.write(
         "The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company, ranks companies from largest to smallest, and stores the winner and full rank vector."
     )
+
+    st.subheader("Market cap source")
+    st.write("Yahoo market cap mode uses yfinance fast_info.market_cap with a fallback to info['marketCap']. Manual market caps remain available for overrides.")
 
     st.subheader("IV source")
     st.write(
