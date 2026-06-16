@@ -4,7 +4,7 @@ Phase 1 of the Polymarket Ranking Engine.
 
 This is an experimental quantitative research app for estimating fair probabilities that each company in a universe finishes with the largest market capitalization at a target date.
 
-The goal is not to predict stock prices and not to outperform the option market. The goal is to translate current market capitalization, option-implied volatility, and correlation assumptions into ranking probabilities, then compare those probabilities with Polymarket YES prices.
+The goal is not to predict stock prices and not to outperform the option market. The goal is to translate current market capitalization, option-implied volatility, target-date horizon, and correlation assumptions into ranking probabilities, then compare those probabilities with Polymarket YES prices.
 
 ## Prototype Status
 
@@ -16,6 +16,7 @@ Current data sources:
 - Annualized implied volatility: manual placeholder input
 - Polymarket YES price: manual placeholder input
 - Correlation matrix: manual model assumption
+- Target date / maturity: user-selected date
 
 These are not live market data yet. The next important product step is to replace manual placeholders with explicit data pipelines or uploaded snapshots.
 
@@ -58,7 +59,10 @@ Where:
 - `MC_0` is current market capitalization
 - `sigma` is annualized implied volatility
 - `T = days_to_target / 365`
+- `days_to_target = target_date - today`
 - `Z` is a correlated normal shock
+
+The target date is selected in the sidebar. The app displays both the number of calendar days and the year fraction used in the simulation.
 
 The correlation matrix is validated, symmetrized if needed, and passed through Cholesky decomposition. Small diagonal jitter is used only when needed for numerical stability.
 
@@ -78,6 +82,7 @@ The results table focuses on statistical ranking analysis:
 
 The dashboard also shows:
 
+- selected target date and time horizon
 - model probability vs Polymarket probability
 - edge by ticker
 - correlation assumption heatmap
