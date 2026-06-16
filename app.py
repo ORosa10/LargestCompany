@@ -106,6 +106,26 @@ def display_market_cap_percentiles(percentiles: pd.DataFrame) -> pd.DataFrame:
     return display
 
 
+def rank_probability_matrix(result) -> pd.DataFrame:
+    ranks = result.ranks
+    max_rank = len(ranks.columns)
+    rows = []
+    for ticker in ranks.columns:
+        row = {"Ticker": ticker}
+        for rank in range(1, max_rank + 1):
+            row[f"Rank {rank}"] = (ranks[ticker] == rank).mean()
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def display_rank_probability_matrix(rank_probs: pd.DataFrame) -> pd.DataFrame:
+    display = rank_probs.copy()
+    for column in display.columns:
+        if column != "Ticker":
+            display[column] = display[column].map(lambda value: f"{value:.2%}")
+    return display
+
+
 def selected_ticker_summary(result, ticker: str) -> pd.DataFrame:
     caps = result.terminal_market_caps[ticker]
     ranks = result.ranks[ticker]
@@ -115,12 +135,21 @@ def selected_ticker_summary(result, ticker: str) -> pd.DataFrame:
             {"Metric": "Simulated market cap median", "Value": dollars_trillions(caps.median())},
             {"Metric": "1st percentile market cap", "Value": dollars_trillions(caps.quantile(0.01))},
             {"Metric": "5th percentile market cap", "Value": dollars_trillions(caps.quantile(0.05))},
+            {"Metric": "25th percentile market cap", "Value": dollars_trillions(caps.quantile(0.25))},
+            {"Metric": "75th percentile market cap", "Value": dollars_trillions(caps.quantile(0.75))},
             {"Metric": "95th percentile market cap", "Value": dollars_trillions(caps.quantile(0.95))},
             {"Metric": "99th percentile market cap", "Value": dollars_trillions(caps.quantile(0.99))},
             {"Metric": "Average simulated rank", "Value": f"{ranks.mean():.2f}"},
             {"Metric": "Median simulated rank", "Value": f"{ranks.median():.0f}"},
         ]
     )
+
+
+def terminal_cap_long(result, tickers: list[str]) -> pd.DataFrame:
+    selected = result.terminal_market_caps[tickers]
+    cap_long = selected.melt(var_name="Ticker", value_name="Simulated market cap")
+    cap_long["Simulated market cap ($T)"] = cap_long["Simulated market cap"] / 1e12
+    return cap_long
 
 
 if "company_inputs" not in st.session_state:
@@ -154,18 +183,10 @@ with st.sidebar:
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
 
     st.header("IV source")
-    iv_source = st.selectbox(
-        "Implied volatility source",
-        ["Manual IV inputs", "Yahoo option-chain near-ATM IV"],
-        index=0,
-    )
+    iv_source = st.selectbox("Implied volatility source", ["Manual IV inputs", "Yahoo option-chain near-ATM IV"], index=0)
 
     st.header("Correlation source")
-    correlation_source = st.selectbox(
-        "Correlation method",
-        ["EWMA historical correlation", "Rolling historical correlation", "Manual correlation matrix"],
-        index=0,
-    )
+    correlation_source = st.selectbox("Correlation method", ["EWMA historical correlation", "Rolling historical correlation", "Manual correlation matrix"], index=0)
     price_history_period = st.selectbox("Yahoo Finance price history", ["2y", "5y", "10y"], index=1)
     ewma_lambda = st.selectbox("EWMA lambda", [0.94, 0.97], index=1)
     rolling_lookback = st.selectbox("Rolling lookback days", [63, 126, 252, 504, 756], index=2)
@@ -193,7 +214,7 @@ with inputs_tab:
     )
 
     st.subheader("Company inputs")
-    st.write("Manual IV values are used only when **Manual IV inputs** is selected in the sidebar.")
+    st.write("Edit tickers here to change the company universe. Manual IV values are used only when **Manual IV inputs** is selected in the sidebar.")
     company_inputs = st.data_editor(
         st.session_state.company_inputs,
         num_rows="dynamic",
@@ -251,12 +272,7 @@ if run_button or st.session_state.last_result is None:
                 corr_source_label = "Manual correlation matrix"
             else:
                 prices = load_adjusted_close(tuple(clean_tickers), price_history_period)
-                price_info = {
-                    "rows": len(prices),
-                    "start": prices.index.min().date().isoformat(),
-                    "end": prices.index.max().date().isoformat(),
-                    "period": price_history_period,
-                }
+                price_info = {"rows": len(prices), "start": prices.index.min().date().isoformat(), "end": prices.index.max().date().isoformat(), "period": price_history_period}
                 if correlation_source == "EWMA historical correlation":
                     selected_correlation_matrix = ewma_correlation(prices, float(ewma_lambda))
                     corr_source_label = f"EWMA historical correlation, lambda={ewma_lambda}, Yahoo Finance {price_history_period}"
@@ -264,26 +280,13 @@ if run_button or st.session_state.last_result is None:
                     selected_correlation_matrix = rolling_correlation(prices, int(rolling_lookback))
                     corr_source_label = f"Rolling historical correlation, {rolling_lookback} trading days, Yahoo Finance {price_history_period}"
 
-            st.session_state.last_result = run_probability_engine(
-                simulation_inputs,
-                selected_correlation_matrix,
-                days_to_target=int(days_to_target),
-                simulations=int(simulations),
-                seed=int(seed),
-            )
+            st.session_state.last_result = run_probability_engine(simulation_inputs, selected_correlation_matrix, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed))
             st.session_state.last_error = None
             st.session_state.last_corr_source = corr_source_label
             st.session_state.last_price_info = price_info
             st.session_state.last_iv_source = iv_source_label
             st.session_state.last_iv_estimates = iv_estimates
-            st.session_state.last_run = {
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "target_date": target_date.isoformat(),
-                "days_to_target": int(days_to_target),
-                "horizon_years": horizon_years,
-                "simulations": int(simulations),
-                "seed": int(seed),
-            }
+            st.session_state.last_run = {"time": datetime.now().strftime("%H:%M:%S"), "target_date": target_date.isoformat(), "days_to_target": int(days_to_target), "horizon_years": horizon_years, "simulations": int(simulations), "seed": int(seed)}
         except Exception as exc:
             st.session_state.last_result = None
             st.session_state.last_error = str(exc)
@@ -303,6 +306,10 @@ with results_tab:
         st.warning("No simulation result yet. Check inputs and click Run / refresh simulation.")
     else:
         run = st.session_state.last_run or {}
+        available_tickers = result.results["Ticker"].tolist()
+        if selected_ticker not in available_tickers:
+            selected_ticker = available_tickers[0]
+
         st.success(
             "Simulation completed"
             f" | target {run.get('target_date', target_date.isoformat())}"
@@ -335,6 +342,25 @@ with results_tab:
         st.subheader("Statistical ranking probabilities")
         st.dataframe(display_results(result.results), use_container_width=True, hide_index=True)
 
+        detail_left, detail_right = st.columns([1, 2])
+        with detail_left:
+            inspect_ticker = st.selectbox("Inspect ticker", available_tickers, index=available_tickers.index(selected_ticker))
+            st.dataframe(selected_ticker_summary(result, inspect_ticker), use_container_width=True, hide_index=True)
+        with detail_right:
+            rank_data = result.rank_distribution[result.rank_distribution["Ticker"] == inspect_ticker]
+            rank_chart = px.bar(rank_data, x="Rank", y="Probability", title=f"Rank Distribution: {inspect_ticker}")
+            st.plotly_chart(rank_chart, use_container_width=True)
+
+        st.subheader("Compare simulated market-cap distributions")
+        default_compare = available_tickers[: min(5, len(available_tickers))]
+        compare_tickers = st.multiselect("Companies to compare", available_tickers, default=default_compare)
+        if compare_tickers:
+            compare_long = terminal_cap_long(result, compare_tickers)
+            compare_chart = px.box(compare_long, x="Ticker", y="Simulated market cap ($T)", points=False, title="Selected Companies: Terminal Market-Cap Distributions")
+            st.plotly_chart(compare_chart, use_container_width=True)
+        else:
+            st.info("Select at least one company to show the comparison chart.")
+
         best = result.most_undervalued
         worst = result.most_overvalued
         st.subheader("Interpretation")
@@ -356,11 +382,14 @@ with diagnostics_tab:
         st.subheader("Terminal market-cap distribution percentiles")
         st.dataframe(display_market_cap_percentiles(percentiles), use_container_width=True, hide_index=True)
 
+        st.subheader("Rank probability matrix")
+        st.write("Each row shows the probability that a company finishes in each exact rank.")
+        st.dataframe(display_rank_probability_matrix(rank_probability_matrix(result)), use_container_width=True, hide_index=True)
+
         st.subheader(f"Simulation detail: {selected_ticker}")
         st.dataframe(selected_ticker_summary(result, selected_ticker), use_container_width=True, hide_index=True)
 
-        cap_long = result.terminal_market_caps.melt(var_name="Ticker", value_name="Simulated market cap")
-        cap_long["Simulated market cap ($T)"] = cap_long["Simulated market cap"] / 1e12
+        cap_long = terminal_cap_long(result, available_tickers)
         box_chart = px.box(cap_long, x="Ticker", y="Simulated market cap ($T)", points=False, title="Simulated Terminal Market-Cap Distributions by Ticker")
         st.plotly_chart(box_chart, use_container_width=True)
 
@@ -416,7 +445,7 @@ with methodology_tab:
     st.code("r_t = log(P_t / P_{t-1})\nCov_t = lambda * Cov_{t-1} + (1 - lambda) * r_t r_t'\nCorr_ij = Cov_ij / sqrt(Cov_ii * Cov_jj)")
 
     st.subheader("Distribution statistics")
-    st.write("The diagnostics tab reports terminal market-cap percentiles for every company: P1, P5, P25, P50, P75, P95, and P99.")
+    st.write("The diagnostics tab reports terminal market-cap percentiles for every company: P1, P5, P25, P50, P75, P95, and P99. The rank probability matrix shows probability by exact finishing position.")
 
     st.subheader("What is not modeled yet")
     st.write(
