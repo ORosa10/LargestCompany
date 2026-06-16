@@ -10,21 +10,20 @@ The goal is not to predict stock prices and not to outperform the option market.
 
 Current data sources:
 
-- Current market capitalization: manual placeholder input
+- Current market capitalization: Yahoo Finance current market cap via `yfinance`, or manual input
 - Annualized implied volatility: manual input or Yahoo Finance option-chain near-ATM IV via `yfinance`
 - Polymarket YES price: manual input
 - Correlation matrix: Yahoo Finance historical adjusted close prices via `yfinance`, or manual input
 - Target date / maturity: user-selected date
 
-The next important product step is to replace manual market cap and Polymarket placeholders with explicit data pipelines or uploaded snapshots.
+The next important product step is to replace manual Polymarket placeholders with an explicit Polymarket price pipeline or uploaded market snapshot.
 
 ## Phase 1 Scope
 
-This phase builds the probability engine, historical correlation estimation, and an MVP implied-volatility source.
+This phase builds the probability engine, current market-cap ingestion, historical correlation estimation, and an MVP implied-volatility source.
 
 It does not include:
 
-- live market-cap ingestion
 - full volatility skew or smile calibration
 - hedging logic
 - option payoff heatmaps
@@ -44,6 +43,22 @@ It does not include:
 - LLY
 
 The universe is editable in the app under `Inputs & Data`.
+
+## Market Capitalization Source
+
+The app supports two market-cap modes:
+
+1. Yahoo Finance current market cap, default
+2. Manual market cap inputs
+
+Yahoo market-cap mode uses `yfinance`:
+
+- map app tickers to Yahoo symbols, e.g. `BRK.B` to `BRK-B`
+- fetch `fast_info.market_cap` when available
+- fall back to `info["marketCap"]` if needed
+- replace the manual input table values before running the Monte Carlo simulation
+
+This is suitable for the MVP research dashboard, but it should still be treated as a data input, not as audited fundamental data. If Yahoo is unavailable or stale for a ticker, switch to manual market-cap inputs.
 
 ## Model
 
@@ -159,7 +174,7 @@ Polymarket YES prices remain manual for now. A later module can ingest market pr
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 ## Files
@@ -167,6 +182,7 @@ streamlit run app.py
 ```text
 app.py            Streamlit dashboard
 model.py          Probability engine
+market_data.py    Yahoo current market-cap extraction
 correlations.py   Historical correlation estimation
 iv_surfaces.py    Yahoo option-chain near-ATM IV extraction
 requirements.txt  Python dependencies
