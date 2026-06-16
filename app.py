@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -22,8 +22,8 @@ st.warning(
 
 st.info(
     "This app does not predict stock prices. It translates current market caps, implied "
-    "volatility, and correlation assumptions into fair ranking probabilities, then compares "
-    "them with Polymarket YES prices."
+    "volatility, target-date horizon, and correlation assumptions into fair ranking probabilities, "
+    "then compares them with Polymarket YES prices."
 )
 
 
@@ -74,9 +74,20 @@ if "last_result" not in st.session_state:
     st.session_state.last_run = None
 
 
+today = date.today()
+default_target_date = today + timedelta(days=365)
+
 with st.sidebar:
     st.header("Simulation controls")
-    days_to_target = st.number_input("Days to target date", min_value=1, value=365, step=1)
+    target_date = st.date_input(
+        "Target date / maturity",
+        value=default_target_date,
+        min_value=today + timedelta(days=1),
+    )
+    days_to_target = max((target_date - today).days, 1)
+    horizon_years = days_to_target / 365.0
+    st.caption(f"Horizon: {days_to_target} days ({horizon_years:.2f} years)")
+
     simulations = st.number_input(
         "Monte Carlo simulations",
         min_value=1_000,
@@ -110,6 +121,7 @@ with inputs_tab:
                 {"Input": "Annualized implied volatility", "Current source": "Manual placeholder", "Future source": "Option chain / IV surface feed"},
                 {"Input": "Polymarket YES price", "Current source": "Manual placeholder", "Future source": "Polymarket market API"},
                 {"Input": "Correlation matrix", "Current source": "Manual assumption", "Future source": "Historical return correlation estimator"},
+                {"Input": "Target date / maturity", "Current source": "User-selected date", "Future source": "Parsed from prediction-market event rules"},
             ]
         ),
         use_container_width=True,
@@ -174,7 +186,9 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_error = None
             st.session_state.last_run = {
                 "time": datetime.now().strftime("%H:%M:%S"),
+                "target_date": target_date.isoformat(),
                 "days_to_target": int(days_to_target),
+                "horizon_years": horizon_years,
                 "simulations": int(simulations),
                 "seed": int(seed),
             }
@@ -195,8 +209,10 @@ with results_tab:
         run = st.session_state.last_run or {}
         st.success(
             "Simulation completed"
-            f" | {run.get('simulations', simulations):,} paths"
+            f" | target {run.get('target_date', target_date.isoformat())}"
             f" | {run.get('days_to_target', days_to_target)} days"
+            f" | {run.get('horizon_years', horizon_years):.2f} years"
+            f" | {run.get('simulations', simulations):,} paths"
             f" | seed {run.get('seed', seed)}"
             f" | last run {run.get('time', 'now')}"
         )
@@ -218,9 +234,10 @@ with results_tab:
         best = result.most_undervalued
         worst = result.most_overvalued
         st.write(
-            f"Under the current assumptions, **{best['Ticker']}** has the largest positive "
-            f"model-vs-Polymarket gap. **{worst['Ticker']}** has the largest negative gap. "
-            "This is a statistical relative-value comparison under the supplied inputs."
+            f"Under the current assumptions and target date **{run.get('target_date', target_date.isoformat())}**, "
+            f"**{best['Ticker']}** has the largest positive model-vs-Polymarket gap. "
+            f"**{worst['Ticker']}** has the largest negative gap. This is a statistical "
+            "relative-value comparison under the supplied inputs."
         )
 
 with diagnostics_tab:
@@ -290,9 +307,10 @@ with methodology_tab:
     st.subheader("Phase 1 model")
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
     st.write(
-        "For each simulation path, the app simulates one future market capitalization per company, "
-        "ranks companies from largest to smallest, and stores the winner and full rank vector. "
-        "The reported probabilities are Monte Carlo frequencies."
+        "The target date determines the time horizon `T = days_to_target / 365`. For each "
+        "simulation path, the app simulates one future market capitalization per company, ranks "
+        "companies from largest to smallest, and stores the winner and full rank vector. The "
+        "reported probabilities are Monte Carlo frequencies."
     )
 
     st.subheader("What is not modeled yet")
