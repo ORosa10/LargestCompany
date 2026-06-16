@@ -7,7 +7,7 @@ an entire volatility surface or risk-neutral density.
 from __future__ import annotations
 
 from dataclasses import dataclass
-+from datetime import date
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -54,6 +54,10 @@ def _clean_option_chain_side(options: pd.DataFrame) -> pd.DataFrame:
     return clean
 
 
+def _nearest_row(options: pd.DataFrame, strike: float) -> pd.Series:
+    return options.loc[(options["strike"] - strike).abs().idxmin()]
+
+
 def estimate_atm_iv_for_ticker(ticker: str, target_date: date) -> TickerIVEstimate:
     """Estimate near-ATM IV from Yahoo option chain closest to target date."""
 
@@ -74,17 +78,15 @@ def estimate_atm_iv_for_ticker(ticker: str, target_date: date) -> TickerIVEstima
         raise ValueError(f"No usable options for {ticker} expiry {expiry}.")
 
     candidate_strikes = pd.concat([calls[["strike"]], puts[["strike"]]], ignore_index=True)
-    atm_strike = float(candidate_strikes.iloc[(candidate_strikes["strike"] - spot).abs().argsort().iloc[0]]["strike"])
+    atm_strike = float(candidate_strikes.loc[(candidate_strikes["strike"] - spot).abs().idxmin(), "strike"])
 
     call_iv = None
     if not calls.empty:
-        call_row = calls.iloc[(calls["strike"] - atm_strike).abs().argsort().iloc[0]]
-        call_iv = float(call_row["impliedVolatility"])
+        call_iv = float(_nearest_row(calls, atm_strike)["impliedVolatility"])
 
     put_iv = None
     if not puts.empty:
-        put_row = puts.iloc[(puts["strike"] - atm_strike).abs().argsort().iloc[0]]
-        put_iv = float(put_row["impliedVolatility"])
+        put_iv = float(_nearest_row(puts, atm_strike)["impliedVolatility"])
 
     iv_values = [value for value in [call_iv, put_iv] if value is not None and np.isfinite(value)]
     if not iv_values:
