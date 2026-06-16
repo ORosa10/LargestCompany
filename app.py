@@ -20,6 +20,41 @@ st.info(
 )
 
 
+def display_results(results):
+    display = results.copy()
+    display = display.rename(
+        columns={
+            "Current market cap": "Mkt cap",
+            "Implied volatility": "IV",
+            "Polymarket YES price": "Poly price",
+            "Model probability": "Model prob",
+            "Expected value": "EV",
+            "Average rank": "Avg rank",
+            "Probability Top 2": "Top 2",
+            "Probability Top 3": "Top 3",
+        }
+    )
+    display["Mkt cap"] = display["Mkt cap"].map(lambda value: f"${value / 1e12:,.2f}T")
+    for column in ["IV", "Poly price", "Model prob", "Edge", "EV", "ROI", "Top 2", "Top 3"]:
+        display[column] = display[column].map(lambda value: "" if value != value else f"{value:.2%}")
+    display["Avg rank"] = display["Avg rank"].map(lambda value: f"{value:.2f}")
+    return display[
+        [
+            "Ticker",
+            "Mkt cap",
+            "Poly price",
+            "Model prob",
+            "Edge",
+            "EV",
+            "ROI",
+            "Avg rank",
+            "Top 2",
+            "Top 3",
+            "IV",
+        ]
+    ]
+
+
 if "company_inputs" not in st.session_state:
     st.session_state.company_inputs = default_company_inputs()
 
@@ -70,19 +105,16 @@ with inputs_tab:
             "Current market cap": st.column_config.NumberColumn(
                 min_value=1.0,
                 step=10_000_000_000.0,
-                format="$%d",
             ),
             "Implied volatility": st.column_config.NumberColumn(
                 min_value=0.0001,
                 max_value=5.0,
                 step=0.01,
-                format="%.2f",
             ),
             "Polymarket YES price": st.column_config.NumberColumn(
                 min_value=0.0,
                 max_value=1.0,
                 step=0.01,
-                format="%.2f",
             ),
         },
     )
@@ -111,7 +143,6 @@ with inputs_tab:
     st.session_state.correlation_matrix = correlation_matrix
 
 
-# Ensure these exist even before the Inputs tab has rendered in a fresh session.
 company_inputs = st.session_state.company_inputs
 correlation_matrix = st.session_state.correlation_matrix
 
@@ -174,38 +205,9 @@ with results_tab:
         c4.metric("Companies", f"{len(result.results)}")
 
         st.subheader("Ranking probabilities")
-        st.dataframe(
-            result.results,
-            use_container_width=True,
-            hide_index=True,
-            column_order=[
-                "Ticker",
-                "Current market cap",
-                "Polymarket YES price",
-                "Model probability",
-                "Edge",
-                "Expected value",
-                "ROI",
-                "Average rank",
-                "Probability Top 2",
-                "Probability Top 3",
-                "Implied volatility",
-            ],
-            column_config={
-                "Current market cap": st.column_config.NumberColumn("Market cap", format="$%.0f"),
-                "Polymarket YES price": st.column_config.NumberColumn("Polymarket", format="%.2%%"),
-                "Model probability": st.column_config.NumberColumn("Model", format="%.2%%"),
-                "Edge": st.column_config.NumberColumn("Edge", format="%.2%%"),
-                "Expected value": st.column_config.NumberColumn("EV", format="%.2%%"),
-                "ROI": st.column_config.NumberColumn("ROI", format="%.2%%"),
-                "Average rank": st.column_config.NumberColumn("Avg rank", format="%.2f"),
-                "Probability Top 2": st.column_config.NumberColumn("Top 2", format="%.2%%"),
-                "Probability Top 3": st.column_config.NumberColumn("Top 3", format="%.2%%"),
-                "Implied volatility": st.column_config.NumberColumn("IV", format="%.2%%"),
-            },
-        )
+        st.dataframe(display_results(result.results), use_container_width=True, hide_index=True)
 
-        st.subheader("What this result says")
+        st.subheader("Interpretation")
         best = result.most_undervalued
         worst = result.most_overvalued
         st.write(
