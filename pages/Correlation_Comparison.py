@@ -33,6 +33,8 @@ CORRELATION_METHODS = [
     "Manual/default correlation matrix",
 ]
 
+FIXED_CORRELATION_LEVELS = [level / 100 for level in range(0, 100, 5)]
+
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def load_adjusted_close(tickers: tuple[str, ...], period: str) -> pd.DataFrame:
@@ -72,6 +74,13 @@ def prepare_inputs(company_inputs: pd.DataFrame, market_cap_source: str, iv_sour
         simulation_inputs = apply_iv_estimates(simulation_inputs, iv_estimates)
 
     return simulation_inputs, market_caps, iv_estimates
+
+
+def constant_correlation_matrix(tickers: list[str], rho: float) -> pd.DataFrame:
+    corr = pd.DataFrame(rho, index=tickers, columns=tickers, dtype=float)
+    for ticker in tickers:
+        corr.loc[ticker, ticker] = 1.0
+    return corr
 
 
 def correlation_matrix_for_method(
@@ -159,7 +168,7 @@ def run_comparison(
     smooth_high_quantile: float,
     hard_switch_threshold: float,
     min_regime_observations: int,
-) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame | None, pd.DataFrame | None]:
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame]:
     simulation_inputs, market_caps, iv_estimates = prepare_inputs(company_inputs, market_cap_source, iv_source, target_date)
     tickers = simulation_inputs["Ticker"].tolist()
     days_to_target = max((target_date - date.today()).days, 1)
@@ -206,13 +215,61 @@ def run_comparison(
                 }
             )
 
-    return pd.DataFrame(rows), diagnostics_by_method, market_caps, iv_estimates
+    fixed_correlation_sensitivity = run_fixed_correlation_sensitivity(
+        simulation_inputs,
+        days_to_target=days_to_target,
+        simulations=simulations,
+        seed=seed,
+    )
+
+    return pd.DataFrame(rows), diagnostics_by_method, market_caps, iv_estimates, fixed_correlation_sensitivity
+
+
+def run_fixed_correlation_sensitivity(
+    simulation_inputs: pd.DataFrame,
+    days_to_target: int,
+    simulations: int,
+    seed: int,
+) -> pd.DataFrame:
+    tickers = simulation_inputs["Ticker"].tolist()
+    rows = []
+    for rho in FIXED_CORRELATION_LEVELS:
+        corr = constant_correlation_matrix(tickers, rho)
+        result = run_probability_engine(
+            simulation_inputs,
+            corr,
+            days_to_target=days_to_target,
+            simulations=simulations,
+            seed=seed,
+        )
+        for _, row in result.results.iterrows():
+            rows.append(
+                {
+                    "Fixed correlation": rho,
+                    "Ticker": row["Ticker"],
+                    "Model probability": row["Model probability"],
+                    "Average rank": row["Average rank"],
+                    "Top 2": row["Probability Top 2"],
+                    "Top 3": row["Probability Top 3"],
+                    "Edge": row["Edge"],
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def display_comparison_table(table: pd.DataFrame) -> pd.DataFrame:
     display = table.copy()
     display["Current market cap"] = display["Current market cap"].map(dollars_trillions)
     for column in ["IV", "Model probability", "Top 2", "Top 3", "Edge"]:
+        display[column] = display[column].map(pct)
+    display["Average rank"] = display["Average rank"].map(lambda value: f"{value:.2f}")
+    return display
+
+
+def display_sensitivity_table(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.copy()
+    display["Fixed correlation"] = display["Fixed correlation"].map(pct)
+    for column in ["Model probability", "Top 2", "Top 3", "Edge"]:
         display[column] = display[column].map(pct)
     display["Average rank"] = display["Average rank"].map(lambda value: f"{value:.2f}")
     return display
@@ -295,7 +352,7 @@ if run_button:
     else:
         with st.spinner("Running comparison across correlation methods..."):
             try:
-                table, diagnostics_by_method, market_caps, iv_estimates = run_comparison(
+                table, diagnostics_by_method, market_caps, iv_estimates, fixed_sensitivity = run_comparison(
                     company_inputs,
                     selected_methods,
                     market_cap_source,
@@ -316,8 +373,10 @@ if run_button:
                 st.session_state.correlation_comparison_diagnostics = diagnostics_by_method
                 st.session_state.correlation_comparison_market_caps = market_caps
                 st.session_state.correlation_comparison_iv_estimates = iv_estimates
+                st.session_state.fixed_correlation_sensitivity = fixed_sensitivity
             except Exception as exc:
                 st.session_state.correlation_comparison_table = None
+                st.session_state.fixed_correlation_sensitivity = None
                 st.error(str(exc))
 
 comparison_table = st.session_state.get("correlation_comparison_table")
@@ -327,6 +386,7 @@ else:
     market_caps = st.session_state.get("correlation_comparison_market_caps")
     iv_estimates = st.session_state.get("correlation_comparison_iv_estimates")
     diagnostics_by_method = st.session_state.get("correlation_comparison_diagnostics", {})
+    fixed_sensitivity = st.session_state.get("fixed_correlation_sensitivity")
 
     if market_caps is not None:
         with st.expander("Yahoo market caps used"):
@@ -342,10 +402,10 @@ else:
     rank_pivot = comparison_table.pivot(index="Ticker", columns="Method", values="Average rank")
 
     st.subheader("Model probability by method")
-    st.dataframe(probability_pivot.applymap(pct), use_container_width=True)
+    st.dataframe(probability_pivot.map(pct), use_container_width=True)
 
     st.subheader("Average rank by method")
-    st.dataframe(rank_pivot.applymap(lambda value: f"{value:.2f}"), use_container_width=True)
+    st.dataframe(rank_pivot.map(lambda value: f"{value:.2f}"), use_container_width=True)
 
     selected_ticker = st.selectbox("Ticker to inspect", probability_pivot.index.tolist())
     ticker_slice = comparison_table[comparison_table["Ticker"] == selected_ticker].sort_values("Model probability", ascending=False)
@@ -355,18 +415,76 @@ else:
         st.plotly_chart(
             px.bar(ticker_slice, x="Method", y="Model probability", title=f"{selected_ticker}: Model Probability by Correlation Method"),
             use_container_width=True,
+            key="method_probability_bar",
         )
     with right:
         st.plotly_chart(
             px.bar(ticker_slice, x="Method", y="Average rank", title=f"{selected_ticker}: Average Rank by Correlation Method"),
             use_container_width=True,
+            key="method_rank_bar",
         )
 
     st.subheader("Probability heatmap")
     st.plotly_chart(
         px.imshow(probability_pivot, text_auto=".1%", color_continuous_scale="Blues", title="Model Probability Sensitivity"),
         use_container_width=True,
+        key="method_probability_heatmap",
     )
+
+    if fixed_sensitivity is not None and not fixed_sensitivity.empty:
+        st.subheader("Fixed correlation sensitivity")
+        st.write("This isolates the impact of the absolute correlation level by forcing every pairwise correlation to the same value, from 0% to 95% in 5 percentage-point steps.")
+
+        fixed_probability_pivot = fixed_sensitivity.pivot(index="Fixed correlation", columns="Ticker", values="Model probability")
+        fixed_rank_pivot = fixed_sensitivity.pivot(index="Fixed correlation", columns="Ticker", values="Average rank")
+
+        st.dataframe(fixed_probability_pivot.map(pct), use_container_width=True)
+
+        sensitivity_ticker = st.selectbox("Ticker for fixed-correlation sensitivity", fixed_probability_pivot.columns.tolist(), index=0)
+        sensitivity_slice = fixed_sensitivity[fixed_sensitivity["Ticker"] == sensitivity_ticker].sort_values("Fixed correlation")
+
+        left, right = st.columns(2)
+        with left:
+            st.plotly_chart(
+                px.line(
+                    sensitivity_slice,
+                    x="Fixed correlation",
+                    y="Model probability",
+                    markers=True,
+                    title=f"{sensitivity_ticker}: P(#1) vs Fixed Correlation",
+                ),
+                use_container_width=True,
+                key="fixed_corr_probability_line",
+            )
+        with right:
+            st.plotly_chart(
+                px.line(
+                    sensitivity_slice,
+                    x="Fixed correlation",
+                    y="Average rank",
+                    markers=True,
+                    title=f"{sensitivity_ticker}: Average Rank vs Fixed Correlation",
+                ),
+                use_container_width=True,
+                key="fixed_corr_rank_line",
+            )
+
+        st.plotly_chart(
+            px.imshow(
+                fixed_probability_pivot,
+                text_auto=".1%",
+                color_continuous_scale="Blues",
+                title="P(#1) Under Constant Pairwise Correlation Stress",
+            ),
+            use_container_width=True,
+            key="fixed_corr_probability_heatmap",
+        )
+
+        with st.expander("Full fixed-correlation sensitivity table"):
+            st.dataframe(display_sensitivity_table(fixed_sensitivity), use_container_width=True, hide_index=True)
+
+        with st.expander("Average-rank fixed-correlation sensitivity"):
+            st.dataframe(fixed_rank_pivot.map(lambda value: f"{value:.2f}"), use_container_width=True)
 
     if diagnostics_by_method:
         st.subheader("Correlation diagnostics")
