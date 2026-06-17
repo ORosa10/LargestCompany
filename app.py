@@ -120,6 +120,31 @@ def display_regime_diagnostics(diagnostics: pd.DataFrame | None) -> pd.DataFrame
     return display
 
 
+def monte_carlo_precision_table(results: pd.DataFrame, simulations: int) -> pd.DataFrame:
+    rows = []
+    n = max(int(simulations), 1)
+    for _, row in results.iterrows():
+        p = float(row["Model probability"])
+        se = sqrt(max(p * (1.0 - p), 0.0) / n)
+        rows.append(
+            {
+                "Ticker": row["Ticker"],
+                "Model probability": p,
+                "MC standard error": se,
+                "Approx. 95% low": max(p - 1.96 * se, 0.0),
+                "Approx. 95% high": min(p + 1.96 * se, 1.0),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def display_monte_carlo_precision(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.copy()
+    for column in ["Model probability", "MC standard error", "Approx. 95% low", "Approx. 95% high"]:
+        display[column] = display[column].map(pct)
+    return display
+
+
 def constant_correlation_matrix(tickers: list[str], rho: float) -> pd.DataFrame:
     corr = pd.DataFrame(rho, index=tickers, columns=tickers, dtype=float)
     for ticker in tickers:
@@ -154,6 +179,26 @@ def display_fixed_sensitivity(table: pd.DataFrame) -> pd.DataFrame:
     for column in ["Model probability", "Top 2", "Top 3", "Edge"]:
         display[column] = display[column].map(pct)
     display["Average rank"] = display["Average rank"].map(lambda value: f"{value:.2f}")
+    return display
+
+
+def correlation_summary(corr: pd.DataFrame) -> pd.DataFrame:
+    values = corr.to_numpy(dtype=float, copy=True)
+    mask = ~np.eye(values.shape[0], dtype=bool)
+    off_diag = values[mask]
+    return pd.DataFrame(
+        [
+            {"Metric": "Average pairwise correlation", "Value": off_diag.mean()},
+            {"Metric": "Median pairwise correlation", "Value": np.median(off_diag)},
+            {"Metric": "Minimum pairwise correlation", "Value": off_diag.min()},
+            {"Metric": "Maximum pairwise correlation", "Value": off_diag.max()},
+        ]
+    )
+
+
+def display_correlation_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    display = summary.copy()
+    display["Value"] = display["Value"].map(pct)
     return display
 
 
@@ -488,7 +533,7 @@ with st.sidebar:
     run_button = st.button("Run / refresh simulation", type="primary", use_container_width=True)
 
 
-results_tab, inputs_tab, diagnostics_tab, methodology_tab = st.tabs(["Results", "Inputs & Data", "Simulation Diagnostics", "Methodology"])
+results_tab, correlation_tab, inputs_tab, diagnostics_tab, methodology_tab = st.tabs(["Results", "Correlation Analysis", "Inputs & Data", "Simulation Diagnostics", "Methodology"])
 
 with inputs_tab:
     st.subheader("Data provenance")
@@ -542,7 +587,7 @@ company_inputs = st.session_state.company_inputs
 manual_correlation_matrix = st.session_state.correlation_matrix
 
 if run_button or st.session_state.last_result is None:
-    with st.spinner("Running Monte Carlo simulation and correlation sensitivity..."):
+    with st.spinner("Running Monte Carlo simulation and correlation analysis..."):
         try:
             simulation_inputs, market_caps, iv_estimates, market_cap_source_label, iv_source_label = prepare_simulation_inputs(company_inputs, market_cap_source, iv_source, target_date)
             selected_correlation_matrix, corr_source_label, price_info, regime_diagnostics = select_correlation_matrix(
@@ -640,30 +685,10 @@ with results_tab:
         if table_event.selection.rows:
             selected_from_table = results_display.iloc[table_event.selection.rows[0]]["Ticker"]
 
-        st.subheader("Fixed correlation sensitivity")
-        st.write("This is part of the same calculation. It reruns the same inputs with every pairwise correlation forced to 0%, 5%, 10%, ... 95%.")
-        fixed_sensitivity = st.session_state.last_fixed_sensitivity
-        if fixed_sensitivity is not None and not fixed_sensitivity.empty:
-            fixed_probability_pivot = fixed_sensitivity.pivot(index="Fixed correlation", columns="Ticker", values="Model probability")
-            st.dataframe(fixed_probability_pivot.map(pct), use_container_width=True)
-
-            sensitivity_ticker = st.selectbox("Ticker for correlation sensitivity", fixed_probability_pivot.columns.tolist(), index=fixed_probability_pivot.columns.tolist().index(selected_from_table) if selected_from_table in fixed_probability_pivot.columns else 0)
-            sensitivity_slice = fixed_sensitivity[fixed_sensitivity["Ticker"] == sensitivity_ticker].sort_values("Fixed correlation")
-            left, right = st.columns(2)
-            with left:
-                st.plotly_chart(
-                    px.line(sensitivity_slice, x="Fixed correlation", y="Model probability", markers=True, title=f"{sensitivity_ticker}: P(#1) vs fixed correlation"),
-                    use_container_width=True,
-                    key="main_fixed_corr_probability_line",
-                )
-            with right:
-                st.plotly_chart(
-                    px.line(sensitivity_slice, x="Fixed correlation", y="Average rank", markers=True, title=f"{sensitivity_ticker}: average rank vs fixed correlation"),
-                    use_container_width=True,
-                    key="main_fixed_corr_rank_line",
-                )
-            with st.expander("Full fixed-correlation sensitivity table"):
-                st.dataframe(display_fixed_sensitivity(fixed_sensitivity), use_container_width=True, hide_index=True)
+        with st.expander("Monte Carlo precision"):
+            st.write("Sampling error from finite simulations only. This does not include model error, data-source error, IV surface error, or correlation-model uncertainty.")
+            precision = monte_carlo_precision_table(result.results, int(run.get("simulations", simulations)))
+            st.dataframe(display_monte_carlo_precision(precision), use_container_width=True, hide_index=True)
 
         st.subheader(f"Company detail: {selected_from_table}")
         selected_row = ticker_row(result, selected_from_table)
@@ -706,6 +731,51 @@ with results_tab:
         compare_tickers = st.multiselect("Companies to compare", available_tickers, default=default_compare)
         if compare_tickers:
             st.plotly_chart(px.box(terminal_cap_long(result, compare_tickers), x="Ticker", y="Simulated market cap ($T)", points=False, title="Selected Companies: Terminal Market-Cap Distributions"), use_container_width=True, key="results_compare_box_chart")
+
+with correlation_tab:
+    if st.session_state.last_error:
+        st.error(st.session_state.last_error)
+    elif result is None:
+        st.warning("Run the simulation first to see correlation analysis.")
+    else:
+        run = st.session_state.last_run or {}
+        available_tickers = result.results["Ticker"].tolist()
+        st.subheader("Selected correlation model")
+        st.caption(f"Correlation source: {st.session_state.last_corr_source}")
+        if st.session_state.last_price_info:
+            info = st.session_state.last_price_info
+            st.caption(f"Yahoo adjusted close sample: {info['rows']} daily rows from {info['start']} to {info['end']} ({info['period']}).")
+
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.dataframe(display_correlation_summary(correlation_summary(result.cleaned_correlation)), use_container_width=True, hide_index=True)
+        with c2:
+            st.plotly_chart(px.imshow(result.cleaned_correlation, zmin=-1, zmax=1, color_continuous_scale="RdBu", title="Selected Correlation Matrix", text_auto=".2f"), use_container_width=True, key="correlation_analysis_heatmap")
+
+        if st.session_state.last_regime_diagnostics is not None:
+            with st.expander("Correlation model diagnostics"):
+                shown = display_regime_diagnostics(st.session_state.last_regime_diagnostics)
+                st.dataframe(shown if shown is not None else st.session_state.last_regime_diagnostics, use_container_width=True, hide_index=True)
+
+        st.subheader("Fixed correlation sensitivity")
+        st.write("This reruns the same market caps, IVs, target date, seed, and simulation count with every off-diagonal pairwise correlation forced to 0%, 5%, 10%, ... 95%.")
+        fixed_sensitivity = st.session_state.last_fixed_sensitivity
+        if fixed_sensitivity is not None and not fixed_sensitivity.empty:
+            fixed_probability_pivot = fixed_sensitivity.pivot(index="Fixed correlation", columns="Ticker", values="Model probability")
+            st.dataframe(fixed_probability_pivot.map(pct), use_container_width=True)
+
+            sensitivity_ticker = st.selectbox("Ticker for correlation sensitivity", fixed_probability_pivot.columns.tolist(), index=0, key="correlation_sensitivity_ticker")
+            sensitivity_slice = fixed_sensitivity[fixed_sensitivity["Ticker"] == sensitivity_ticker].sort_values("Fixed correlation")
+            left, right = st.columns(2)
+            with left:
+                st.plotly_chart(px.line(sensitivity_slice, x="Fixed correlation", y="Model probability", markers=True, title=f"{sensitivity_ticker}: P(#1) vs fixed correlation"), use_container_width=True, key="correlation_fixed_probability_line")
+            with right:
+                st.plotly_chart(px.line(sensitivity_slice, x="Fixed correlation", y="Average rank", markers=True, title=f"{sensitivity_ticker}: average rank vs fixed correlation"), use_container_width=True, key="correlation_fixed_rank_line")
+            with st.expander("Full fixed-correlation sensitivity table"):
+                st.dataframe(display_fixed_sensitivity(fixed_sensitivity), use_container_width=True, hide_index=True)
+
+        st.subheader("Correlation caveat")
+        st.write("Correlation is an input assumption, not an observed future fact. The fixed-correlation table is meant to show whether the model probability is robust or fragile to the absolute correlation level. It does not solve tail dependence or crisis-correlation behavior yet.")
 
 with diagnostics_tab:
     if result is None:
@@ -751,8 +821,11 @@ with methodology_tab:
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
     st.write("The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company and ranks companies from largest to smallest.")
 
-    st.subheader("Fixed correlation sensitivity")
-    st.write("The Results tab includes a direct stress test that reruns the same company inputs with every off-diagonal pairwise correlation forced to 0%, 5%, 10%, ..., 95%. This isolates the importance of the absolute correlation level from the historical estimation method.")
+    st.subheader("Monte Carlo precision")
+    st.write("The Results tab reports standard error from finite simulation count. This only measures simulation noise, not model uncertainty or data-input uncertainty.")
+
+    st.subheader("Correlation analysis")
+    st.write("The Correlation Analysis tab shows the selected correlation matrix and a direct fixed-correlation stress test. This isolates whether ranking probabilities are robust to the correlation level.")
 
     st.subheader("Vol-adjusted smooth correlation")
     st.write("This mode maps current average pair IV into the historical distribution of pair realized volatility. The resulting percentile becomes the blend weight between low-vol and high-vol historical pair correlations. No manual switch threshold is required for the blend weight.")
