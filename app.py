@@ -25,16 +25,7 @@ from model import default_company_inputs, default_correlation_matrix, run_probab
 
 st.set_page_config(page_title="LargestCompany", layout="wide")
 
-st.title("LargestCompany")
-st.caption("Phase 1: statistical probability engine for largest future market capitalization.")
-st.warning(
-    "Prototype status: Polymarket price inputs are still manual placeholders. Market caps, "
-    "correlations, and near-ATM IV can be sourced from Yahoo Finance."
-)
-st.info(
-    "This app does not predict stock prices. It translates current market caps, implied "
-    "volatility, target-date horizon, and correlation assumptions into fair ranking probabilities."
-)
+FIXED_CORRELATION_LEVELS = [level / 100 for level in range(0, 100, 5)]
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
@@ -85,7 +76,7 @@ def display_iv_estimates(iv_estimates: pd.DataFrame) -> pd.DataFrame:
         }
     )
     for column in ["Spot", "ATM strike"]:
-        display[column] = display[column].map(lambda value: f"${value:,.2f}")
+        display[column] = display[column].map(lambda value: f"${value:,.2f}" if pd.notna(value) else "")
     for column in ["ATM IV", "Call IV", "Put IV"]:
         display[column] = display[column].map(pct)
     return display[["Ticker", "Yahoo ticker", "Target date", "Option expiry used", "Spot", "ATM strike", "ATM IV", "Call IV", "Put IV"]]
@@ -114,7 +105,7 @@ def display_regime_diagnostics(diagnostics: pd.DataFrame | None) -> pd.DataFrame
     if diagnostics is None or diagnostics.empty:
         return None
     display = diagnostics.copy()
-    percent_columns = [
+    for column in [
         "Average current IV",
         "Historical pair-vol percentile",
         "Low-vol cutoff",
@@ -123,10 +114,46 @@ def display_regime_diagnostics(diagnostics: pd.DataFrame | None) -> pd.DataFrame
         "High-regime correlation",
         "Blend weight",
         "Selected correlation",
-    ]
-    for column in percent_columns:
+    ]:
         if column in display.columns:
             display[column] = display[column].map(pct)
+    return display
+
+
+def constant_correlation_matrix(tickers: list[str], rho: float) -> pd.DataFrame:
+    corr = pd.DataFrame(rho, index=tickers, columns=tickers, dtype=float)
+    for ticker in tickers:
+        corr.loc[ticker, ticker] = 1.0
+    return corr
+
+
+def fixed_correlation_sensitivity(company_inputs: pd.DataFrame, days_to_target: int, simulations: int, seed: int) -> pd.DataFrame:
+    tickers = company_inputs["Ticker"].astype(str).tolist()
+    rows = []
+    for rho in FIXED_CORRELATION_LEVELS:
+        corr = constant_correlation_matrix(tickers, rho)
+        result = run_probability_engine(company_inputs, corr, days_to_target=days_to_target, simulations=simulations, seed=seed)
+        for _, row in result.results.iterrows():
+            rows.append(
+                {
+                    "Fixed correlation": rho,
+                    "Ticker": row["Ticker"],
+                    "Model probability": row["Model probability"],
+                    "Average rank": row["Average rank"],
+                    "Top 2": row["Probability Top 2"],
+                    "Top 3": row["Probability Top 3"],
+                    "Edge": row["Edge"],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def display_fixed_sensitivity(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.copy()
+    display["Fixed correlation"] = display["Fixed correlation"].map(pct)
+    for column in ["Model probability", "Top 2", "Top 3", "Edge"]:
+        display[column] = display[column].map(pct)
+    display["Average rank"] = display["Average rank"].map(lambda value: f"{value:.2f}")
     return display
 
 
@@ -153,12 +180,11 @@ def display_market_cap_percentiles(percentiles: pd.DataFrame) -> pd.DataFrame:
 
 
 def rank_probability_matrix(result) -> pd.DataFrame:
-    ranks = result.ranks
     rows = []
-    for ticker in ranks.columns:
+    for ticker in result.ranks.columns:
         row = {"Ticker": ticker}
-        for rank in range(1, len(ranks.columns) + 1):
-            row[f"Rank {rank}"] = (ranks[ticker] == rank).mean()
+        for rank in range(1, len(result.ranks.columns) + 1):
+            row[f"Rank {rank}"] = (result.ranks[ticker] == rank).mean()
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -169,6 +195,11 @@ def display_rank_probability_matrix(rank_probs: pd.DataFrame) -> pd.DataFrame:
         if column != "Ticker":
             display[column] = display[column].map(pct)
     return display
+
+
+def selected_rank_probabilities(result, ticker: str) -> pd.DataFrame:
+    rank_probs = rank_probability_matrix(result).set_index("Ticker").loc[ticker]
+    return pd.DataFrame({"Rank": rank_probs.index, "Probability": rank_probs.values})
 
 
 def selected_ticker_summary(result, ticker: str) -> pd.DataFrame:
@@ -197,30 +228,6 @@ def terminal_cap_long(result, tickers: list[str]) -> pd.DataFrame:
     cap_long = result.terminal_market_caps[tickers].melt(var_name="Ticker", value_name="Simulated market cap")
     cap_long["Simulated market cap ($T)"] = cap_long["Simulated market cap"] / 1e12
     return cap_long
-
-
-def leader_gap_table(result, ticker: str) -> pd.DataFrame:
-    selected = ticker_row(result, ticker)
-    selected_cap = float(selected["Current market cap"])
-    rows = []
-    for _, row in result.results.iterrows():
-        other = row["Ticker"]
-        if other == ticker:
-            continue
-        other_cap = float(row["Current market cap"])
-        rows.append(
-            {
-                "Competitor": other,
-                "Competitor market cap": dollars_trillions(other_cap),
-                "Selected lead": dollars_trillions(selected_cap - other_cap),
-                "Competitor required gain to tie": selected_cap / other_cap - 1.0 if other_cap > 0 else np.nan,
-                "Selected drawdown to tie": other_cap / selected_cap - 1.0 if selected_cap > 0 else np.nan,
-            }
-        )
-    output = pd.DataFrame(rows).sort_values("Competitor required gain to tie")
-    output["Competitor required gain to tie"] = output["Competitor required gain to tie"].map(pct)
-    output["Selected drawdown to tie"] = output["Selected drawdown to tie"].map(pct)
-    return output
 
 
 def pairwise_probability_audit(result, ticker: str, days_to_target: int) -> pd.DataFrame:
@@ -272,11 +279,6 @@ def display_pairwise_probability_audit(pairwise: pd.DataFrame) -> pd.DataFrame:
     display["Log gap now"] = display["Log gap now"].map(pct)
     display["Z-score"] = display["Z-score"].map(lambda value: f"{value:.2f}")
     return display
-
-
-def selected_rank_probabilities(result, ticker: str) -> pd.DataFrame:
-    rank_probs = rank_probability_matrix(result).set_index("Ticker").loc[ticker]
-    return pd.DataFrame({"Rank": rank_probs.index, "Probability": rank_probs.values})
 
 
 def simulate_marginal_paths(current_cap: float, sigma: float, days: int, path_count: int, seed: int, ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -333,22 +335,112 @@ def terminal_distribution_chart(result, ticker: str) -> go.Figure:
     return fig
 
 
+def prepare_simulation_inputs(company_inputs: pd.DataFrame, market_cap_source: str, iv_source: str, target_date_value: date) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, str, str]:
+    clean_tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
+    simulation_inputs = company_inputs.copy()
+
+    market_caps = None
+    if market_cap_source == "Yahoo Finance current market cap":
+        market_caps = load_yahoo_market_caps(tuple(clean_tickers))
+        simulation_inputs = apply_market_caps(simulation_inputs, market_caps)
+        market_cap_source_label = "Yahoo Finance current market cap"
+    else:
+        market_cap_source_label = "Manual market cap inputs"
+
+    iv_estimates = None
+    if iv_source == "Yahoo option-chain near-ATM IV":
+        iv_estimates = load_yahoo_atm_ivs(tuple(clean_tickers), target_date_value.isoformat())
+        simulation_inputs = apply_iv_estimates(simulation_inputs, iv_estimates)
+        iv_source_label = "Yahoo Finance option-chain near-ATM IV; expiry closest to target date"
+    else:
+        iv_source_label = "Manual IV inputs"
+
+    return simulation_inputs, market_caps, iv_estimates, market_cap_source_label, iv_source_label
+
+
+def select_correlation_matrix(
+    correlation_source: str,
+    simulation_inputs: pd.DataFrame,
+    manual_correlation_matrix: pd.DataFrame,
+    price_history_period: str,
+    ewma_lambda: float,
+    rolling_lookback: int,
+    regime_vol_window: int,
+    smooth_low_quantile: float,
+    smooth_high_quantile: float,
+    regime_vol_threshold: float,
+    min_regime_observations: int,
+) -> tuple[pd.DataFrame, str, dict | None, pd.DataFrame | None]:
+    clean_tickers = simulation_inputs["Ticker"].astype(str).tolist()
+    price_info = None
+    regime_diagnostics = None
+
+    if correlation_source == "Manual correlation matrix":
+        return manual_correlation_matrix, "Manual correlation matrix", price_info, regime_diagnostics
+
+    prices = load_adjusted_close(tuple(clean_tickers), price_history_period)
+    price_info = {"rows": len(prices), "start": prices.index.min().date().isoformat(), "end": prices.index.max().date().isoformat(), "period": price_history_period}
+
+    if correlation_source == "EWMA historical correlation":
+        return ewma_correlation(prices, float(ewma_lambda)), f"EWMA historical correlation, lambda={ewma_lambda}, Yahoo Finance {price_history_period}", price_info, regime_diagnostics
+
+    if correlation_source == "Vol-adjusted smooth correlation":
+        current_ivs = simulation_inputs.set_index("Ticker")["Implied volatility"].astype(float)
+        corr, regime_diagnostics = smooth_vol_adjusted_correlation(
+            prices,
+            current_ivs,
+            vol_window=int(regime_vol_window),
+            low_quantile=float(smooth_low_quantile),
+            high_quantile=float(smooth_high_quantile),
+            min_observations=int(min_regime_observations),
+        )
+        label = f"Vol-adjusted smooth correlation, window={regime_vol_window}D, low/high buckets={smooth_low_quantile:.0%}/{smooth_high_quantile:.0%}"
+        return corr, label, price_info, regime_diagnostics
+
+    if correlation_source == "Rolling historical correlation":
+        return rolling_correlation(prices, int(rolling_lookback)), f"Rolling historical correlation, {rolling_lookback} trading days, Yahoo Finance {price_history_period}", price_info, regime_diagnostics
+
+    if correlation_source == "Low-vol regime correlation":
+        corr, counts = volatility_regime_correlation(prices, vol_window=int(regime_vol_window), vol_threshold=float(regime_vol_threshold), regime="low", min_observations=int(min_regime_observations))
+        label = f"Low-vol regime correlation, realized-vol threshold={regime_vol_threshold:.0%}, window={regime_vol_window}D"
+        return corr, label, price_info, counts.reset_index().rename(columns={"index": "Ticker"})
+
+    if correlation_source == "High-vol regime correlation":
+        corr, counts = volatility_regime_correlation(prices, vol_window=int(regime_vol_window), vol_threshold=float(regime_vol_threshold), regime="high", min_observations=int(min_regime_observations))
+        label = f"High-vol regime correlation, realized-vol threshold={regime_vol_threshold:.0%}, window={regime_vol_window}D"
+        return corr, label, price_info, counts.reset_index().rename(columns={"index": "Ticker"})
+
+    current_ivs = simulation_inputs.set_index("Ticker")["Implied volatility"].astype(float)
+    corr, regime_diagnostics, _ = iv_based_regime_correlation(prices, current_ivs, vol_window=int(regime_vol_window), vol_threshold=float(regime_vol_threshold), min_observations=int(min_regime_observations))
+    label = f"IV-based hard-switch regime correlation, pair avg IV threshold={regime_vol_threshold:.0%}, realized-vol window={regime_vol_window}D"
+    return corr, label, price_info, regime_diagnostics
+
+
+st.title("LargestCompany")
+st.caption("Phase 1: statistical probability engine for largest future market capitalization.")
+st.warning("Prototype status: Polymarket price inputs are still manual placeholders. Market caps, correlations, and near-ATM IV can be sourced from Yahoo Finance.")
+st.info("This app does not predict stock prices. It translates current market caps, implied volatility, target-date horizon, and correlation assumptions into fair ranking probabilities.")
+
 if "company_inputs" not in st.session_state:
     st.session_state.company_inputs = default_company_inputs()
 if "correlation_matrix" not in st.session_state:
     tickers = st.session_state.company_inputs["Ticker"].tolist()
     st.session_state.correlation_matrix = default_correlation_matrix(tickers)
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
-    st.session_state.last_error = None
-    st.session_state.last_run = None
-    st.session_state.last_corr_source = None
-    st.session_state.last_price_info = None
-    st.session_state.last_iv_source = None
-    st.session_state.last_iv_estimates = None
-    st.session_state.last_market_cap_source = None
-    st.session_state.last_market_caps = None
-    st.session_state.last_regime_diagnostics = None
+for key in [
+    "last_result",
+    "last_error",
+    "last_run",
+    "last_corr_source",
+    "last_price_info",
+    "last_iv_source",
+    "last_iv_estimates",
+    "last_market_cap_source",
+    "last_market_caps",
+    "last_regime_diagnostics",
+    "last_fixed_sensitivity",
+]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
 
 today = date.today()
@@ -450,83 +542,25 @@ company_inputs = st.session_state.company_inputs
 manual_correlation_matrix = st.session_state.correlation_matrix
 
 if run_button or st.session_state.last_result is None:
-    with st.spinner("Running Monte Carlo simulation..."):
+    with st.spinner("Running Monte Carlo simulation and correlation sensitivity..."):
         try:
-            clean_tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
-            simulation_inputs = company_inputs.copy()
-            market_caps = None
-            if market_cap_source == "Yahoo Finance current market cap":
-                market_caps = load_yahoo_market_caps(tuple(clean_tickers))
-                simulation_inputs = apply_market_caps(simulation_inputs, market_caps)
-                market_cap_source_label = "Yahoo Finance current market cap"
-            else:
-                market_cap_source_label = "Manual market cap inputs"
-
-            iv_estimates = None
-            if iv_source == "Yahoo option-chain near-ATM IV":
-                iv_estimates = load_yahoo_atm_ivs(tuple(clean_tickers), target_date.isoformat())
-                simulation_inputs = apply_iv_estimates(simulation_inputs, iv_estimates)
-                iv_source_label = "Yahoo Finance option-chain near-ATM IV; expiry closest to target date"
-            else:
-                iv_source_label = "Manual IV inputs"
-
-            price_info = None
-            regime_diagnostics = None
-            if correlation_source == "Manual correlation matrix":
-                selected_correlation_matrix = manual_correlation_matrix
-                corr_source_label = "Manual correlation matrix"
-            else:
-                prices = load_adjusted_close(tuple(clean_tickers), price_history_period)
-                price_info = {"rows": len(prices), "start": prices.index.min().date().isoformat(), "end": prices.index.max().date().isoformat(), "period": price_history_period}
-                if correlation_source == "EWMA historical correlation":
-                    selected_correlation_matrix = ewma_correlation(prices, float(ewma_lambda))
-                    corr_source_label = f"EWMA historical correlation, lambda={ewma_lambda}, Yahoo Finance {price_history_period}"
-                elif correlation_source == "Vol-adjusted smooth correlation":
-                    current_ivs = simulation_inputs.set_index("Ticker")["Implied volatility"].astype(float)
-                    selected_correlation_matrix, regime_diagnostics = smooth_vol_adjusted_correlation(
-                        prices,
-                        current_ivs,
-                        vol_window=int(regime_vol_window),
-                        low_quantile=float(smooth_low_quantile),
-                        high_quantile=float(smooth_high_quantile),
-                        min_observations=int(min_regime_observations),
-                    )
-                    corr_source_label = f"Vol-adjusted smooth correlation, window={regime_vol_window}D, low/high buckets={smooth_low_quantile:.0%}/{smooth_high_quantile:.0%}"
-                elif correlation_source == "Rolling historical correlation":
-                    selected_correlation_matrix = rolling_correlation(prices, int(rolling_lookback))
-                    corr_source_label = f"Rolling historical correlation, {rolling_lookback} trading days, Yahoo Finance {price_history_period}"
-                elif correlation_source == "Low-vol regime correlation":
-                    selected_correlation_matrix, counts = volatility_regime_correlation(
-                        prices,
-                        vol_window=int(regime_vol_window),
-                        vol_threshold=float(regime_vol_threshold),
-                        regime="low",
-                        min_observations=int(min_regime_observations),
-                    )
-                    regime_diagnostics = counts.reset_index().rename(columns={"index": "Ticker"})
-                    corr_source_label = f"Low-vol regime correlation, realized-vol threshold={regime_vol_threshold:.0%}, window={regime_vol_window}D"
-                elif correlation_source == "High-vol regime correlation":
-                    selected_correlation_matrix, counts = volatility_regime_correlation(
-                        prices,
-                        vol_window=int(regime_vol_window),
-                        vol_threshold=float(regime_vol_threshold),
-                        regime="high",
-                        min_observations=int(min_regime_observations),
-                    )
-                    regime_diagnostics = counts.reset_index().rename(columns={"index": "Ticker"})
-                    corr_source_label = f"High-vol regime correlation, realized-vol threshold={regime_vol_threshold:.0%}, window={regime_vol_window}D"
-                else:
-                    current_ivs = simulation_inputs.set_index("Ticker")["Implied volatility"].astype(float)
-                    selected_correlation_matrix, regime_diagnostics, _ = iv_based_regime_correlation(
-                        prices,
-                        current_ivs,
-                        vol_window=int(regime_vol_window),
-                        vol_threshold=float(regime_vol_threshold),
-                        min_observations=int(min_regime_observations),
-                    )
-                    corr_source_label = f"IV-based hard-switch regime correlation, pair avg IV threshold={regime_vol_threshold:.0%}, realized-vol window={regime_vol_window}D"
+            simulation_inputs, market_caps, iv_estimates, market_cap_source_label, iv_source_label = prepare_simulation_inputs(company_inputs, market_cap_source, iv_source, target_date)
+            selected_correlation_matrix, corr_source_label, price_info, regime_diagnostics = select_correlation_matrix(
+                correlation_source,
+                simulation_inputs,
+                manual_correlation_matrix,
+                price_history_period,
+                float(ewma_lambda),
+                int(rolling_lookback),
+                int(regime_vol_window),
+                float(smooth_low_quantile),
+                float(smooth_high_quantile),
+                float(regime_vol_threshold),
+                int(min_regime_observations),
+            )
 
             st.session_state.last_result = run_probability_engine(simulation_inputs, selected_correlation_matrix, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed))
+            st.session_state.last_fixed_sensitivity = fixed_correlation_sensitivity(simulation_inputs, int(days_to_target), int(simulations), int(seed))
             st.session_state.last_error = None
             st.session_state.last_corr_source = corr_source_label
             st.session_state.last_price_info = price_info
@@ -538,6 +572,7 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_run = {"time": datetime.now().strftime("%H:%M:%S"), "target_date": target_date.isoformat(), "days_to_target": int(days_to_target), "horizon_years": horizon_years, "simulations": int(simulations), "seed": int(seed)}
         except Exception as exc:
             st.session_state.last_result = None
+            st.session_state.last_fixed_sensitivity = None
             st.session_state.last_error = str(exc)
             st.session_state.last_run = None
             st.session_state.last_corr_source = None
@@ -605,6 +640,31 @@ with results_tab:
         if table_event.selection.rows:
             selected_from_table = results_display.iloc[table_event.selection.rows[0]]["Ticker"]
 
+        st.subheader("Fixed correlation sensitivity")
+        st.write("This is part of the same calculation. It reruns the same inputs with every pairwise correlation forced to 0%, 5%, 10%, ... 95%.")
+        fixed_sensitivity = st.session_state.last_fixed_sensitivity
+        if fixed_sensitivity is not None and not fixed_sensitivity.empty:
+            fixed_probability_pivot = fixed_sensitivity.pivot(index="Fixed correlation", columns="Ticker", values="Model probability")
+            st.dataframe(fixed_probability_pivot.map(pct), use_container_width=True)
+
+            sensitivity_ticker = st.selectbox("Ticker for correlation sensitivity", fixed_probability_pivot.columns.tolist(), index=fixed_probability_pivot.columns.tolist().index(selected_from_table) if selected_from_table in fixed_probability_pivot.columns else 0)
+            sensitivity_slice = fixed_sensitivity[fixed_sensitivity["Ticker"] == sensitivity_ticker].sort_values("Fixed correlation")
+            left, right = st.columns(2)
+            with left:
+                st.plotly_chart(
+                    px.line(sensitivity_slice, x="Fixed correlation", y="Model probability", markers=True, title=f"{sensitivity_ticker}: P(#1) vs fixed correlation"),
+                    use_container_width=True,
+                    key="main_fixed_corr_probability_line",
+                )
+            with right:
+                st.plotly_chart(
+                    px.line(sensitivity_slice, x="Fixed correlation", y="Average rank", markers=True, title=f"{sensitivity_ticker}: average rank vs fixed correlation"),
+                    use_container_width=True,
+                    key="main_fixed_corr_rank_line",
+                )
+            with st.expander("Full fixed-correlation sensitivity table"):
+                st.dataframe(display_fixed_sensitivity(fixed_sensitivity), use_container_width=True, hide_index=True)
+
         st.subheader(f"Company detail: {selected_from_table}")
         selected_row = ticker_row(result, selected_from_table)
         m1, m2, m3, m4, m5 = st.columns(5)
@@ -640,9 +700,6 @@ with results_tab:
             st.plotly_chart(path_fan_chart(path_sample, path_percentiles, inspect_ticker), use_container_width=True, key="results_path_fan_chart")
         with path_right:
             st.plotly_chart(terminal_distribution_chart(result, inspect_ticker), use_container_width=True, key="results_terminal_histogram")
-
-        st.subheader("Starting lead diagnostics")
-        st.dataframe(leader_gap_table(result, inspect_ticker), use_container_width=True, hide_index=True)
 
         st.subheader("Compare simulated market-cap distributions")
         default_compare = available_tickers[: min(5, len(available_tickers))]
@@ -694,10 +751,11 @@ with methodology_tab:
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
     st.write("The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company and ranks companies from largest to smallest.")
 
+    st.subheader("Fixed correlation sensitivity")
+    st.write("The Results tab includes a direct stress test that reruns the same company inputs with every off-diagonal pairwise correlation forced to 0%, 5%, 10%, ..., 95%. This isolates the importance of the absolute correlation level from the historical estimation method.")
+
     st.subheader("Vol-adjusted smooth correlation")
-    st.write(
-        "This mode maps current average pair IV into the historical distribution of pair realized volatility. The resulting percentile becomes the blend weight between low-vol and high-vol historical pair correlations. No manual switch threshold is required for the blend weight."
-    )
+    st.write("This mode maps current average pair IV into the historical distribution of pair realized volatility. The resulting percentile becomes the blend weight between low-vol and high-vol historical pair correlations. No manual switch threshold is required for the blend weight.")
     st.code("w = percentile_rank(avg_current_IV_ij, historical_pair_realized_vol_ij)\nCorr_ij = (1 - w) * Corr_low_ij + w * Corr_high_ij")
 
     st.subheader("Pairwise probability audit")
