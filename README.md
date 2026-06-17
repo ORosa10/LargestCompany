@@ -20,7 +20,7 @@ The next important product step is to replace manual Polymarket placeholders wit
 
 ## Phase 1 Scope
 
-This phase builds the probability engine, current market-cap ingestion, historical correlation estimation, and an MVP implied-volatility source.
+This phase builds the probability engine, current market-cap ingestion, historical correlation estimation, volatility-regime correlation sensitivity, and an MVP implied-volatility source.
 
 It does not include:
 
@@ -97,11 +97,14 @@ This is an MVP near-ATM estimate. It is not a full volatility smile/surface cali
 
 ## Correlation Estimation
 
-The app supports three correlation modes:
+The app supports these correlation modes:
 
 1. EWMA historical correlation, default
 2. Rolling historical correlation
-3. Manual correlation matrix
+3. Low-vol regime correlation
+4. High-vol regime correlation
+5. IV-based regime correlation
+6. Manual correlation matrix
 
 Historical methods use adjusted close prices from Yahoo Finance through `yfinance`.
 
@@ -124,11 +127,35 @@ Cov_t = lambda * Cov_{t-1} + (1 - lambda) * r_t r_t'
 Corr_ij = Cov_ij / sqrt(Cov_ii * Cov_jj)
 ```
 
+Volatility-regime correlation:
+
+```text
+realized_vol_i,t = rolling_std(return_i, window) * sqrt(252)
+pair_vol_ij,t = average(realized_vol_i,t, realized_vol_j,t)
+```
+
+Low-vol regime correlation uses historical return days where pair volatility is below the selected threshold. High-vol regime correlation uses historical return days where pair volatility is above the selected threshold.
+
+IV-based regime correlation uses current pair IV to select the historical regime pair by pair:
+
+```text
+avg_current_IV_ij = average(IV_i, IV_j)
+if avg_current_IV_ij >= threshold:
+    use high-vol historical correlation for pair i,j
+else:
+    use low-vol historical correlation for pair i,j
+```
+
+This is a sensitivity tool. It is not a claim that the regime is forecastable or that current IV fully determines future realized correlation.
+
 Supported controls:
 
 - price history period: 2y, 5y, 10y
 - rolling lookback: 63, 126, 252, 504, 756 trading days
 - EWMA lambda: 0.94 or 0.97
+- realized-vol regime window: 20 or 63 trading days
+- realized-vol / IV threshold: default 50%
+- minimum observations per pair regime: default 30
 
 The final correlation matrix is symmetrized, clipped to [-1, 1], forced to diagonal 1.0, and repaired for small numerical positive-semidefinite issues before simulation.
 
@@ -150,6 +177,7 @@ The app also includes:
 
 - ticker drilldown directly on the main Results tab
 - selected ticker rank distribution
+- pairwise probability audit
 - interactive company comparison box plot
 - terminal market-cap distribution percentiles for every company
 - exact rank probability matrix, showing probability of Rank 1, Rank 2, Rank 3, etc.
@@ -183,7 +211,7 @@ python -m streamlit run app.py
 app.py            Streamlit dashboard
 model.py          Probability engine
 market_data.py    Yahoo current market-cap extraction
-correlations.py   Historical correlation estimation
+correlations.py   Historical and volatility-regime correlation estimation
 iv_surfaces.py    Yahoo option-chain near-ATM IV extraction
 requirements.txt  Python dependencies
 ```
