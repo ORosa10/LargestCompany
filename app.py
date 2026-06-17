@@ -10,7 +10,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from correlations import ewma_correlation, fetch_adjusted_close, rolling_correlation
+from correlations import (
+    ewma_correlation,
+    fetch_adjusted_close,
+    iv_based_regime_correlation,
+    rolling_correlation,
+    volatility_regime_correlation,
+)
 from iv_surfaces import apply_iv_estimates, estimate_atm_ivs
 from market_data import apply_market_caps, fetch_market_caps
 from model import default_company_inputs, default_correlation_matrix, run_probability_engine
@@ -26,8 +32,7 @@ st.warning(
 )
 st.info(
     "This app does not predict stock prices. It translates current market caps, implied "
-    "volatility, target-date horizon, and correlation assumptions into fair ranking probabilities, "
-    "then compares them with Polymarket YES prices."
+    "volatility, target-date horizon, and correlation assumptions into fair ranking probabilities."
 )
 
 
@@ -55,30 +60,9 @@ def dollars_trillions(value: float) -> str:
 
 
 def display_market_caps(market_caps: pd.DataFrame) -> pd.DataFrame:
-    display = market_caps.copy().rename(
-        columns={"ticker": "Ticker", "yahoo_ticker": "Yahoo ticker", "market_cap": "Market cap", "source": "Source"}
-    )
+    display = market_caps.copy().rename(columns={"ticker": "Ticker", "yahoo_ticker": "Yahoo ticker", "market_cap": "Market cap", "source": "Source"})
     display["Market cap"] = display["Market cap"].map(dollars_trillions)
     return display[["Ticker", "Yahoo ticker", "Market cap", "Source"]]
-
-
-def display_results(results: pd.DataFrame) -> pd.DataFrame:
-    display = results.copy().rename(
-        columns={
-            "Current market cap": "Mkt cap",
-            "Implied volatility": "IV",
-            "Polymarket YES price": "Poly price",
-            "Model probability": "Model prob",
-            "Average rank": "Avg rank",
-            "Probability Top 2": "Top 2",
-            "Probability Top 3": "Top 3",
-        }
-    )
-    display["Mkt cap"] = display["Mkt cap"].map(dollars_trillions)
-    for column in ["IV", "Poly price", "Model prob", "Edge", "Top 2", "Top 3"]:
-        display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{value:.2%}")
-    display["Avg rank"] = display["Avg rank"].map(lambda value: f"{value:.2f}")
-    return display[["Ticker", "Mkt cap", "IV", "Poly price", "Model prob", "Edge", "Avg rank", "Top 2", "Top 3"]]
 
 
 def display_iv_estimates(iv_estimates: pd.DataFrame) -> pd.DataFrame:
@@ -102,6 +86,25 @@ def display_iv_estimates(iv_estimates: pd.DataFrame) -> pd.DataFrame:
     return display[["Ticker", "Yahoo ticker", "Target date", "Option expiry used", "Spot", "ATM strike", "ATM IV", "Call IV", "Put IV"]]
 
 
+def display_results(results: pd.DataFrame) -> pd.DataFrame:
+    display = results.copy().rename(
+        columns={
+            "Current market cap": "Mkt cap",
+            "Implied volatility": "IV",
+            "Polymarket YES price": "Poly price",
+            "Model probability": "Model prob",
+            "Average rank": "Avg rank",
+            "Probability Top 2": "Top 2",
+            "Probability Top 3": "Top 3",
+        }
+    )
+    display["Mkt cap"] = display["Mkt cap"].map(dollars_trillions)
+    for column in ["IV", "Poly price", "Model prob", "Edge", "Top 2", "Top 3"]:
+        display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{value:.2%}")
+    display["Avg rank"] = display["Avg rank"].map(lambda value: f"{value:.2f}")
+    return display[["Ticker", "Mkt cap", "IV", "Poly price", "Model prob", "Edge", "Avg rank", "Top 2", "Top 3"]]
+
+
 def market_cap_percentile_table(result) -> pd.DataFrame:
     rows = []
     percentiles = {"P1": 0.01, "P5": 0.05, "P25": 0.25, "P50": 0.50, "P75": 0.75, "P95": 0.95, "P99": 0.99}
@@ -112,8 +115,7 @@ def market_cap_percentile_table(result) -> pd.DataFrame:
             row[label] = caps.quantile(quantile)
         rows.append(row)
     table = pd.DataFrame(rows)
-    rank_lookup = result.results.set_index("Ticker")["Average rank"]
-    table["Average rank"] = table["Ticker"].map(rank_lookup)
+    table["Average rank"] = table["Ticker"].map(result.results.set_index("Ticker")["Average rank"])
     return table.sort_values("P50", ascending=False, ignore_index=True)
 
 
@@ -127,11 +129,10 @@ def display_market_cap_percentiles(percentiles: pd.DataFrame) -> pd.DataFrame:
 
 def rank_probability_matrix(result) -> pd.DataFrame:
     ranks = result.ranks
-    max_rank = len(ranks.columns)
     rows = []
     for ticker in ranks.columns:
         row = {"Ticker": ticker}
-        for rank in range(1, max_rank + 1):
+        for rank in range(1, len(ranks.columns) + 1):
             row[f"Rank {rank}"] = (ranks[ticker] == rank).mean()
         rows.append(row)
     return pd.DataFrame(rows)
@@ -148,31 +149,29 @@ def display_rank_probability_matrix(rank_probs: pd.DataFrame) -> pd.DataFrame:
 def selected_ticker_summary(result, ticker: str) -> pd.DataFrame:
     caps = result.terminal_market_caps[ticker]
     ranks = result.ranks[ticker]
-    return pd.DataFrame(
-        [
-            {"Metric": "Simulated market cap mean", "Value": dollars_trillions(caps.mean())},
-            {"Metric": "Simulated market cap median", "Value": dollars_trillions(caps.median())},
-            {"Metric": "1st percentile market cap", "Value": dollars_trillions(caps.quantile(0.01))},
-            {"Metric": "5th percentile market cap", "Value": dollars_trillions(caps.quantile(0.05))},
-            {"Metric": "25th percentile market cap", "Value": dollars_trillions(caps.quantile(0.25))},
-            {"Metric": "75th percentile market cap", "Value": dollars_trillions(caps.quantile(0.75))},
-            {"Metric": "95th percentile market cap", "Value": dollars_trillions(caps.quantile(0.95))},
-            {"Metric": "99th percentile market cap", "Value": dollars_trillions(caps.quantile(0.99))},
-            {"Metric": "Average simulated rank", "Value": f"{ranks.mean():.2f}"},
-            {"Metric": "Median simulated rank", "Value": f"{ranks.median():.0f}"},
-        ]
-    )
-
-
-def terminal_cap_long(result, tickers: list[str]) -> pd.DataFrame:
-    selected = result.terminal_market_caps[tickers]
-    cap_long = selected.melt(var_name="Ticker", value_name="Simulated market cap")
-    cap_long["Simulated market cap ($T)"] = cap_long["Simulated market cap"] / 1e12
-    return cap_long
+    rows = [
+        ("Simulated market cap mean", dollars_trillions(caps.mean())),
+        ("Simulated market cap median", dollars_trillions(caps.median())),
+        ("1st percentile market cap", dollars_trillions(caps.quantile(0.01))),
+        ("5th percentile market cap", dollars_trillions(caps.quantile(0.05))),
+        ("25th percentile market cap", dollars_trillions(caps.quantile(0.25))),
+        ("75th percentile market cap", dollars_trillions(caps.quantile(0.75))),
+        ("95th percentile market cap", dollars_trillions(caps.quantile(0.95))),
+        ("99th percentile market cap", dollars_trillions(caps.quantile(0.99))),
+        ("Average simulated rank", f"{ranks.mean():.2f}"),
+        ("Median simulated rank", f"{ranks.median():.0f}"),
+    ]
+    return pd.DataFrame([{"Metric": metric, "Value": value} for metric, value in rows])
 
 
 def ticker_row(result, ticker: str) -> pd.Series:
     return result.results.set_index("Ticker").loc[ticker]
+
+
+def terminal_cap_long(result, tickers: list[str]) -> pd.DataFrame:
+    cap_long = result.terminal_market_caps[tickers].melt(var_name="Ticker", value_name="Simulated market cap")
+    cap_long["Simulated market cap ($T)"] = cap_long["Simulated market cap"] / 1e12
+    return cap_long
 
 
 def leader_gap_table(result, ticker: str) -> pd.DataFrame:
@@ -218,12 +217,8 @@ def pairwise_probability_audit(result, ticker: str, days_to_target: int) -> pd.D
         log_gap_now = np.log(selected_cap / other_cap)
         mean_log_gap = log_gap_now - 0.5 * (selected_iv**2 - other_iv**2) * years
         horizon_vol = relative_vol * sqrt(years)
-        if horizon_vol <= 1e-12:
-            z_score = np.inf if mean_log_gap > 0 else -np.inf
-            pairwise_probability = 1.0 if mean_log_gap > 0 else 0.0
-        else:
-            z_score = mean_log_gap / horizon_vol
-            pairwise_probability = normal_cdf(z_score)
+        z_score = np.inf if horizon_vol <= 1e-12 and mean_log_gap > 0 else mean_log_gap / horizon_vol
+        pairwise_probability = 1.0 if horizon_vol <= 1e-12 and mean_log_gap > 0 else normal_cdf(z_score)
         rows.append(
             {
                 "Competitor": other,
@@ -262,12 +257,10 @@ def selected_rank_probabilities(result, ticker: str) -> pd.DataFrame:
 def simulate_marginal_paths(current_cap: float, sigma: float, days: int, path_count: int, seed: int, ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     steps = max(int(days), 1)
     dt = 1.0 / 365.0
-    rng_seed = int(seed) + zlib.crc32(ticker.encode("utf-8"))
-    rng = np.random.default_rng(rng_seed)
+    rng = np.random.default_rng(int(seed) + zlib.crc32(ticker.encode("utf-8")))
     shocks = rng.standard_normal((path_count, steps))
     log_increments = (-0.5 * sigma**2 * dt) + sigma * np.sqrt(dt) * shocks
-    log_paths = np.cumsum(log_increments, axis=1)
-    caps = current_cap * np.exp(log_paths)
+    caps = current_cap * np.exp(np.cumsum(log_increments, axis=1))
     caps = np.column_stack([np.full(path_count, current_cap), caps])
     day_grid = np.arange(steps + 1)
 
@@ -283,32 +276,20 @@ def simulate_marginal_paths(current_cap: float, sigma: float, days: int, path_co
         percentile_rows.append(
             {
                 "Day": day,
-                "P1": np.quantile(values, 0.01) / 1e12,
                 "P5": np.quantile(values, 0.05) / 1e12,
                 "P25": np.quantile(values, 0.25) / 1e12,
                 "P50": np.quantile(values, 0.50) / 1e12,
                 "P75": np.quantile(values, 0.75) / 1e12,
                 "P95": np.quantile(values, 0.95) / 1e12,
-                "P99": np.quantile(values, 0.99) / 1e12,
             }
         )
-    percentile_paths = pd.DataFrame(percentile_rows)
-    return sample_long, percentile_paths
+    return sample_long, pd.DataFrame(percentile_rows)
 
 
 def path_fan_chart(sample_long: pd.DataFrame, percentile_paths: pd.DataFrame, ticker: str) -> go.Figure:
     fig = go.Figure()
     for _, path_data in sample_long.groupby("Path"):
-        fig.add_trace(
-            go.Scatter(
-                x=path_data["Day"],
-                y=path_data["Market cap ($T)"],
-                mode="lines",
-                line={"color": "rgba(80, 130, 190, 0.08)", "width": 1},
-                showlegend=False,
-                hoverinfo="skip",
-            )
-        )
+        fig.add_trace(go.Scatter(x=path_data["Day"], y=path_data["Market cap ($T)"], mode="lines", line={"color": "rgba(80, 130, 190, 0.08)", "width": 1}, showlegend=False, hoverinfo="skip"))
     fig.add_trace(go.Scatter(x=percentile_paths["Day"], y=percentile_paths["P95"], mode="lines", line={"width": 0}, showlegend=False, hoverinfo="skip"))
     fig.add_trace(go.Scatter(x=percentile_paths["Day"], y=percentile_paths["P5"], mode="lines", fill="tonexty", fillcolor="rgba(30, 120, 220, 0.16)", line={"width": 0}, name="P5-P95"))
     fig.add_trace(go.Scatter(x=percentile_paths["Day"], y=percentile_paths["P75"], mode="lines", line={"width": 0}, showlegend=False, hoverinfo="skip"))
@@ -320,22 +301,29 @@ def path_fan_chart(sample_long: pd.DataFrame, percentile_paths: pd.DataFrame, ti
 
 def terminal_distribution_chart(result, ticker: str) -> go.Figure:
     caps_t = result.terminal_market_caps[ticker] / 1e12
-    percentiles = caps_t.quantile([0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99])
     fig = px.histogram(x=caps_t, nbins=90, title=f"Terminal market-cap distribution: {ticker}")
     fig.update_layout(xaxis_title="Terminal market cap ($T)", yaxis_title="Simulation count")
-    for q, value in percentiles.items():
-        label = f"P{int(q * 100)}"
-        fig.add_vline(x=value, line_dash="dash", annotation_text=label, annotation_position="top")
+    for q, value in caps_t.quantile([0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99]).items():
+        fig.add_vline(x=value, line_dash="dash", annotation_text=f"P{int(q * 100)}", annotation_position="top")
     return fig
+
+
+def display_regime_diagnostics(diagnostics: pd.DataFrame | None) -> pd.DataFrame | None:
+    if diagnostics is None or diagnostics.empty:
+        return None
+    display = diagnostics.copy()
+    if "Average current IV" in display.columns:
+        display["Average current IV"] = display["Average current IV"].map(lambda value: f"{value:.2%}")
+    if "Selected correlation" in display.columns:
+        display["Selected correlation"] = display["Selected correlation"].map(lambda value: f"{value:.2%}")
+    return display
 
 
 if "company_inputs" not in st.session_state:
     st.session_state.company_inputs = default_company_inputs()
-
 if "correlation_matrix" not in st.session_state:
     tickers = st.session_state.company_inputs["Ticker"].tolist()
     st.session_state.correlation_matrix = default_correlation_matrix(tickers)
-
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
     st.session_state.last_error = None
@@ -346,6 +334,7 @@ if "last_result" not in st.session_state:
     st.session_state.last_iv_estimates = None
     st.session_state.last_market_cap_source = None
     st.session_state.last_market_caps = None
+    st.session_state.last_regime_diagnostics = None
 
 
 today = date.today()
@@ -357,7 +346,6 @@ with st.sidebar:
     days_to_target = max((target_date - today).days, 1)
     horizon_years = days_to_target / 365.0
     st.caption(f"Horizon: {days_to_target} days ({horizon_years:.2f} years)")
-
     simulations = st.number_input("Monte Carlo simulations", min_value=1_000, max_value=2_000_000, value=100_000, step=10_000)
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
 
@@ -368,10 +356,24 @@ with st.sidebar:
     iv_source = st.selectbox("Implied volatility source", ["Manual IV inputs", "Yahoo option-chain near-ATM IV"], index=0)
 
     st.header("Correlation source")
-    correlation_source = st.selectbox("Correlation method", ["EWMA historical correlation", "Rolling historical correlation", "Manual correlation matrix"], index=0)
+    correlation_source = st.selectbox(
+        "Correlation method",
+        [
+            "EWMA historical correlation",
+            "Rolling historical correlation",
+            "Low-vol regime correlation",
+            "High-vol regime correlation",
+            "IV-based regime correlation",
+            "Manual correlation matrix",
+        ],
+        index=0,
+    )
     price_history_period = st.selectbox("Yahoo Finance price history", ["2y", "5y", "10y"], index=1)
     ewma_lambda = st.selectbox("EWMA lambda", [0.94, 0.97], index=1)
     rolling_lookback = st.selectbox("Rolling lookback days", [63, 126, 252, 504, 756], index=2)
+    regime_vol_window = st.selectbox("Regime realized-vol window", [20, 63], index=1)
+    regime_vol_threshold = st.number_input("Regime vol / IV threshold", min_value=0.05, max_value=2.0, value=0.50, step=0.05, format="%.2f")
+    min_regime_observations = st.number_input("Min observations per pair regime", min_value=10, max_value=252, value=30, step=10)
 
     selected_ticker_sidebar = st.selectbox("Selected ticker for diagnostics", st.session_state.company_inputs["Ticker"].astype(str).tolist())
     run_button = st.button("Run / refresh simulation", type="primary", use_container_width=True)
@@ -387,7 +389,7 @@ with inputs_tab:
                 {"Input": "Current market capitalization", "Current source": "Yahoo Finance current market cap or manual input", "Future source": "Configurable market data provider"},
                 {"Input": "Annualized implied volatility", "Current source": "Manual input or Yahoo option-chain near-ATM IV", "Future source": "Robust IV surface provider"},
                 {"Input": "Polymarket YES price", "Current source": "Manual placeholder", "Future source": "Polymarket market API or manual override"},
-                {"Input": "Correlation matrix", "Current source": "Yahoo Finance historical adjusted close prices or manual input", "Future source": "Configurable institutional data provider"},
+                {"Input": "Correlation matrix", "Current source": "Yahoo historical prices: EWMA, rolling, vol-regime, IV-based regime, or manual", "Future source": "Configurable institutional data provider"},
                 {"Input": "Target date / maturity", "Current source": "User-selected date", "Future source": "Parsed from prediction-market event rules"},
             ]
         ),
@@ -396,7 +398,7 @@ with inputs_tab:
     )
 
     st.subheader("Company inputs")
-    st.write("Edit tickers here to change the company universe. Manual market cap / IV values are used only when manual sources are selected in the sidebar.")
+    st.write("Manual market cap / IV values are used only when manual sources are selected in the sidebar.")
     company_inputs = st.data_editor(
         st.session_state.company_inputs,
         num_rows="dynamic",
@@ -411,23 +413,20 @@ with inputs_tab:
     )
     st.session_state.company_inputs = company_inputs
 
-    tickers = company_inputs["Ticker"].astype(str).str.strip().tolist()
-    tickers = [ticker for ticker in tickers if ticker]
+    tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
     if tickers:
         current_corr = st.session_state.correlation_matrix.reindex(index=tickers, columns=tickers)
-        fallback_corr = default_correlation_matrix(tickers)
-        current_corr = current_corr.fillna(fallback_corr)
+        current_corr = current_corr.fillna(default_correlation_matrix(tickers))
     else:
         current_corr = st.session_state.correlation_matrix
 
     st.subheader("Manual correlation matrix")
     st.write("Used only when **Manual correlation matrix** is selected in the sidebar.")
-    correlation_matrix = st.data_editor(
+    st.session_state.correlation_matrix = st.data_editor(
         current_corr,
         use_container_width=True,
         column_config={ticker: st.column_config.NumberColumn(min_value=-1.0, max_value=1.0, step=0.05) for ticker in tickers},
     )
-    st.session_state.correlation_matrix = correlation_matrix
 
 
 company_inputs = st.session_state.company_inputs
@@ -436,9 +435,7 @@ manual_correlation_matrix = st.session_state.correlation_matrix
 if run_button or st.session_state.last_result is None:
     with st.spinner("Running Monte Carlo simulation..."):
         try:
-            clean_tickers = company_inputs["Ticker"].astype(str).str.strip().tolist()
-            clean_tickers = [ticker for ticker in clean_tickers if ticker]
-
+            clean_tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
             simulation_inputs = company_inputs.copy()
             market_caps = None
             if market_cap_source == "Yahoo Finance current market cap":
@@ -457,6 +454,7 @@ if run_button or st.session_state.last_result is None:
                 iv_source_label = "Manual IV inputs"
 
             price_info = None
+            regime_diagnostics = None
             if correlation_source == "Manual correlation matrix":
                 selected_correlation_matrix = manual_correlation_matrix
                 corr_source_label = "Manual correlation matrix"
@@ -466,9 +464,39 @@ if run_button or st.session_state.last_result is None:
                 if correlation_source == "EWMA historical correlation":
                     selected_correlation_matrix = ewma_correlation(prices, float(ewma_lambda))
                     corr_source_label = f"EWMA historical correlation, lambda={ewma_lambda}, Yahoo Finance {price_history_period}"
-                else:
+                elif correlation_source == "Rolling historical correlation":
                     selected_correlation_matrix = rolling_correlation(prices, int(rolling_lookback))
                     corr_source_label = f"Rolling historical correlation, {rolling_lookback} trading days, Yahoo Finance {price_history_period}"
+                elif correlation_source == "Low-vol regime correlation":
+                    selected_correlation_matrix, counts = volatility_regime_correlation(
+                        prices,
+                        vol_window=int(regime_vol_window),
+                        vol_threshold=float(regime_vol_threshold),
+                        regime="low",
+                        min_observations=int(min_regime_observations),
+                    )
+                    regime_diagnostics = counts.reset_index().rename(columns={"index": "Ticker"})
+                    corr_source_label = f"Low-vol regime correlation, realized-vol threshold={regime_vol_threshold:.0%}, window={regime_vol_window}D"
+                elif correlation_source == "High-vol regime correlation":
+                    selected_correlation_matrix, counts = volatility_regime_correlation(
+                        prices,
+                        vol_window=int(regime_vol_window),
+                        vol_threshold=float(regime_vol_threshold),
+                        regime="high",
+                        min_observations=int(min_regime_observations),
+                    )
+                    regime_diagnostics = counts.reset_index().rename(columns={"index": "Ticker"})
+                    corr_source_label = f"High-vol regime correlation, realized-vol threshold={regime_vol_threshold:.0%}, window={regime_vol_window}D"
+                else:
+                    current_ivs = simulation_inputs.set_index("Ticker")["Implied volatility"].astype(float)
+                    selected_correlation_matrix, regime_diagnostics, _ = iv_based_regime_correlation(
+                        prices,
+                        current_ivs,
+                        vol_window=int(regime_vol_window),
+                        vol_threshold=float(regime_vol_threshold),
+                        min_observations=int(min_regime_observations),
+                    )
+                    corr_source_label = f"IV-based regime correlation, pair avg IV threshold={regime_vol_threshold:.0%}, realized-vol window={regime_vol_window}D"
 
             st.session_state.last_result = run_probability_engine(simulation_inputs, selected_correlation_matrix, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed))
             st.session_state.last_error = None
@@ -478,6 +506,7 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_iv_estimates = iv_estimates
             st.session_state.last_market_cap_source = market_cap_source_label
             st.session_state.last_market_caps = market_caps
+            st.session_state.last_regime_diagnostics = regime_diagnostics
             st.session_state.last_run = {"time": datetime.now().strftime("%H:%M:%S"), "target_date": target_date.isoformat(), "days_to_target": int(days_to_target), "horizon_years": horizon_years, "simulations": int(simulations), "seed": int(seed)}
         except Exception as exc:
             st.session_state.last_result = None
@@ -489,6 +518,7 @@ if run_button or st.session_state.last_result is None:
             st.session_state.last_iv_estimates = None
             st.session_state.last_market_cap_source = None
             st.session_state.last_market_caps = None
+            st.session_state.last_regime_diagnostics = None
 
 
 result = st.session_state.last_result
@@ -508,7 +538,6 @@ with results_tab:
             "Simulation completed"
             f" | target {run.get('target_date', target_date.isoformat())}"
             f" | {run.get('days_to_target', days_to_target)} days"
-            f" | {run.get('horizon_years', horizon_years):.2f} years"
             f" | {run.get('simulations', simulations):,} paths"
             f" | seed {run.get('seed', seed)}"
             f" | last run {run.get('time', 'now')}"
@@ -523,10 +552,13 @@ with results_tab:
         if st.session_state.last_market_caps is not None:
             with st.expander("Yahoo market caps used"):
                 st.dataframe(display_market_caps(st.session_state.last_market_caps), use_container_width=True, hide_index=True)
-
         if st.session_state.last_iv_estimates is not None:
             with st.expander("Yahoo option-chain IV estimates used"):
                 st.dataframe(display_iv_estimates(st.session_state.last_iv_estimates), use_container_width=True, hide_index=True)
+        if st.session_state.last_regime_diagnostics is not None:
+            with st.expander("Volatility-regime correlation diagnostics"):
+                shown = display_regime_diagnostics(st.session_state.last_regime_diagnostics)
+                st.dataframe(shown if shown is not None else st.session_state.last_regime_diagnostics, use_container_width=True, hide_index=True)
 
         for warning in result.warnings:
             st.warning(warning)
@@ -541,14 +573,7 @@ with results_tab:
         st.subheader("Statistical ranking probabilities")
         results_display = display_results(result.results)
         selected_from_table = selected_ticker_sidebar
-        table_event = st.dataframe(
-            results_display,
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="results_probability_table",
-        )
+        table_event = st.dataframe(results_display, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="results_probability_table")
         if table_event.selection.rows:
             selected_from_table = results_display.iloc[table_event.selection.rows[0]]["Ticker"]
 
@@ -571,8 +596,7 @@ with results_tab:
             st.dataframe(rank_detail, use_container_width=True, hide_index=True)
         with detail_right:
             rank_data = result.rank_distribution[result.rank_distribution["Ticker"] == inspect_ticker]
-            rank_chart = px.bar(rank_data, x="Rank", y="Probability", title=f"Rank Distribution: {inspect_ticker}")
-            st.plotly_chart(rank_chart, use_container_width=True, key="results_rank_distribution_chart")
+            st.plotly_chart(px.bar(rank_data, x="Rank", y="Probability", title=f"Rank Distribution: {inspect_ticker}"), use_container_width=True, key="results_rank_distribution_chart")
 
         st.subheader("Pairwise probability audit")
         st.write("This table explains the #1 probability pressure one competitor at a time. It is analytical and pairwise, so it is a diagnostic, not the full joint winner probability.")
@@ -582,14 +606,7 @@ with results_tab:
         st.subheader("Terminal distribution and path diagnostics")
         path_count = st.slider("Illustrative path count", min_value=50, max_value=2000, value=500, step=50)
         selected_row = ticker_row(result, inspect_ticker)
-        path_sample, path_percentiles = simulate_marginal_paths(
-            float(selected_row["Current market cap"]),
-            float(selected_row["Implied volatility"]),
-            int(run.get("days_to_target", days_to_target)),
-            int(path_count),
-            int(run.get("seed", seed)),
-            inspect_ticker,
-        )
+        path_sample, path_percentiles = simulate_marginal_paths(float(selected_row["Current market cap"]), float(selected_row["Implied volatility"]), int(run.get("days_to_target", days_to_target)), int(path_count), int(run.get("seed", seed)), inspect_ticker)
         path_left, path_right = st.columns(2)
         with path_left:
             st.plotly_chart(path_fan_chart(path_sample, path_percentiles, inspect_ticker), use_container_width=True, key="results_path_fan_chart")
@@ -597,27 +614,13 @@ with results_tab:
             st.plotly_chart(terminal_distribution_chart(result, inspect_ticker), use_container_width=True, key="results_terminal_histogram")
 
         st.subheader("Starting lead diagnostics")
-        st.write("Competitor required gain is the one-day static move needed to tie the selected company if the selected company's market cap is unchanged.")
         st.dataframe(leader_gap_table(result, inspect_ticker), use_container_width=True, hide_index=True)
 
         st.subheader("Compare simulated market-cap distributions")
         default_compare = available_tickers[: min(5, len(available_tickers))]
         compare_tickers = st.multiselect("Companies to compare", available_tickers, default=default_compare)
         if compare_tickers:
-            compare_long = terminal_cap_long(result, compare_tickers)
-            compare_chart = px.box(compare_long, x="Ticker", y="Simulated market cap ($T)", points=False, title="Selected Companies: Terminal Market-Cap Distributions")
-            st.plotly_chart(compare_chart, use_container_width=True, key="results_compare_box_chart")
-        else:
-            st.info("Select at least one company to show the comparison chart.")
-
-        best = result.most_undervalued
-        worst = result.most_overvalued
-        st.subheader("Interpretation")
-        st.write(
-            f"Under the current assumptions and target date **{run.get('target_date', target_date.isoformat())}**, "
-            f"**{best['Ticker']}** has the largest positive model-vs-Polymarket gap. "
-            f"**{worst['Ticker']}** has the largest negative gap. This is a statistical relative-value comparison under the supplied inputs."
-        )
+            st.plotly_chart(px.box(terminal_cap_long(result, compare_tickers), x="Ticker", y="Simulated market cap ($T)", points=False, title="Selected Companies: Terminal Market-Cap Distributions"), use_container_width=True, key="results_compare_box_chart")
 
 with diagnostics_tab:
     if result is None:
@@ -627,89 +630,58 @@ with diagnostics_tab:
         if selected_ticker_sidebar not in available_tickers:
             selected_ticker_sidebar = available_tickers[0]
 
-        percentiles = market_cap_percentile_table(result)
         st.subheader("Terminal market-cap distribution percentiles")
-        st.dataframe(display_market_cap_percentiles(percentiles), use_container_width=True, hide_index=True)
+        st.dataframe(display_market_cap_percentiles(market_cap_percentile_table(result)), use_container_width=True, hide_index=True)
 
         st.subheader("Rank probability matrix")
-        st.write("Each row shows the probability that a company finishes in each exact rank.")
         st.dataframe(display_rank_probability_matrix(rank_probability_matrix(result)), use_container_width=True, hide_index=True)
 
         st.subheader(f"Simulation detail: {selected_ticker_sidebar}")
         st.dataframe(selected_ticker_summary(result, selected_ticker_sidebar), use_container_width=True, hide_index=True)
 
         st.subheader(f"Pairwise probability audit: {selected_ticker_sidebar}")
-        st.dataframe(
-            display_pairwise_probability_audit(pairwise_probability_audit(result, selected_ticker_sidebar, int((st.session_state.last_run or {}).get("days_to_target", days_to_target)))),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(display_pairwise_probability_audit(pairwise_probability_audit(result, selected_ticker_sidebar, int((st.session_state.last_run or {}).get("days_to_target", days_to_target)))), use_container_width=True, hide_index=True)
 
-        cap_long = terminal_cap_long(result, available_tickers)
-        box_chart = px.box(cap_long, x="Ticker", y="Simulated market cap ($T)", points=False, title="Simulated Terminal Market-Cap Distributions by Ticker")
-        st.plotly_chart(box_chart, use_container_width=True, key="diagnostics_all_box_chart")
+        st.plotly_chart(px.box(terminal_cap_long(result, available_tickers), x="Ticker", y="Simulated market cap ($T)", points=False, title="Simulated Terminal Market-Cap Distributions by Ticker"), use_container_width=True, key="diagnostics_all_box_chart")
 
         chart_left, chart_right = st.columns(2)
         with chart_left:
-            probability_chart = px.scatter(
-                result.results,
-                x="Polymarket YES price",
-                y="Model probability",
-                text="Ticker",
-                title="Model Probability vs Polymarket Probability",
-                range_x=[0, max(0.01, result.results["Polymarket YES price"].max() * 1.15)],
-                range_y=[0, max(0.01, result.results["Model probability"].max() * 1.15)],
-            )
+            probability_chart = px.scatter(result.results, x="Polymarket YES price", y="Model probability", text="Ticker", title="Model Probability vs Polymarket Probability")
             probability_chart.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line={"dash": "dash", "color": "gray"})
             probability_chart.update_traces(textposition="top center")
             st.plotly_chart(probability_chart, use_container_width=True, key="diagnostics_probability_scatter")
-
         with chart_right:
-            edge_chart = px.bar(result.results.sort_values("Edge"), x="Ticker", y="Edge", title="Model Probability minus Polymarket Price", color="Edge", color_continuous_scale="RdYlGn")
-            st.plotly_chart(edge_chart, use_container_width=True, key="diagnostics_edge_chart")
+            st.plotly_chart(px.bar(result.results.sort_values("Edge"), x="Ticker", y="Edge", title="Model Probability minus Polymarket Price", color="Edge", color_continuous_scale="RdYlGn"), use_container_width=True, key="diagnostics_edge_chart")
 
         heatmap_left, dist_right = st.columns(2)
         with heatmap_left:
-            corr_chart = px.imshow(result.cleaned_correlation, zmin=-1, zmax=1, color_continuous_scale="RdBu", title="Selected Correlation Matrix", text_auto=".2f")
-            st.plotly_chart(corr_chart, use_container_width=True, key="diagnostics_corr_heatmap")
-
+            st.plotly_chart(px.imshow(result.cleaned_correlation, zmin=-1, zmax=1, color_continuous_scale="RdBu", title="Selected Correlation Matrix", text_auto=".2f"), use_container_width=True, key="diagnostics_corr_heatmap")
         with dist_right:
             rank_data = result.rank_distribution[result.rank_distribution["Ticker"] == selected_ticker_sidebar]
-            rank_chart = px.bar(rank_data, x="Rank", y="Probability", title=f"Rank Distribution: {selected_ticker_sidebar}")
-            st.plotly_chart(rank_chart, use_container_width=True, key="diagnostics_rank_distribution")
-
+            st.plotly_chart(px.bar(rank_data, x="Rank", y="Probability", title=f"Rank Distribution: {selected_ticker_sidebar}"), use_container_width=True, key="diagnostics_rank_distribution")
         st.plotly_chart(terminal_distribution_chart(result, selected_ticker_sidebar), use_container_width=True, key="diagnostics_terminal_histogram")
 
 with methodology_tab:
     st.subheader("Phase 1 model")
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
+    st.write("The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company and ranks companies from largest to smallest.")
+
+    st.subheader("Volatility-regime correlations")
     st.write(
-        "The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company, ranks companies from largest to smallest, and stores the winner and full rank vector."
+        "EWMA remains the default. Low-vol and high-vol regime modes estimate pairwise correlations only on historical days where the average rolling realized volatility of the pair is below or above the selected threshold. IV-based regime mode uses the current average IV of each pair to choose low or high historical correlation for that pair. This is a sensitivity tool, not a claim that regimes are forecastable."
     )
 
     st.subheader("Pairwise probability audit")
-    st.write(
-        "The pairwise audit computes P(selected company market cap > competitor market cap) analytically under the same lognormal inputs. It uses current market caps, selected IVs, selected correlation, and time to target. It is a diagnostic view, not a replacement for the full joint Monte Carlo ranking probability."
-    )
+    st.write("The pairwise audit computes P(selected company market cap > competitor market cap) analytically under the same lognormal inputs. It is diagnostic and does not replace the full joint Monte Carlo ranking probability.")
 
     st.subheader("Market cap source")
     st.write("Yahoo market cap mode uses yfinance fast_info.market_cap with a fallback to info['marketCap']. Manual market caps remain available for overrides.")
 
     st.subheader("IV source")
-    st.write(
-        "Manual IV remains available. The Yahoo option-chain mode fetches option chains with yfinance, selects the expiry closest to the target date, finds the strike nearest spot, and averages call/put implied volatility at that strike. This is a near-ATM IV estimate, not a full smile/surface calibration."
-    )
+    st.write("Manual IV remains available. Yahoo option-chain mode selects the expiry closest to the target date, finds the strike nearest spot, and averages call/put implied volatility at that strike. This is a near-ATM IV estimate, not a full smile/surface calibration.")
 
     st.subheader("Correlation estimation")
-    st.write(
-        "EWMA is the default method. The app downloads adjusted close prices from Yahoo Finance via yfinance, calculates daily log returns, demeans returns, estimates EWMA covariance, and converts covariance to correlation. Rolling correlation uses Pearson correlation of log returns over the selected trailing lookback window."
-    )
     st.code("r_t = log(P_t / P_{t-1})\nCov_t = lambda * Cov_{t-1} + (1 - lambda) * r_t r_t'\nCorr_ij = Cov_ij / sqrt(Cov_ii * Cov_jj)")
 
-    st.subheader("Distribution statistics")
-    st.write("The diagnostics tab reports terminal market-cap percentiles for every company: P1, P5, P25, P50, P75, P95, and P99. The rank probability matrix shows probability by exact finishing position.")
-
     st.subheader("What is not modeled yet")
-    st.write(
-        "Volatility skew/smile is not fully modeled yet. Yahoo option-chain mode gives a first live near-ATM IV estimate, but future versions should ingest full option chains, clean bid/ask quotes, and calibrate a full IV surface or terminal risk-neutral distribution."
-    )
+    st.write("Volatility skew/smile is not fully modeled yet. Future versions should ingest full option chains, clean bid/ask quotes, and calibrate a full IV surface or terminal risk-neutral distribution.")
