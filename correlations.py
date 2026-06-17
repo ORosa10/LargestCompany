@@ -75,9 +75,7 @@ def rolling_correlation(prices: pd.DataFrame, lookback_days: int) -> pd.DataFram
     if lookback_days <= 1:
         raise ValueError("lookback_days must be greater than 1.")
     if len(returns) < lookback_days:
-        raise ValueError(
-            f"Only {len(returns)} return observations available, but {lookback_days} requested."
-        )
+        raise ValueError(f"Only {len(returns)} return observations available, but {lookback_days} requested.")
     corr = returns.tail(lookback_days).corr(method="pearson")
     return validate_correlation_matrix(corr)
 
@@ -187,12 +185,7 @@ def volatility_regime_correlation(
     regime: str,
     min_observations: int = 30,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Estimate pairwise correlations conditional on low or high realized-vol regimes.
-
-    Regime classification is pair-specific and uses the average rolling realized
-    volatility of the two stocks. Because pair-specific histories can produce a
-    non-PSD matrix, the final matrix is validated and gently repaired.
-    """
+    """Estimate pairwise correlations conditional on low or high realized-vol regimes."""
 
     returns = calculate_log_returns(prices)
     realized_vol = rolling_realized_volatility(returns, vol_window).reindex(index=returns.index)
@@ -213,11 +206,7 @@ def iv_based_regime_correlation(
     vol_threshold: float,
     min_observations: int = 30,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Select low/high historical pair correlation using current average pair IV.
-
-    For each pair, if average(current IV_i, current IV_j) >= threshold, use the
-    historical high-realized-vol correlation for that pair; otherwise use low-vol.
-    """
+    """Select low/high historical pair correlation using current average pair IV."""
 
     returns = calculate_log_returns(prices)
     realized_vol = rolling_realized_volatility(returns, vol_window).reindex(index=returns.index)
@@ -259,6 +248,97 @@ def iv_based_regime_correlation(
             )
 
     return validate_correlation_matrix(corr), pd.DataFrame(diagnostics), pd.DataFrame({"Ticker": tickers})
+
+
+def _percentile_rank(values: pd.Series, point: float) -> float:
+    clean = values.dropna().astype(float)
+    if clean.empty:
+        return 0.5
+    return float((clean <= point).mean())
+
+
+def smooth_vol_adjusted_correlation(
+    prices: pd.DataFrame,
+    current_ivs: pd.Series,
+    *,
+    vol_window: int = 63,
+    low_quantile: float = 0.40,
+    high_quantile: float = 0.60,
+    min_observations: int = 30,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Blend low/high historical pair correlations using current IV percentile.
+
+    For each pair, current average pair IV is mapped into the historical
+    distribution of pair realized volatility. That percentile is the blend weight:
+    final_corr = (1 - w) * low_corr + w * high_corr.
+    """
+
+    if not 0.0 < low_quantile < high_quantile < 1.0:
+        raise ValueError("low_quantile and high_quantile must satisfy 0 < low < high < 1.")
+
+    returns = calculate_log_returns(prices)
+    realized_vol = rolling_realized_volatility(returns, vol_window).reindex(index=returns.index)
+    tickers = returns.columns.tolist()
+    corr = pd.DataFrame(np.eye(len(tickers)), index=tickers, columns=tickers)
+    diagnostics = []
+
+    for i, ticker_i in enumerate(tickers):
+        for ticker_j in tickers[i + 1 :]:
+            pair_vol = 0.5 * (realized_vol[ticker_i] + realized_vol[ticker_j])
+            pair_vol_clean = pair_vol.dropna().astype(float)
+            pair_returns_all = returns[[ticker_i, ticker_j]].dropna()
+
+            if pair_vol_clean.empty:
+                low_cutoff = np.nan
+                high_cutoff = np.nan
+                low_returns = pair_returns_all
+                high_returns = pair_returns_all
+                weight = 0.5
+                pair_iv = 0.5 * (float(current_ivs.loc[ticker_i]) + float(current_ivs.loc[ticker_j]))
+            else:
+                low_cutoff = float(pair_vol_clean.quantile(low_quantile))
+                high_cutoff = float(pair_vol_clean.quantile(high_quantile))
+                pair_iv = 0.5 * (float(current_ivs.loc[ticker_i]) + float(current_ivs.loc[ticker_j]))
+                weight = _percentile_rank(pair_vol_clean, pair_iv)
+
+                low_mask = pair_vol <= low_cutoff
+                high_mask = pair_vol >= high_cutoff
+                low_returns = returns.loc[low_mask, [ticker_i, ticker_j]].dropna()
+                high_returns = returns.loc[high_mask, [ticker_i, ticker_j]].dropna()
+
+            if len(low_returns) < min_observations:
+                low_returns = pair_returns_all
+            if len(high_returns) < min_observations:
+                high_returns = pair_returns_all
+
+            low_corr = low_returns[ticker_i].corr(low_returns[ticker_j])
+            high_corr = high_returns[ticker_i].corr(high_returns[ticker_j])
+            if not np.isfinite(low_corr):
+                low_corr = 0.0
+            if not np.isfinite(high_corr):
+                high_corr = low_corr
+
+            blended_corr = (1.0 - weight) * low_corr + weight * high_corr
+            corr.loc[ticker_i, ticker_j] = blended_corr
+            corr.loc[ticker_j, ticker_i] = blended_corr
+            diagnostics.append(
+                {
+                    "Ticker 1": ticker_i,
+                    "Ticker 2": ticker_j,
+                    "Average current IV": pair_iv,
+                    "Historical pair-vol percentile": weight,
+                    "Low-vol cutoff": low_cutoff,
+                    "High-vol cutoff": high_cutoff,
+                    "Low-regime correlation": low_corr,
+                    "High-regime correlation": high_corr,
+                    "Blend weight": weight,
+                    "Selected correlation": blended_corr,
+                    "Low observations": len(low_returns),
+                    "High observations": len(high_returns),
+                }
+            )
+
+    return validate_correlation_matrix(corr), pd.DataFrame(diagnostics)
 
 
 def validate_correlation_matrix(corr: pd.DataFrame, *, tolerance: float = 1e-8) -> pd.DataFrame:
