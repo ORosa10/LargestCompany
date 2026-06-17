@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from math import erf, sqrt
 import zlib
 
 import numpy as np
@@ -43,6 +44,10 @@ def load_yahoo_atm_ivs(tickers: tuple[str, ...], target_date_iso: str) -> pd.Dat
 @st.cache_data(show_spinner=False, ttl=15 * 60)
 def load_yahoo_market_caps(tickers: tuple[str, ...]) -> pd.DataFrame:
     return fetch_market_caps(list(tickers))
+
+
+def normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + erf(value / sqrt(2.0)))
 
 
 def dollars_trillions(value: float) -> str:
@@ -184,14 +189,69 @@ def leader_gap_table(result, ticker: str) -> pd.DataFrame:
                 "Competitor": other,
                 "Competitor market cap": dollars_trillions(other_cap),
                 "Selected lead": dollars_trillions(selected_cap - other_cap),
-                "Competitor required gain": other_cap / selected_cap - 1.0 if selected_cap > 0 else np.nan,
-                "Selected drawdown required": selected_cap / other_cap - 1.0 if other_cap > 0 else np.nan,
+                "Competitor required gain to tie": selected_cap / other_cap - 1.0 if other_cap > 0 else np.nan,
+                "Selected drawdown to tie": other_cap / selected_cap - 1.0 if selected_cap > 0 else np.nan,
             }
         )
-    output = pd.DataFrame(rows).sort_values("Competitor required gain", ascending=False)
-    output["Competitor required gain"] = output["Competitor required gain"].map(lambda value: f"{value:.2%}")
-    output["Selected drawdown required"] = output["Selected drawdown required"].map(lambda value: f"{value:.2%}")
+    output = pd.DataFrame(rows).sort_values("Competitor required gain to tie")
+    output["Competitor required gain to tie"] = output["Competitor required gain to tie"].map(lambda value: f"{value:.2%}")
+    output["Selected drawdown to tie"] = output["Selected drawdown to tie"].map(lambda value: f"{value:.2%}")
     return output
+
+
+def pairwise_probability_audit(result, ticker: str, days_to_target: int) -> pd.DataFrame:
+    rows = []
+    selected = ticker_row(result, ticker)
+    selected_cap = float(selected["Current market cap"])
+    selected_iv = float(selected["Implied volatility"])
+    years = max(days_to_target, 1) / 365.0
+
+    for _, other_row in result.results.iterrows():
+        other = other_row["Ticker"]
+        if other == ticker:
+            continue
+        other_cap = float(other_row["Current market cap"])
+        other_iv = float(other_row["Implied volatility"])
+        rho = float(result.cleaned_correlation.loc[ticker, other])
+        relative_var = selected_iv**2 + other_iv**2 - 2.0 * rho * selected_iv * other_iv
+        relative_vol = sqrt(max(relative_var, 0.0))
+        log_gap_now = np.log(selected_cap / other_cap)
+        mean_log_gap = log_gap_now - 0.5 * (selected_iv**2 - other_iv**2) * years
+        horizon_vol = relative_vol * sqrt(years)
+        if horizon_vol <= 1e-12:
+            z_score = np.inf if mean_log_gap > 0 else -np.inf
+            pairwise_probability = 1.0 if mean_log_gap > 0 else 0.0
+        else:
+            z_score = mean_log_gap / horizon_vol
+            pairwise_probability = normal_cdf(z_score)
+        rows.append(
+            {
+                "Competitor": other,
+                "Selected cap": selected_cap,
+                "Competitor cap": other_cap,
+                "Market-cap gap": selected_cap - other_cap,
+                "Log gap now": log_gap_now,
+                "Selected IV": selected_iv,
+                "Competitor IV": other_iv,
+                "Correlation": rho,
+                "Relative annual vol": relative_vol,
+                "Horizon vol": horizon_vol,
+                "Z-score": z_score,
+                "P(selected > competitor)": pairwise_probability,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("Market-cap gap", ascending=True, ignore_index=True)
+
+
+def display_pairwise_probability_audit(pairwise: pd.DataFrame) -> pd.DataFrame:
+    display = pairwise.copy()
+    for column in ["Selected cap", "Competitor cap", "Market-cap gap"]:
+        display[column] = display[column].map(dollars_trillions)
+    for column in ["Selected IV", "Competitor IV", "Correlation", "Relative annual vol", "Horizon vol", "P(selected > competitor)"]:
+        display[column] = display[column].map(lambda value: f"{value:.2%}")
+    display["Log gap now"] = display["Log gap now"].map(lambda value: f"{value:.2%}")
+    display["Z-score"] = display["Z-score"].map(lambda value: f"{value:.2f}")
+    return display
 
 
 def selected_rank_probabilities(result, ticker: str) -> pd.DataFrame:
@@ -238,7 +298,7 @@ def simulate_marginal_paths(current_cap: float, sigma: float, days: int, path_co
 
 def path_fan_chart(sample_long: pd.DataFrame, percentile_paths: pd.DataFrame, ticker: str) -> go.Figure:
     fig = go.Figure()
-    for path_id, path_data in sample_long.groupby("Path"):
+    for _, path_data in sample_long.groupby("Path"):
         fig.add_trace(
             go.Scatter(
                 x=path_data["Day"],
@@ -514,6 +574,11 @@ with results_tab:
             rank_chart = px.bar(rank_data, x="Rank", y="Probability", title=f"Rank Distribution: {inspect_ticker}")
             st.plotly_chart(rank_chart, use_container_width=True, key="results_rank_distribution_chart")
 
+        st.subheader("Pairwise probability audit")
+        st.write("This table explains the #1 probability pressure one competitor at a time. It is analytical and pairwise, so it is a diagnostic, not the full joint winner probability.")
+        pairwise = pairwise_probability_audit(result, inspect_ticker, int(run.get("days_to_target", days_to_target)))
+        st.dataframe(display_pairwise_probability_audit(pairwise), use_container_width=True, hide_index=True)
+
         st.subheader("Terminal distribution and path diagnostics")
         path_count = st.slider("Illustrative path count", min_value=50, max_value=2000, value=500, step=50)
         selected_row = ticker_row(result, inspect_ticker)
@@ -532,7 +597,7 @@ with results_tab:
             st.plotly_chart(terminal_distribution_chart(result, inspect_ticker), use_container_width=True, key="results_terminal_histogram")
 
         st.subheader("Starting lead diagnostics")
-        st.write("Positive competitor required gain means the competitor must rise by that amount versus the selected company's unchanged market cap to overtake it.")
+        st.write("Competitor required gain is the one-day static move needed to tie the selected company if the selected company's market cap is unchanged.")
         st.dataframe(leader_gap_table(result, inspect_ticker), use_container_width=True, hide_index=True)
 
         st.subheader("Compare simulated market-cap distributions")
@@ -572,6 +637,13 @@ with diagnostics_tab:
 
         st.subheader(f"Simulation detail: {selected_ticker_sidebar}")
         st.dataframe(selected_ticker_summary(result, selected_ticker_sidebar), use_container_width=True, hide_index=True)
+
+        st.subheader(f"Pairwise probability audit: {selected_ticker_sidebar}")
+        st.dataframe(
+            display_pairwise_probability_audit(pairwise_probability_audit(result, selected_ticker_sidebar, int((st.session_state.last_run or {}).get("days_to_target", days_to_target)))),
+            use_container_width=True,
+            hide_index=True,
+        )
 
         cap_long = terminal_cap_long(result, available_tickers)
         box_chart = px.box(cap_long, x="Ticker", y="Simulated market cap ($T)", points=False, title="Simulated Terminal Market-Cap Distributions by Ticker")
@@ -613,6 +685,11 @@ with methodology_tab:
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
     st.write(
         "The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company, ranks companies from largest to smallest, and stores the winner and full rank vector."
+    )
+
+    st.subheader("Pairwise probability audit")
+    st.write(
+        "The pairwise audit computes P(selected company market cap > competitor market cap) analytically under the same lognormal inputs. It uses current market caps, selected IVs, selected correlation, and time to target. It is a diagnostic view, not a replacement for the full joint Monte Carlo ranking probability."
     )
 
     st.subheader("Market cap source")
