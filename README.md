@@ -20,7 +20,7 @@ The next important product step is to replace manual Polymarket placeholders wit
 
 ## Phase 1 Scope
 
-This phase builds the probability engine, current market-cap ingestion, historical correlation estimation, volatility-regime correlation sensitivity, and an MVP implied-volatility source.
+This phase builds the probability engine, current market-cap ingestion, historical correlation estimation, volatility-adjusted correlation sensitivity, and an MVP implied-volatility source.
 
 It does not include:
 
@@ -28,37 +28,6 @@ It does not include:
 - hedging logic
 - option payoff heatmaps
 - portfolio optimization
-
-## Default Universe
-
-- NVDA
-- AAPL
-- MSFT
-- GOOGL
-- AMZN
-- META
-- AVGO
-- TSLA
-- BRK.B
-- LLY
-
-The universe is editable in the app under `Inputs & Data`.
-
-## Market Capitalization Source
-
-The app supports two market-cap modes:
-
-1. Yahoo Finance current market cap, default
-2. Manual market cap inputs
-
-Yahoo market-cap mode uses `yfinance`:
-
-- map app tickers to Yahoo symbols, e.g. `BRK.B` to `BRK-B`
-- fetch `fast_info.market_cap` when available
-- fall back to `info["marketCap"]` if needed
-- replace the manual input table values before running the Monte Carlo simulation
-
-This is suitable for the MVP research dashboard, but it should still be treated as a data input, not as audited fundamental data. If Yahoo is unavailable or stale for a ticker, switch to manual market-cap inputs.
 
 ## Model
 
@@ -73,7 +42,6 @@ Where:
 - `MC_0` is current market capitalization
 - `sigma` is annualized implied volatility
 - `T = days_to_target / 365`
-- `days_to_target = target_date - today`
 - `Z` is a correlated normal shock
 
 ## Implied Volatility Source
@@ -83,116 +51,89 @@ The app supports two IV modes:
 1. Manual IV inputs
 2. Yahoo option-chain near-ATM IV
 
-Yahoo IV mode uses `yfinance` option chains:
+Yahoo IV mode uses `yfinance` option chains, selects the expiry closest to the target date, finds the strike nearest spot, and averages call/put implied volatility at that strike.
 
-- map app tickers to Yahoo symbols, e.g. `BRK.B` to `BRK-B`
-- fetch available option expiries
-- select the expiry closest to the target date
-- fetch the option chain for that expiry
-- find the strike nearest current spot
-- read call and put implied volatility at the near-ATM strike
-- use the average of call IV and put IV as the annualized IV input
-
-This is an MVP near-ATM estimate. It is not a full volatility smile/surface calibration. Future versions should ingest full option chains, clean bid/ask quotes, fit an IV surface, and derive terminal distributions from the surface.
+This is an MVP near-ATM estimate. It is not a full volatility smile/surface calibration.
 
 ## Correlation Estimation
 
 The app supports these correlation modes:
 
 1. EWMA historical correlation, default
-2. Rolling historical correlation
-3. Low-vol regime correlation
-4. High-vol regime correlation
-5. IV-based regime correlation
-6. Manual correlation matrix
+2. Vol-adjusted smooth correlation
+3. Rolling historical correlation
+4. Low-vol regime correlation
+5. High-vol regime correlation
+6. IV-based hard-switch regime correlation
+7. Manual correlation matrix
 
 Historical methods use adjusted close prices from Yahoo Finance through `yfinance`.
 
-Log returns:
+### EWMA
 
 ```text
 r_t = log(P_t / P_{t-1})
-```
-
-Rolling historical correlation:
-
-```text
-Corr = PearsonCorr(log returns over trailing lookback window)
-```
-
-EWMA covariance and correlation:
-
-```text
 Cov_t = lambda * Cov_{t-1} + (1 - lambda) * r_t r_t'
 Corr_ij = Cov_ij / sqrt(Cov_ii * Cov_jj)
 ```
 
-Volatility-regime correlation:
+### Vol-Adjusted Smooth Correlation
+
+This is the preferred volatility-regime sensitivity mode.
+
+For each pair of companies:
 
 ```text
 realized_vol_i,t = rolling_std(return_i, window) * sqrt(252)
-pair_vol_ij,t = average(realized_vol_i,t, realized_vol_j,t)
+pair_realized_vol_ij,t = average(realized_vol_i,t, realized_vol_j,t)
+avg_current_IV_ij = average(IV_i, IV_j)
 ```
 
-Low-vol regime correlation uses historical return days where pair volatility is below the selected threshold. High-vol regime correlation uses historical return days where pair volatility is above the selected threshold.
-
-IV-based regime correlation uses current pair IV to select the historical regime pair by pair:
+The current average pair IV is mapped into the historical distribution of pair realized volatility:
 
 ```text
-avg_current_IV_ij = average(IV_i, IV_j)
+w_ij = percentile_rank(avg_current_IV_ij, historical_pair_realized_vol_ij)
+```
+
+Then the pair correlation is blended smoothly:
+
+```text
+Corr_ij = (1 - w_ij) * Corr_low_ij + w_ij * Corr_high_ij
+```
+
+Where:
+
+- `Corr_low_ij` is the pair correlation on low-vol historical days, default bottom 40% of pair realized-vol observations
+- `Corr_high_ij` is the pair correlation on high-vol historical days, default top 40% of pair realized-vol observations
+- `w_ij` is calculated from data, not manually chosen
+
+This avoids a hard arbitrary switch such as 49.9% IV = low regime and 50.1% IV = high regime.
+
+### Hard-Switch Regime Correlation
+
+The older hard-switch mode remains available as a diagnostic:
+
+```text
 if avg_current_IV_ij >= threshold:
     use high-vol historical correlation for pair i,j
 else:
     use low-vol historical correlation for pair i,j
 ```
 
-This is a sensitivity tool. It is not a claim that the regime is forecastable or that current IV fully determines future realized correlation.
-
-Supported controls:
-
-- price history period: 2y, 5y, 10y
-- rolling lookback: 63, 126, 252, 504, 756 trading days
-- EWMA lambda: 0.94 or 0.97
-- realized-vol regime window: 20 or 63 trading days
-- realized-vol / IV threshold: default 50%
-- minimum observations per pair regime: default 30
-
-The final correlation matrix is symmetrized, clipped to [-1, 1], forced to diagonal 1.0, and repaired for small numerical positive-semidefinite issues before simulation.
+This is less smooth and more threshold-sensitive than the preferred vol-adjusted smooth mode.
 
 ## Outputs
 
-The results table focuses on statistical ranking analysis:
+The app includes:
 
-- ticker
-- current market cap
-- implied volatility
-- Polymarket YES price
-- model probability of finishing #1
-- model probability minus Polymarket price
-- average simulated rank
-- probability of finishing Top 2
-- probability of finishing Top 3
-
-The app also includes:
-
+- statistical ranking probabilities
 - ticker drilldown directly on the main Results tab
 - selected ticker rank distribution
 - pairwise probability audit
+- volatility-adjusted correlation diagnostics
 - interactive company comparison box plot
 - terminal market-cap distribution percentiles for every company
-- exact rank probability matrix, showing probability of Rank 1, Rank 2, Rank 3, etc.
-
-The simulation diagnostics include terminal market-cap distribution statistics for every company:
-
-- mean
-- standard deviation
-- 1st percentile
-- 5th percentile
-- 25th percentile
-- 50th percentile / median
-- 75th percentile
-- 95th percentile
-- 99th percentile
+- exact rank probability matrix
 
 ## Polymarket Odds
 
@@ -211,7 +152,7 @@ python -m streamlit run app.py
 app.py            Streamlit dashboard
 model.py          Probability engine
 market_data.py    Yahoo current market-cap extraction
-correlations.py   Historical and volatility-regime correlation estimation
+correlations.py   Historical and volatility-adjusted correlation estimation
 iv_surfaces.py    Yahoo option-chain near-ATM IV extraction
 requirements.txt  Python dependencies
 ```
