@@ -127,6 +127,142 @@ def ewma_correlation(prices: pd.DataFrame, lambda_value: float) -> pd.DataFrame:
     return covariance_to_correlation(cov)
 
 
+def rolling_realized_volatility(
+    returns: pd.DataFrame,
+    window: int,
+    *,
+    annualization: int = 252,
+) -> pd.DataFrame:
+    """Calculate rolling annualized realized volatility from daily log returns."""
+
+    if window <= 1:
+        raise ValueError("volatility window must be greater than 1.")
+    if len(returns) < window:
+        raise ValueError(f"Only {len(returns)} return observations available, but volatility window {window} requested.")
+    return returns.rolling(window=window).std() * np.sqrt(annualization)
+
+
+def _pairwise_regime_correlation(
+    returns: pd.DataFrame,
+    realized_vol: pd.DataFrame,
+    threshold: float,
+    regime: str,
+    *,
+    min_observations: int = 30,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    tickers = returns.columns.tolist()
+    corr = pd.DataFrame(np.eye(len(tickers)), index=tickers, columns=tickers)
+    counts = pd.DataFrame(np.zeros((len(tickers), len(tickers)), dtype=int), index=tickers, columns=tickers)
+
+    if regime not in {"low", "high"}:
+        raise ValueError("regime must be 'low' or 'high'.")
+
+    for i, ticker_i in enumerate(tickers):
+        for ticker_j in tickers[i + 1 :]:
+            pair_vol = 0.5 * (realized_vol[ticker_i] + realized_vol[ticker_j])
+            if regime == "high":
+                mask = pair_vol >= threshold
+            else:
+                mask = pair_vol < threshold
+            pair_returns = returns.loc[mask, [ticker_i, ticker_j]].dropna()
+            count = len(pair_returns)
+            if count < min_observations:
+                pair_returns = returns[[ticker_i, ticker_j]].dropna()
+                count = len(pair_returns)
+            rho = pair_returns[ticker_i].corr(pair_returns[ticker_j])
+            if not np.isfinite(rho):
+                rho = 0.0
+            corr.loc[ticker_i, ticker_j] = rho
+            corr.loc[ticker_j, ticker_i] = rho
+            counts.loc[ticker_i, ticker_j] = count
+            counts.loc[ticker_j, ticker_i] = count
+
+    np.fill_diagonal(counts.values, len(returns))
+    return validate_correlation_matrix(corr), counts
+
+
+def volatility_regime_correlation(
+    prices: pd.DataFrame,
+    *,
+    vol_window: int,
+    vol_threshold: float,
+    regime: str,
+    min_observations: int = 30,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Estimate pairwise correlations conditional on low or high realized-vol regimes.
+
+    Regime classification is pair-specific and uses the average rolling realized
+    volatility of the two stocks. Because pair-specific histories can produce a
+    non-PSD matrix, the final matrix is validated and gently repaired.
+    """
+
+    returns = calculate_log_returns(prices)
+    realized_vol = rolling_realized_volatility(returns, vol_window).reindex(index=returns.index)
+    return _pairwise_regime_correlation(
+        returns,
+        realized_vol,
+        vol_threshold,
+        regime,
+        min_observations=min_observations,
+    )
+
+
+def iv_based_regime_correlation(
+    prices: pd.DataFrame,
+    current_ivs: pd.Series,
+    *,
+    vol_window: int,
+    vol_threshold: float,
+    min_observations: int = 30,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Select low/high historical pair correlation using current average pair IV.
+
+    For each pair, if average(current IV_i, current IV_j) >= threshold, use the
+    historical high-realized-vol correlation for that pair; otherwise use low-vol.
+    """
+
+    returns = calculate_log_returns(prices)
+    realized_vol = rolling_realized_volatility(returns, vol_window).reindex(index=returns.index)
+    low_corr, low_counts = _pairwise_regime_correlation(
+        returns,
+        realized_vol,
+        vol_threshold,
+        "low",
+        min_observations=min_observations,
+    )
+    high_corr, high_counts = _pairwise_regime_correlation(
+        returns,
+        realized_vol,
+        vol_threshold,
+        "high",
+        min_observations=min_observations,
+    )
+
+    tickers = returns.columns.tolist()
+    corr = pd.DataFrame(np.eye(len(tickers)), index=tickers, columns=tickers)
+    diagnostics = []
+    for i, ticker_i in enumerate(tickers):
+        for ticker_j in tickers[i + 1 :]:
+            pair_iv = 0.5 * (float(current_ivs.loc[ticker_i]) + float(current_ivs.loc[ticker_j]))
+            use_high = pair_iv >= vol_threshold
+            selected_corr = high_corr.loc[ticker_i, ticker_j] if use_high else low_corr.loc[ticker_i, ticker_j]
+            selected_count = high_counts.loc[ticker_i, ticker_j] if use_high else low_counts.loc[ticker_i, ticker_j]
+            corr.loc[ticker_i, ticker_j] = selected_corr
+            corr.loc[ticker_j, ticker_i] = selected_corr
+            diagnostics.append(
+                {
+                    "Ticker 1": ticker_i,
+                    "Ticker 2": ticker_j,
+                    "Average current IV": pair_iv,
+                    "Selected regime": "high" if use_high else "low",
+                    "Selected correlation": selected_corr,
+                    "Historical observations": int(selected_count),
+                }
+            )
+
+    return validate_correlation_matrix(corr), pd.DataFrame(diagnostics), pd.DataFrame({"Ticker": tickers})
+
+
 def validate_correlation_matrix(corr: pd.DataFrame, *, tolerance: float = 1e-8) -> pd.DataFrame:
     """Validate and gently repair numerical issues in a correlation matrix."""
 
