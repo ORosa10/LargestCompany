@@ -15,6 +15,7 @@ from correlations import (
     fetch_adjusted_close,
     iv_based_regime_correlation,
     rolling_correlation,
+    smooth_vol_adjusted_correlation,
     volatility_regime_correlation,
 )
 from iv_surfaces import apply_iv_estimates, estimate_atm_ivs
@@ -59,6 +60,10 @@ def dollars_trillions(value: float) -> str:
     return f"${value / 1e12:,.2f}T"
 
 
+def pct(value: float) -> str:
+    return "" if pd.isna(value) else f"{value:.2%}"
+
+
 def display_market_caps(market_caps: pd.DataFrame) -> pd.DataFrame:
     display = market_caps.copy().rename(columns={"ticker": "Ticker", "yahoo_ticker": "Yahoo ticker", "market_cap": "Market cap", "source": "Source"})
     display["Market cap"] = display["Market cap"].map(dollars_trillions)
@@ -82,7 +87,7 @@ def display_iv_estimates(iv_estimates: pd.DataFrame) -> pd.DataFrame:
     for column in ["Spot", "ATM strike"]:
         display[column] = display[column].map(lambda value: f"${value:,.2f}")
     for column in ["ATM IV", "Call IV", "Put IV"]:
-        display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{value:.2%}")
+        display[column] = display[column].map(pct)
     return display[["Ticker", "Yahoo ticker", "Target date", "Option expiry used", "Spot", "ATM strike", "ATM IV", "Call IV", "Put IV"]]
 
 
@@ -100,9 +105,29 @@ def display_results(results: pd.DataFrame) -> pd.DataFrame:
     )
     display["Mkt cap"] = display["Mkt cap"].map(dollars_trillions)
     for column in ["IV", "Poly price", "Model prob", "Edge", "Top 2", "Top 3"]:
-        display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{value:.2%}")
+        display[column] = display[column].map(pct)
     display["Avg rank"] = display["Avg rank"].map(lambda value: f"{value:.2f}")
     return display[["Ticker", "Mkt cap", "IV", "Poly price", "Model prob", "Edge", "Avg rank", "Top 2", "Top 3"]]
+
+
+def display_regime_diagnostics(diagnostics: pd.DataFrame | None) -> pd.DataFrame | None:
+    if diagnostics is None or diagnostics.empty:
+        return None
+    display = diagnostics.copy()
+    percent_columns = [
+        "Average current IV",
+        "Historical pair-vol percentile",
+        "Low-vol cutoff",
+        "High-vol cutoff",
+        "Low-regime correlation",
+        "High-regime correlation",
+        "Blend weight",
+        "Selected correlation",
+    ]
+    for column in percent_columns:
+        if column in display.columns:
+            display[column] = display[column].map(pct)
+    return display
 
 
 def market_cap_percentile_table(result) -> pd.DataFrame:
@@ -142,7 +167,7 @@ def display_rank_probability_matrix(rank_probs: pd.DataFrame) -> pd.DataFrame:
     display = rank_probs.copy()
     for column in display.columns:
         if column != "Ticker":
-            display[column] = display[column].map(lambda value: f"{value:.2%}")
+            display[column] = display[column].map(pct)
     return display
 
 
@@ -193,8 +218,8 @@ def leader_gap_table(result, ticker: str) -> pd.DataFrame:
             }
         )
     output = pd.DataFrame(rows).sort_values("Competitor required gain to tie")
-    output["Competitor required gain to tie"] = output["Competitor required gain to tie"].map(lambda value: f"{value:.2%}")
-    output["Selected drawdown to tie"] = output["Selected drawdown to tie"].map(lambda value: f"{value:.2%}")
+    output["Competitor required gain to tie"] = output["Competitor required gain to tie"].map(pct)
+    output["Selected drawdown to tie"] = output["Selected drawdown to tie"].map(pct)
     return output
 
 
@@ -243,8 +268,8 @@ def display_pairwise_probability_audit(pairwise: pd.DataFrame) -> pd.DataFrame:
     for column in ["Selected cap", "Competitor cap", "Market-cap gap"]:
         display[column] = display[column].map(dollars_trillions)
     for column in ["Selected IV", "Competitor IV", "Correlation", "Relative annual vol", "Horizon vol", "P(selected > competitor)"]:
-        display[column] = display[column].map(lambda value: f"{value:.2%}")
-    display["Log gap now"] = display["Log gap now"].map(lambda value: f"{value:.2%}")
+        display[column] = display[column].map(pct)
+    display["Log gap now"] = display["Log gap now"].map(pct)
     display["Z-score"] = display["Z-score"].map(lambda value: f"{value:.2f}")
     return display
 
@@ -308,17 +333,6 @@ def terminal_distribution_chart(result, ticker: str) -> go.Figure:
     return fig
 
 
-def display_regime_diagnostics(diagnostics: pd.DataFrame | None) -> pd.DataFrame | None:
-    if diagnostics is None or diagnostics.empty:
-        return None
-    display = diagnostics.copy()
-    if "Average current IV" in display.columns:
-        display["Average current IV"] = display["Average current IV"].map(lambda value: f"{value:.2%}")
-    if "Selected correlation" in display.columns:
-        display["Selected correlation"] = display["Selected correlation"].map(lambda value: f"{value:.2%}")
-    return display
-
-
 if "company_inputs" not in st.session_state:
     st.session_state.company_inputs = default_company_inputs()
 if "correlation_matrix" not in st.session_state:
@@ -360,10 +374,11 @@ with st.sidebar:
         "Correlation method",
         [
             "EWMA historical correlation",
+            "Vol-adjusted smooth correlation",
             "Rolling historical correlation",
             "Low-vol regime correlation",
             "High-vol regime correlation",
-            "IV-based regime correlation",
+            "IV-based hard-switch regime correlation",
             "Manual correlation matrix",
         ],
         index=0,
@@ -372,7 +387,9 @@ with st.sidebar:
     ewma_lambda = st.selectbox("EWMA lambda", [0.94, 0.97], index=1)
     rolling_lookback = st.selectbox("Rolling lookback days", [63, 126, 252, 504, 756], index=2)
     regime_vol_window = st.selectbox("Regime realized-vol window", [20, 63], index=1)
-    regime_vol_threshold = st.number_input("Regime vol / IV threshold", min_value=0.05, max_value=2.0, value=0.50, step=0.05, format="%.2f")
+    smooth_low_quantile = st.selectbox("Smooth low-vol bucket", [0.30, 0.40, 0.50], index=1, format_func=lambda value: f"{value:.0%}")
+    smooth_high_quantile = st.selectbox("Smooth high-vol bucket", [0.50, 0.60, 0.70], index=1, format_func=lambda value: f"{value:.0%}")
+    regime_vol_threshold = st.number_input("Hard-switch vol / IV threshold", min_value=0.05, max_value=2.0, value=0.50, step=0.05, format="%.2f")
     min_regime_observations = st.number_input("Min observations per pair regime", min_value=10, max_value=252, value=30, step=10)
 
     selected_ticker_sidebar = st.selectbox("Selected ticker for diagnostics", st.session_state.company_inputs["Ticker"].astype(str).tolist())
@@ -389,7 +406,7 @@ with inputs_tab:
                 {"Input": "Current market capitalization", "Current source": "Yahoo Finance current market cap or manual input", "Future source": "Configurable market data provider"},
                 {"Input": "Annualized implied volatility", "Current source": "Manual input or Yahoo option-chain near-ATM IV", "Future source": "Robust IV surface provider"},
                 {"Input": "Polymarket YES price", "Current source": "Manual placeholder", "Future source": "Polymarket market API or manual override"},
-                {"Input": "Correlation matrix", "Current source": "Yahoo historical prices: EWMA, rolling, vol-regime, IV-based regime, or manual", "Future source": "Configurable institutional data provider"},
+                {"Input": "Correlation matrix", "Current source": "Yahoo historical prices: EWMA, rolling, smooth vol-adjusted, vol-regime, or manual", "Future source": "Configurable institutional data provider"},
                 {"Input": "Target date / maturity", "Current source": "User-selected date", "Future source": "Parsed from prediction-market event rules"},
             ]
         ),
@@ -464,6 +481,17 @@ if run_button or st.session_state.last_result is None:
                 if correlation_source == "EWMA historical correlation":
                     selected_correlation_matrix = ewma_correlation(prices, float(ewma_lambda))
                     corr_source_label = f"EWMA historical correlation, lambda={ewma_lambda}, Yahoo Finance {price_history_period}"
+                elif correlation_source == "Vol-adjusted smooth correlation":
+                    current_ivs = simulation_inputs.set_index("Ticker")["Implied volatility"].astype(float)
+                    selected_correlation_matrix, regime_diagnostics = smooth_vol_adjusted_correlation(
+                        prices,
+                        current_ivs,
+                        vol_window=int(regime_vol_window),
+                        low_quantile=float(smooth_low_quantile),
+                        high_quantile=float(smooth_high_quantile),
+                        min_observations=int(min_regime_observations),
+                    )
+                    corr_source_label = f"Vol-adjusted smooth correlation, window={regime_vol_window}D, low/high buckets={smooth_low_quantile:.0%}/{smooth_high_quantile:.0%}"
                 elif correlation_source == "Rolling historical correlation":
                     selected_correlation_matrix = rolling_correlation(prices, int(rolling_lookback))
                     corr_source_label = f"Rolling historical correlation, {rolling_lookback} trading days, Yahoo Finance {price_history_period}"
@@ -496,7 +524,7 @@ if run_button or st.session_state.last_result is None:
                         vol_threshold=float(regime_vol_threshold),
                         min_observations=int(min_regime_observations),
                     )
-                    corr_source_label = f"IV-based regime correlation, pair avg IV threshold={regime_vol_threshold:.0%}, realized-vol window={regime_vol_window}D"
+                    corr_source_label = f"IV-based hard-switch regime correlation, pair avg IV threshold={regime_vol_threshold:.0%}, realized-vol window={regime_vol_window}D"
 
             st.session_state.last_result = run_probability_engine(simulation_inputs, selected_correlation_matrix, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed))
             st.session_state.last_error = None
@@ -556,7 +584,7 @@ with results_tab:
             with st.expander("Yahoo option-chain IV estimates used"):
                 st.dataframe(display_iv_estimates(st.session_state.last_iv_estimates), use_container_width=True, hide_index=True)
         if st.session_state.last_regime_diagnostics is not None:
-            with st.expander("Volatility-regime correlation diagnostics"):
+            with st.expander("Volatility-adjusted correlation diagnostics"):
                 shown = display_regime_diagnostics(st.session_state.last_regime_diagnostics)
                 st.dataframe(shown if shown is not None else st.session_state.last_regime_diagnostics, use_container_width=True, hide_index=True)
 
@@ -592,7 +620,7 @@ with results_tab:
             st.dataframe(selected_ticker_summary(result, inspect_ticker), use_container_width=True, hide_index=True)
             st.subheader("Exact rank probabilities")
             rank_detail = selected_rank_probabilities(result, inspect_ticker)
-            rank_detail["Probability"] = rank_detail["Probability"].map(lambda value: f"{value:.2%}")
+            rank_detail["Probability"] = rank_detail["Probability"].map(pct)
             st.dataframe(rank_detail, use_container_width=True, hide_index=True)
         with detail_right:
             rank_data = result.rank_distribution[result.rank_distribution["Ticker"] == inspect_ticker]
@@ -666,10 +694,11 @@ with methodology_tab:
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
     st.write("The target date determines the time horizon `T = days_to_target / 365`. For each simulation path, the app simulates one future market capitalization per company and ranks companies from largest to smallest.")
 
-    st.subheader("Volatility-regime correlations")
+    st.subheader("Vol-adjusted smooth correlation")
     st.write(
-        "EWMA remains the default. Low-vol and high-vol regime modes estimate pairwise correlations only on historical days where the average rolling realized volatility of the pair is below or above the selected threshold. IV-based regime mode uses the current average IV of each pair to choose low or high historical correlation for that pair. This is a sensitivity tool, not a claim that regimes are forecastable."
+        "This mode maps current average pair IV into the historical distribution of pair realized volatility. The resulting percentile becomes the blend weight between low-vol and high-vol historical pair correlations. No manual switch threshold is required for the blend weight."
     )
+    st.code("w = percentile_rank(avg_current_IV_ij, historical_pair_realized_vol_ij)\nCorr_ij = (1 - w) * Corr_low_ij + w * Corr_high_ij")
 
     st.subheader("Pairwise probability audit")
     st.write("The pairwise audit computes P(selected company market cap > competitor market cap) analytically under the same lognormal inputs. It is diagnostic and does not replace the full joint Monte Carlo ranking probability.")
