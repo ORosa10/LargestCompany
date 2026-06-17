@@ -91,7 +91,7 @@ def ewma_covariance(returns: pd.DataFrame, lambda_value: float) -> pd.DataFrame:
         raise ValueError("At least two return observations are required.")
 
     demeaned = returns - returns.mean(axis=0)
-    values = demeaned.to_numpy(dtype=float)
+    values = demeaned.to_numpy(dtype=float, copy=True)
 
     cov = np.cov(values, rowvar=False)
     if cov.ndim == 0:
@@ -108,7 +108,7 @@ def ewma_covariance(returns: pd.DataFrame, lambda_value: float) -> pd.DataFrame:
 def covariance_to_correlation(cov: pd.DataFrame) -> pd.DataFrame:
     """Convert covariance matrix to correlation matrix."""
 
-    values = cov.to_numpy(dtype=float)
+    values = cov.to_numpy(dtype=float, copy=True)
     variances = np.diag(values)
     if np.any(variances <= 0):
         raise ValueError("Covariance matrix has non-positive variances.")
@@ -160,10 +160,7 @@ def _pairwise_regime_correlation(
     for i, ticker_i in enumerate(tickers):
         for ticker_j in tickers[i + 1 :]:
             pair_vol = 0.5 * (realized_vol[ticker_i] + realized_vol[ticker_j])
-            if regime == "high":
-                mask = pair_vol >= threshold
-            else:
-                mask = pair_vol < threshold
+            mask = pair_vol >= threshold if regime == "high" else pair_vol < threshold
             pair_returns = returns.loc[mask, [ticker_i, ticker_j]].dropna()
             count = len(pair_returns)
             if count < min_observations:
@@ -177,7 +174,8 @@ def _pairwise_regime_correlation(
             counts.loc[ticker_i, ticker_j] = count
             counts.loc[ticker_j, ticker_i] = count
 
-    np.fill_diagonal(counts.values, len(returns))
+    for ticker in tickers:
+        counts.loc[ticker, ticker] = len(returns)
     return validate_correlation_matrix(corr), counts
 
 
@@ -267,7 +265,7 @@ def validate_correlation_matrix(corr: pd.DataFrame, *, tolerance: float = 1e-8) 
     """Validate and gently repair numerical issues in a correlation matrix."""
 
     matrix = corr.copy().astype(float)
-    values = matrix.to_numpy(dtype=float)
+    values = matrix.to_numpy(dtype=float, copy=True)
 
     if values.shape[0] != values.shape[1]:
         raise ValueError("Correlation matrix must be square.")
