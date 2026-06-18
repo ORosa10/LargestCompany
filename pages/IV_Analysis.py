@@ -7,14 +7,13 @@ import plotly.express as px
 import streamlit as st
 
 from correlations import ewma_correlation, fetch_adjusted_close
-from iv_surfaces import apply_iv_estimates, estimate_atm_ivs
 from market_data import apply_market_caps, fetch_market_caps
-from model import default_company_inputs, default_correlation_matrix, run_probability_engine
+from model import default_company_inputs, run_probability_engine
 
 
 st.set_page_config(page_title="IV Analysis", layout="wide")
 st.title("IV Analysis")
-st.caption("Sensitivity view: isolate how ranking probabilities react to implied-volatility assumptions.")
+st.caption("Sensitivity view: isolate how ranking probabilities react to manual IV assumptions. Market caps use Yahoo Finance; correlations use historical stock prices.")
 
 IV_SHOCKS = [level / 100 for level in range(-20, 25, 5)]
 
@@ -22,11 +21,6 @@ IV_SHOCKS = [level / 100 for level in range(-20, 25, 5)]
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def load_adjusted_close(tickers: tuple[str, ...], period: str) -> pd.DataFrame:
     return fetch_adjusted_close(list(tickers), period=period)
-
-
-@st.cache_data(show_spinner=False, ttl=30 * 60)
-def load_yahoo_atm_ivs(tickers: tuple[str, ...], target_date_iso: str) -> pd.DataFrame:
-    return estimate_atm_ivs(list(tickers), date.fromisoformat(target_date_iso))
 
 
 @st.cache_data(show_spinner=False, ttl=15 * 60)
@@ -43,7 +37,7 @@ def dollars_trillions(value: float) -> str:
 
 
 def shock_label(value: float) -> str:
-    return f"{value * 100:+.0f} percentage points"
+    return f"{value * 100:+.0f} pp"
 
 
 def display_market_caps(market_caps: pd.DataFrame | None) -> pd.DataFrame | None:
@@ -62,22 +56,14 @@ def display_base_inputs(inputs: pd.DataFrame) -> pd.DataFrame:
     return display
 
 
-def prepare_inputs(company_inputs: pd.DataFrame, market_cap_source: str, iv_source: str, target_date_value: date) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+def prepare_inputs(company_inputs: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
-    simulation_inputs = company_inputs.copy()
-    market_caps = None
-    if market_cap_source == "Yahoo Finance current market cap":
-        market_caps = load_yahoo_market_caps(tuple(tickers))
-        simulation_inputs = apply_market_caps(simulation_inputs, market_caps)
-    if iv_source == "Yahoo option-chain near-ATM IV":
-        simulation_inputs = apply_iv_estimates(simulation_inputs, load_yahoo_atm_ivs(tuple(tickers), target_date_value.isoformat()))
-    return simulation_inputs, market_caps
+    market_caps = load_yahoo_market_caps(tuple(tickers))
+    return apply_market_caps(company_inputs.copy(), market_caps), market_caps
 
 
-def select_correlation_matrix(inputs: pd.DataFrame, method: str, period: str, ewma_lambda: float) -> tuple[pd.DataFrame, str]:
+def select_correlation_matrix(inputs: pd.DataFrame, period: str, ewma_lambda: float) -> tuple[pd.DataFrame, str]:
     tickers = inputs["Ticker"].astype(str).tolist()
-    if method == "Manual/default correlation matrix":
-        return default_correlation_matrix(tickers), "Manual/default correlation matrix"
     prices = load_adjusted_close(tuple(tickers), period)
     return ewma_correlation(prices, ewma_lambda), f"EWMA historical correlation, lambda={ewma_lambda}, Yahoo Finance {period}"
 
@@ -130,13 +116,8 @@ def run_pair_surface(inputs: pd.DataFrame, corr: pd.DataFrame, days_to_target: i
             row = result.results.set_index("Ticker").loc[output_ticker]
             rows.append(
                 {
-                    "X ticker": ticker_x,
-                    "Y ticker": ticker_y,
-                    "Output ticker": output_ticker,
                     "X shock": shock_x,
                     "Y shock": shock_y,
-                    "X shock label": shock_label(shock_x),
-                    "Y shock label": shock_label(shock_y),
                     "Model probability": row["Model probability"],
                     "Average rank": row["Average rank"],
                     "Top 2": row["Probability Top 2"],
@@ -166,23 +147,32 @@ with st.sidebar:
     simulations = st.number_input("1D simulations per shock", min_value=1_000, max_value=500_000, value=100_000, step=10_000)
     pair_surface_simulations = st.number_input("2D pair-grid simulations per cell", min_value=1_000, max_value=200_000, value=25_000, step=5_000)
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
-    market_cap_source = st.selectbox("Market cap source", ["Yahoo Finance current market cap", "Manual market cap inputs"], index=0)
-    iv_source = st.selectbox("Base IV source", ["Manual IV inputs", "Yahoo option-chain near-ATM IV"], index=0)
-    correlation_method = st.selectbox("Correlation method", ["EWMA historical correlation", "Manual/default correlation matrix"], index=0)
-    price_history_period = st.selectbox("Yahoo Finance price history", ["1y", "3y", "5y", "10y"], index=2)
+    price_history_period = st.selectbox("Yahoo price history for correlation", ["1y", "3y", "5y", "10y"], index=2)
     ewma_lambda = st.selectbox("EWMA lambda", [0.94, 0.97], index=1)
+    st.caption("Market caps: Yahoo Finance. Correlation: EWMA from historical adjusted close prices. IV and Polymarket prices: manual.")
 
 if "iv_analysis_company_inputs" not in st.session_state:
     st.session_state.iv_analysis_company_inputs = default_company_inputs()
 
-st.subheader("Editable base inputs")
-st.write("Market caps in this table are manual placeholders unless Yahoo Finance current market cap is selected. After running, the app shows the actual base inputs used.")
-company_inputs = st.data_editor(
-    st.session_state.iv_analysis_company_inputs,
+st.subheader("Manual IV and Polymarket inputs")
+st.write("Only IV and Polymarket prices are edited here. Market caps are pulled from Yahoo Finance when the analysis runs.")
+previous_inputs = st.session_state.iv_analysis_company_inputs.copy()
+editable_inputs = previous_inputs[["Ticker", "Implied volatility", "Polymarket YES price"]].copy()
+edited_inputs = st.data_editor(
+    editable_inputs,
     num_rows="dynamic",
     use_container_width=True,
     hide_index=True,
+    column_config={
+        "Ticker": st.column_config.TextColumn(required=True),
+        "Implied volatility": st.column_config.NumberColumn("Manual IV", min_value=0.0001, max_value=5.0, step=0.01),
+        "Polymarket YES price": st.column_config.NumberColumn("Manual Polymarket YES price", min_value=0.0, max_value=1.0, step=0.01),
+    },
 )
+cap_fallback = pd.concat([previous_inputs[["Ticker", "Current market cap"]], default_company_inputs()[["Ticker", "Current market cap"]]]).drop_duplicates("Ticker", keep="first")
+company_inputs = edited_inputs.merge(cap_fallback, on="Ticker", how="left")
+company_inputs["Current market cap"] = company_inputs["Current market cap"].fillna(default_company_inputs()["Current market cap"].median())
+company_inputs = company_inputs[["Ticker", "Current market cap", "Implied volatility", "Polymarket YES price"]]
 st.session_state.iv_analysis_company_inputs = company_inputs
 
 base_tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
@@ -206,16 +196,16 @@ with col4:
 if st.button("Run IV sensitivity", type="primary"):
     with st.spinner("Running IV sensitivity shocks..."):
         try:
-            base_inputs, market_caps = prepare_inputs(company_inputs, market_cap_source, iv_source, target_date)
-            corr, corr_label = select_correlation_matrix(base_inputs, correlation_method, price_history_period, float(ewma_lambda))
+            base_inputs, market_caps = prepare_inputs(company_inputs)
+            corr, corr_label = select_correlation_matrix(base_inputs, price_history_period, float(ewma_lambda))
             st.session_state.iv_base_inputs = base_inputs
             st.session_state.iv_market_caps = market_caps
             st.session_state.iv_global = run_iv_grid(base_inputs, corr, int(days_to_target), int(simulations), int(seed), "Global", None)
             st.session_state.iv_single = run_iv_grid(base_inputs, corr, int(days_to_target), int(simulations), int(seed), "Single-name", [single_ticker])
             st.session_state.iv_pair_line = run_iv_grid(base_inputs, corr, int(days_to_target), int(simulations), int(seed), "Pair one-dimensional", [pair_ticker_x, pair_ticker_y])
             st.session_state.iv_pair_surface = run_pair_surface(base_inputs, corr, int(days_to_target), int(pair_surface_simulations), int(seed), pair_ticker_x, pair_ticker_y, output_ticker)
+            st.session_state.iv_surface_meta = {"X ticker": pair_ticker_x, "Y ticker": pair_ticker_y, "Output ticker": output_ticker}
             st.session_state.iv_corr_label = corr_label
-            st.session_state.iv_sources = {"Market cap source": market_cap_source, "IV source": iv_source}
             st.session_state.iv_error = None
         except Exception as exc:
             st.session_state.iv_error = str(exc)
@@ -232,9 +222,8 @@ if global_table is None:
     st.info("Run IV sensitivity to calculate global, single-name, and pair IV shock tables.")
     st.stop()
 
-sources = st.session_state.get("iv_sources", {})
-st.caption(f"Market cap source: {sources.get('Market cap source')}")
-st.caption(f"IV source: {sources.get('IV source')}")
+st.caption("Market cap source: Yahoo Finance current market cap")
+st.caption("IV source: Manual IV inputs")
 st.caption(f"Correlation assumption: {st.session_state.get('iv_corr_label')}")
 
 base_inputs_used = st.session_state.get("iv_base_inputs")
@@ -251,7 +240,7 @@ for title, table in [("Global IV shock", global_table), ("Single-name IV shock",
     if table is None or table.empty:
         continue
     st.subheader(title)
-    pivot = table.pivot(index="Shock", columns="Ticker", values="Model probability")
+    pivot = table.pivot(index="Shock", columns="Ticker", values="Model probability").reindex(index=IV_SHOCKS)
     pivot.index = [shock_label(value) for value in pivot.index]
     st.dataframe(pivot.map(pct), use_container_width=True)
     selected = st.selectbox(f"Ticker chart: {title}", table["Ticker"].unique().tolist(), key=f"chart_{title}")
@@ -264,18 +253,26 @@ for title, table in [("Global IV shock", global_table), ("Single-name IV shock",
 
 if pair_surface is not None and not pair_surface.empty:
     st.subheader("Pair IV shock surface")
-    meta = pair_surface.iloc[0]
-    st.write(f"X axis shocks **{meta['X ticker']}** IV. Y axis shocks **{meta['Y ticker']}** IV. Cell values show **{meta['Output ticker']}** model probability.")
-    surface_pivot = pair_surface.pivot(index="Y shock label", columns="X shock label", values="Model probability")
-    st.dataframe(surface_pivot.map(pct), use_container_width=True)
+    meta = st.session_state.get("iv_surface_meta", {})
+    x_ticker = meta.get("X ticker", "X")
+    y_ticker = meta.get("Y ticker", "Y")
+    out_ticker = meta.get("Output ticker", "Output")
+    st.write(f"X axis shocks **{x_ticker}** IV. Y axis shocks **{y_ticker}** IV. Cell values show **{out_ticker}** model probability.")
+    surface_numeric = pair_surface.pivot(index="Y shock", columns="X shock", values="Model probability").reindex(index=IV_SHOCKS, columns=IV_SHOCKS)
+    surface_display = surface_numeric.copy()
+    surface_display.index = [shock_label(value) for value in surface_display.index]
+    surface_display.columns = [shock_label(value) for value in surface_display.columns]
+    st.dataframe(surface_display.map(pct), use_container_width=True)
     heatmap = px.imshow(
-        surface_pivot.astype(float),
+        surface_numeric,
+        x=[shock_label(value) for value in surface_numeric.columns],
+        y=[shock_label(value) for value in surface_numeric.index],
         text_auto=".1%",
         color_continuous_scale="RdYlGn",
-        title=f"{meta['Output ticker']} P(#1): {meta['X ticker']} IV shock vs {meta['Y ticker']} IV shock",
+        title=f"{out_ticker} P(#1): {x_ticker} IV shock vs {y_ticker} IV shock",
         aspect="auto",
     )
-    heatmap.update_layout(xaxis_title=f"{meta['X ticker']} IV shock", yaxis_title=f"{meta['Y ticker']} IV shock")
+    heatmap.update_layout(xaxis_title=f"{x_ticker} IV shock", yaxis_title=f"{y_ticker} IV shock")
     st.plotly_chart(heatmap, use_container_width=True, key="pair_iv_surface_heatmap")
 
 with st.expander("Full IV sensitivity tables"):
