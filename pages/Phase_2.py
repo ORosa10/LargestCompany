@@ -5,12 +5,14 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from boundaries import (
+    calculate_boundaries_for_all_tickers,
+    calculate_conditional_win_curve,
     find_market_cap_boundary_for_winner_probability,
-    pairwise_boundary_table,
-    winner_probability_curve,
+    find_probability_boundaries,
 )
 from correlations import ewma_correlation, fetch_adjusted_close, rolling_correlation, smooth_vol_adjusted_correlation
 from market_data import apply_market_caps, fetch_market_caps
@@ -19,7 +21,7 @@ from model import default_company_inputs, run_probability_engine
 
 st.set_page_config(page_title="Phase 2", layout="wide")
 st.title("Phase 2")
-st.caption("Conditional probability boundaries. This phase extends the Phase 1 probability engine without adding hedging or payoff optimization yet.")
+st.caption("Conditional probability boundaries from Phase 1 Monte Carlo scenarios. No hedging or payoff optimization yet.")
 
 CORRELATION_METHODS = [
     "EWMA historical correlation",
@@ -27,8 +29,7 @@ CORRELATION_METHODS = [
     "Rolling historical correlation",
 ]
 
-WINNER_TARGETS = [0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
-PAIR_TARGETS = [0.50, 0.60, 0.70, 0.80, 0.90]
+CONFIDENCE_LEVELS = [0.80, 0.90, 0.95, 0.99]
 
 
 @st.cache_data(show_spinner=False, ttl=15 * 60)
@@ -46,38 +47,7 @@ def pct(value: float) -> str:
 
 
 def dollars_trillions(value: float) -> str:
-    return f"${value / 1e12:,.2f}T"
-
-
-def display_boundary_table(table: pd.DataFrame) -> pd.DataFrame:
-    display = table.copy()
-    for column in ["Boundary market cap", "Current market cap", "Gap vs current"]:
-        display[column] = display[column].map(dollars_trillions)
-    for column in ["Target P(#1)", "Achieved P(#1)", "Move vs current"]:
-        display[column] = display[column].map(pct)
-    return display
-
-
-def display_pairwise_table(table: pd.DataFrame) -> pd.DataFrame:
-    display = table.copy()
-    for column in [
-        "Boundary selected market cap",
-        "Current selected market cap",
-        "Competitor market cap",
-        "Boundary gap vs current",
-        "Boundary gap vs competitor",
-    ]:
-        display[column] = display[column].map(dollars_trillions)
-    for column in [
-        "Target pair probability",
-        "Current pair probability",
-        "Boundary move vs current",
-        "Correlation",
-        "Selected IV",
-        "Competitor IV",
-    ]:
-        display[column] = display[column].map(pct)
-    return display
+    return "" if pd.isna(value) else f"${value / 1e12:,.2f}T"
 
 
 def display_market_caps(market_caps: pd.DataFrame) -> pd.DataFrame:
@@ -86,15 +56,34 @@ def display_market_caps(market_caps: pd.DataFrame) -> pd.DataFrame:
     return display[["Ticker", "Yahoo ticker", "Market cap", "Source"]]
 
 
-def display_scenario_table(table: pd.DataFrame) -> pd.DataFrame:
+def display_boundary_table(table: pd.DataFrame) -> pd.DataFrame:
     display = table.copy()
-    for column in ["Current market cap", "Cap for 50% P(#1)", "Polymarket-implied cap"]:
-        if column in display.columns:
-            display[column] = display[column].map(lambda value: "" if pd.isna(value) else dollars_trillions(value))
-    for column in ["Current P(#1)", "Polymarket price", "Move to 50%", "Polymarket-implied move"]:
-        if column in display.columns:
-            display[column] = display[column].map(lambda value: "" if pd.isna(value) else pct(value))
+    for column in ["Lower loss boundary", "Upper win boundary"]:
+        display[column] = display[column].map(dollars_trillions)
+    for column in ["Confidence level", "Lower loss boundary / current", "Upper win boundary / current"]:
+        display[column] = display[column].map(pct)
     return display
+
+
+def display_curve_table(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.copy().rename(
+        columns={
+            "bin_low": "Bin low",
+            "bin_high": "Bin high",
+            "average_market_cap": "Average terminal market cap",
+            "market_cap_to_current": "Average cap / current",
+            "win_probability": "Win probability",
+            "loss_probability": "Loss probability",
+            "average_rank": "Average rank",
+            "scenario_count": "Scenario count",
+        }
+    )
+    for column in ["Bin low", "Bin high", "Average terminal market cap"]:
+        display[column] = display[column].map(dollars_trillions)
+    for column in ["Average cap / current", "Win probability", "Loss probability"]:
+        display[column] = display[column].map(pct)
+    display["Average rank"] = display["Average rank"].map(lambda value: f"{value:.2f}")
+    return display[["Bin low", "Bin high", "Average terminal market cap", "Average cap / current", "Win probability", "Loss probability", "Average rank", "Scenario count"]]
 
 
 def build_correlation_matrix(
@@ -124,31 +113,56 @@ def build_correlation_matrix(
     raise ValueError(f"Unknown correlation method: {method}")
 
 
-def selected_result_row(baseline: pd.DataFrame, ticker: str) -> pd.Series:
-    row = baseline.loc[baseline["Ticker"] == ticker]
+def selected_result_row(results: pd.DataFrame, ticker: str) -> pd.Series:
+    row = results.loc[results["Ticker"] == ticker]
     if row.empty:
-        raise ValueError(f"Ticker {ticker} is not in baseline results.")
+        raise ValueError(f"Ticker {ticker} is not in results.")
     return row.iloc[0]
 
 
-def all_pairwise_boundaries(
-    simulation_inputs: pd.DataFrame,
-    corr: pd.DataFrame,
-    target_probabilities: list[float],
-    days_to_target: int,
-) -> pd.DataFrame:
-    frames = []
-    for ticker in simulation_inputs["Ticker"].tolist():
-        frames.append(
-            pairwise_boundary_table(
-                simulation_inputs,
-                corr,
-                selected_ticker=ticker,
-                target_probabilities=target_probabilities,
-                days_to_target=days_to_target,
+def conditional_probability_figure(curve: pd.DataFrame, boundaries: pd.DataFrame, confidence_levels: list[float], selected_ticker: str) -> go.Figure:
+    fig = px.line(
+        curve,
+        x="market_cap_to_current",
+        y="win_probability",
+        markers=True,
+        title=f"{selected_ticker}: P(win | terminal market cap level)",
+        labels={"market_cap_to_current": "Selected terminal market cap / current market cap", "win_probability": "Conditional probability of finishing #1"},
+    )
+    for confidence in confidence_levels:
+        fig.add_hline(y=confidence, line_dash="dot", annotation_text=f"{confidence:.0%}", annotation_position="right")
+    for _, row in boundaries.iterrows():
+        if pd.notna(row["Upper win boundary / current"]):
+            fig.add_vline(
+                x=float(row["Upper win boundary / current"]),
+                line_dash="dash",
+                annotation_text=f"win {row['Confidence level']:.0%}",
+                annotation_position="top",
             )
-        )
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if pd.notna(row["Lower loss boundary / current"]):
+            fig.add_vline(
+                x=float(row["Lower loss boundary / current"]),
+                line_dash="dash",
+                annotation_text=f"loss {row['Confidence level']:.0%}",
+                annotation_position="bottom",
+            )
+    fig.update_yaxes(tickformat=".0%", range=[0, 1])
+    fig.update_xaxes(tickformat=".0%")
+    return fig
+
+
+def rank_figure(curve: pd.DataFrame, selected_ticker: str) -> go.Figure:
+    fig = px.line(
+        curve,
+        x="market_cap_to_current",
+        y="average_rank",
+        markers=True,
+        title=f"{selected_ticker}: average final rank by terminal market-cap bin",
+        labels={"market_cap_to_current": "Selected terminal market cap / current market cap", "average_rank": "Average final rank"},
+    )
+    fig.update_xaxes(tickformat=".0%")
+    fig.update_yaxes(autorange="reversed")
+    return fig
 
 
 with st.sidebar:
@@ -157,8 +171,9 @@ with st.sidebar:
     days_to_target = max((target_date - date.today()).days, 1)
     st.caption(f"Horizon: {days_to_target} days ({days_to_target / 365:.2f} years)")
 
-    simulations = st.number_input("Monte Carlo simulations", min_value=2_000, max_value=300_000, value=30_000, step=5_000)
+    simulations = st.number_input("Monte Carlo simulations", min_value=2_000, max_value=1_000_000, value=100_000, step=10_000)
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
+    n_bins = st.slider("Market-cap quantile bins", min_value=10, max_value=100, value=30, step=5)
 
     st.header("Correlation")
     correlation_method = st.selectbox("Correlation method", CORRELATION_METHODS, index=0)
@@ -168,17 +183,16 @@ with st.sidebar:
     smooth_low_quantile = st.selectbox("Smooth low-vol bucket", [0.30, 0.40, 0.50], index=1, format_func=lambda value: f"{value:.0%}")
     smooth_high_quantile = st.selectbox("Smooth high-vol bucket", [0.50, 0.60, 0.70], index=1, format_func=lambda value: f"{value:.0%}")
 
-    st.header("Boundary targets")
-    selected_winner_targets = st.multiselect("P(#1) targets", WINNER_TARGETS, default=[0.50, 0.60, 0.70, 0.80], format_func=lambda value: f"{value:.0%}")
-    selected_pair_targets = st.multiselect("Pairwise targets", PAIR_TARGETS, default=[0.50, 0.60, 0.70], format_func=lambda value: f"{value:.0%}")
+    st.header("Confidence levels")
+    selected_confidence_levels = st.multiselect("Boundary confidence levels", CONFIDENCE_LEVELS, default=CONFIDENCE_LEVELS, format_func=lambda value: f"{value:.0%}")
 
     run_button = st.button("Run Phase 2 analysis", type="primary", use_container_width=True)
 
-conditional_tab, assumptions_tab, roadmap_tab = st.tabs(["Conditional Boundaries", "Assumption Comparison", "Phase 2 Roadmap"])
+conditional_tab, inverse_tab, roadmap_tab = st.tabs(["Conditional Boundaries", "Inverse Check", "Phase 2 Roadmap"])
 
 with conditional_tab:
     st.subheader("Conditional Boundaries")
-    st.write("This tab asks where probabilities change: required market-cap levels, pairwise breakpoints, and P(#1) curves. Market caps are refreshed from Yahoo Finance; IV and Polymarket prices remain manual assumptions.")
+    st.write("This tab uses the actual Phase 1 Monte Carlo scenarios. For a selected ticker, it bins that ticker's simulated terminal market cap and estimates P(win), P(loss), and average rank inside each bin.")
 
     if "boundary_company_inputs" not in st.session_state:
         st.session_state.boundary_company_inputs = default_company_inputs()
@@ -203,7 +217,7 @@ with conditional_tab:
     st.session_state.boundary_company_inputs = company_inputs
 
     if run_button:
-        with st.spinner("Calculating conditional probability boundaries..."):
+        with st.spinner("Running Phase 1 scenarios and calculating conditional boundaries..."):
             try:
                 tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
                 market_caps = load_yahoo_market_caps(tuple(tickers))
@@ -218,18 +232,26 @@ with conditional_tab:
                     float(smooth_low_quantile),
                     float(smooth_high_quantile),
                 )
-                baseline = run_probability_engine(
+                result = run_probability_engine(
                     simulation_inputs,
                     corr,
                     days_to_target=int(days_to_target),
                     simulations=int(simulations),
                     seed=int(seed),
                 )
+                current_caps = simulation_inputs.set_index("Ticker")["Current market cap"]
+                all_boundaries = calculate_boundaries_for_all_tickers(
+                    result.terminal_market_caps,
+                    current_caps,
+                    [float(value) for value in selected_confidence_levels],
+                    ranks=result.ranks,
+                    n_bins=int(n_bins),
+                )
                 st.session_state.boundary_inputs_used = simulation_inputs
-                st.session_state.boundary_prices = prices
                 st.session_state.boundary_market_caps = market_caps
                 st.session_state.boundary_corr = corr
-                st.session_state.boundary_baseline = baseline.results
+                st.session_state.boundary_result = result
+                st.session_state.boundary_all_boundaries = all_boundaries
                 st.session_state.boundary_error = None
             except Exception as exc:
                 st.session_state.boundary_error = str(exc)
@@ -238,136 +260,65 @@ with conditional_tab:
         st.error(st.session_state.boundary_error)
 
     simulation_inputs = st.session_state.get("boundary_inputs_used")
-    corr = st.session_state.get("boundary_corr")
-    baseline = st.session_state.get("boundary_baseline")
+    result = st.session_state.get("boundary_result")
+    all_boundaries = st.session_state.get("boundary_all_boundaries")
     market_caps = st.session_state.get("boundary_market_caps")
+    corr = st.session_state.get("boundary_corr")
 
-    if simulation_inputs is None or corr is None or baseline is None:
-        st.info("Run the Phase 2 analysis to calculate conditional probability levels.")
+    if simulation_inputs is None or result is None or all_boundaries is None:
+        st.info("Run the Phase 2 analysis to calculate conditional probability boundaries.")
     else:
         tickers = simulation_inputs["Ticker"].tolist()
-        selected_ticker = st.selectbox("Ticker for boundary detail", tickers, index=0)
-        selected_row = selected_result_row(baseline, selected_ticker)
-        selected_current_cap = float(selected_row["Current market cap"])
-        selected_model_probability = float(selected_row["Model probability"])
-        selected_polymarket_price = float(selected_row["Polymarket YES price"])
+        selected_ticker = st.selectbox("Selected ticker", tickers, index=0)
+        current_cap = float(simulation_inputs.set_index("Ticker").loc[selected_ticker, "Current market cap"])
+        selected_row = selected_result_row(result.results, selected_ticker)
 
-        st.subheader("Phase 2 summary")
-        metric_cols = st.columns(4)
-        metric_cols[0].metric("Selected ticker", selected_ticker)
-        metric_cols[1].metric("Current P(#1)", pct(selected_model_probability))
-        metric_cols[2].metric("Polymarket price", pct(selected_polymarket_price))
-        metric_cols[3].metric("Current market cap", dollars_trillions(selected_current_cap))
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("Selected ticker", selected_ticker)
+        summary_cols[1].metric("Unconditional P(#1)", pct(float(selected_row["Model probability"])))
+        summary_cols[2].metric("Current market cap", dollars_trillions(current_cap))
+        summary_cols[3].metric("Bins", f"{int(n_bins)}")
 
-        st.subheader("Baseline probabilities")
-        baseline_display = baseline.copy().rename(columns={"Model probability": "P(#1)", "Probability Top 2": "Top 2", "Probability Top 3": "Top 3"})
-        baseline_display["Current market cap"] = baseline_display["Current market cap"].map(dollars_trillions)
-        for column in ["Implied volatility", "Polymarket YES price", "P(#1)", "Edge", "Top 2", "Top 3"]:
-            baseline_display[column] = baseline_display[column].map(pct)
-        baseline_display["Average rank"] = baseline_display["Average rank"].map(lambda value: f"{value:.2f}")
-        st.dataframe(
-            baseline_display[["Ticker", "Current market cap", "Implied volatility", "Polymarket YES price", "P(#1)", "Edge", "Average rank", "Top 2", "Top 3"]],
-            use_container_width=True,
-            hide_index=True,
+        curve = calculate_conditional_win_curve(
+            result.terminal_market_caps,
+            selected_ticker,
+            ranks=result.ranks,
+            current_market_cap=current_cap,
+            n_bins=int(n_bins),
         )
-
-        st.subheader(f"Winner probability boundaries: {selected_ticker}")
-        boundary_rows = []
-        for target_probability in selected_winner_targets:
-            boundary = find_market_cap_boundary_for_winner_probability(
-                simulation_inputs,
-                corr,
-                ticker=selected_ticker,
-                target_probability=float(target_probability),
-                days_to_target=int(days_to_target),
-                simulations=int(simulations),
-                seed=int(seed),
-            )
-            boundary_rows.append(
-                {
-                    "Ticker": boundary.ticker,
-                    "Target P(#1)": boundary.target_probability,
-                    "Achieved P(#1)": boundary.achieved_probability,
-                    "Boundary market cap": boundary.boundary_market_cap,
-                    "Current market cap": boundary.current_market_cap,
-                    "Gap vs current": boundary.absolute_gap,
-                    "Move vs current": boundary.relative_gap,
-                    "Iterations": boundary.iterations,
-                }
-            )
-        boundary_table = pd.DataFrame(boundary_rows)
-        st.dataframe(display_boundary_table(boundary_table), use_container_width=True, hide_index=True)
-
-        with st.expander("Polymarket-implied boundary check"):
-            st.write("This is an inverse consistency check, not the main Phase 2 concept: it asks what selected-company market cap would make the model probability equal the manual Polymarket YES price.")
-            if 0.0 < selected_polymarket_price < 1.0:
-                implied_boundary = find_market_cap_boundary_for_winner_probability(
-                    simulation_inputs,
-                    corr,
-                    ticker=selected_ticker,
-                    target_probability=selected_polymarket_price,
-                    days_to_target=int(days_to_target),
-                    simulations=int(simulations),
-                    seed=int(seed),
-                )
-                implied_cols = st.columns(4)
-                implied_cols[0].metric("Polymarket target", pct(selected_polymarket_price))
-                implied_cols[1].metric("Implied cap", dollars_trillions(implied_boundary.boundary_market_cap))
-                implied_cols[2].metric("Move vs current", pct(implied_boundary.relative_gap))
-                implied_cols[3].metric("Achieved model P", pct(implied_boundary.achieved_probability))
-            else:
-                st.info("Polymarket YES price must be between 0% and 100% for this inverse check.")
-
-        cap_multipliers = np.round(np.linspace(0.75, 1.35, 25), 4).tolist()
-        curve = winner_probability_curve(
-            simulation_inputs,
-            corr,
-            ticker=selected_ticker,
-            cap_multipliers=cap_multipliers,
-            days_to_target=int(days_to_target),
-            simulations=int(simulations),
-            seed=int(seed),
-        )
-        curve["Market cap ($T)"] = curve["Market cap"] / 1e12
-        fig = px.line(
+        boundaries = find_probability_boundaries(
             curve,
-            x="Market cap ($T)",
-            y="P(#1)",
-            markers=True,
-            title=f"{selected_ticker}: P(#1) as market cap changes",
-        )
-        fig.add_vline(x=selected_current_cap / 1e12, line_dash="dash", annotation_text="current")
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader(f"Pairwise boundaries: {selected_ticker} vs competitors")
-        pairwise = pairwise_boundary_table(
-            simulation_inputs,
-            corr,
-            selected_ticker=selected_ticker,
-            target_probabilities=[float(value) for value in selected_pair_targets],
-            days_to_target=int(days_to_target),
-        )
-        st.dataframe(display_pairwise_table(pairwise), use_container_width=True, hide_index=True)
-
-        pair_heatmap = pairwise.pivot(index="Competitor", columns="Target pair probability", values="Boundary move vs current")
-        st.plotly_chart(
-            px.imshow(
-                pair_heatmap,
-                text_auto=".1%",
-                color_continuous_scale="RdYlGn",
-                title=f"{selected_ticker}: required move vs current for pairwise target probabilities",
-            ),
-            use_container_width=True,
+            [float(value) for value in selected_confidence_levels],
+            current_market_cap=current_cap,
+            ticker=selected_ticker,
         )
 
-        with st.expander("All ordered pairwise boundary combinations"):
-            all_pairwise = all_pairwise_boundaries(
-                simulation_inputs,
-                corr,
-                target_probabilities=[float(value) for value in selected_pair_targets],
-                days_to_target=int(days_to_target),
+        st.subheader("Boundary table")
+        st.dataframe(display_boundary_table(boundaries), use_container_width=True, hide_index=True)
+
+        st.subheader("Conditional probability chart")
+        st.plotly_chart(conditional_probability_figure(curve, boundaries, [float(value) for value in selected_confidence_levels], selected_ticker), use_container_width=True)
+
+        st.subheader("Rank chart")
+        st.plotly_chart(rank_figure(curve, selected_ticker), use_container_width=True)
+
+        st.subheader("Scenario table")
+        st.dataframe(display_curve_table(curve), use_container_width=True, hide_index=True)
+
+        with st.expander("All tickers boundary summary"):
+            st.dataframe(display_boundary_table(all_boundaries), use_container_width=True, hide_index=True)
+
+        with st.expander("Baseline ranking probabilities"):
+            baseline_display = result.results.copy().rename(columns={"Model probability": "P(#1)", "Probability Top 2": "Top 2", "Probability Top 3": "Top 3"})
+            baseline_display["Current market cap"] = baseline_display["Current market cap"].map(dollars_trillions)
+            for column in ["Implied volatility", "Polymarket YES price", "P(#1)", "Edge", "Top 2", "Top 3"]:
+                baseline_display[column] = baseline_display[column].map(pct)
+            baseline_display["Average rank"] = baseline_display["Average rank"].map(lambda value: f"{value:.2f}")
+            st.dataframe(
+                baseline_display[["Ticker", "Current market cap", "Implied volatility", "Polymarket YES price", "P(#1)", "Edge", "Average rank", "Top 2", "Top 3"]],
+                use_container_width=True,
+                hide_index=True,
             )
-            st.dataframe(display_pairwise_table(all_pairwise), use_container_width=True, hide_index=True)
 
         with st.expander("Yahoo market caps used"):
             st.dataframe(display_market_caps(market_caps), use_container_width=True, hide_index=True)
@@ -375,99 +326,48 @@ with conditional_tab:
         with st.expander("Correlation matrix used"):
             st.dataframe(corr.style.format("{:.2%}"), use_container_width=True)
 
-        st.subheader("Methodology")
-        st.write(
-            "Winner boundaries are solved by repeatedly rerunning the Phase 1 Monte Carlo engine while changing only the selected company's current market cap. "
-            "Pairwise boundaries use the analytic lognormal ratio formula for P(selected terminal cap > competitor terminal cap). "
-            "This is still probability analysis only; no hedge construction or payoff optimization is included in Phase 2 yet."
-        )
-
-with assumptions_tab:
-    st.subheader("Assumption Comparison")
-    st.write("A side view for comparing Phase 2 boundaries under Phase 1 correlation assumptions. This keeps sensitivity separate from the main conditional-boundary workflow.")
+with inverse_tab:
+    st.subheader("Inverse Check")
+    st.write("This is diagnostic only. It asks what current market cap would make the full Monte Carlo P(#1) equal a selected probability, such as the manual Polymarket price. It is not the primary Phase 2 boundary method.")
 
     simulation_inputs = st.session_state.get("boundary_inputs_used")
-    prices = st.session_state.get("boundary_prices")
-    baseline = st.session_state.get("boundary_baseline")
+    corr = st.session_state.get("boundary_corr")
+    result = st.session_state.get("boundary_result")
 
-    if simulation_inputs is None or prices is None or baseline is None:
-        st.info("Run the Phase 2 analysis first, then return here to compare assumptions.")
+    if simulation_inputs is None or corr is None or result is None:
+        st.info("Run the Conditional Boundaries tab first.")
     else:
         tickers = simulation_inputs["Ticker"].tolist()
-        comparison_ticker = st.selectbox("Ticker for assumption comparison", tickers, index=0, key="phase2_assumption_ticker")
-        comparison_row = selected_result_row(baseline, comparison_ticker)
-        polymarket_price = float(comparison_row["Polymarket YES price"])
-        comparison_rows = []
-
-        for method in CORRELATION_METHODS:
-            method_corr = build_correlation_matrix(
-                method,
-                prices,
+        inverse_ticker = st.selectbox("Ticker for inverse check", tickers, index=0, key="phase2_inverse_ticker")
+        row = selected_result_row(result.results, inverse_ticker)
+        inverse_target = st.number_input("Target P(#1)", min_value=0.01, max_value=0.99, value=float(row["Polymarket YES price"]), step=0.01, format="%.2f")
+        if st.button("Run inverse check", type="secondary"):
+            boundary = find_market_cap_boundary_for_winner_probability(
                 simulation_inputs,
-                float(ewma_lambda),
-                int(rolling_lookback),
-                float(smooth_low_quantile),
-                float(smooth_high_quantile),
-            )
-            method_result = run_probability_engine(
-                simulation_inputs,
-                method_corr,
+                corr,
+                ticker=inverse_ticker,
+                target_probability=float(inverse_target),
                 days_to_target=int(days_to_target),
                 simulations=int(simulations),
                 seed=int(seed),
             )
-            method_row = selected_result_row(method_result.results, comparison_ticker)
-            boundary_50 = find_market_cap_boundary_for_winner_probability(
-                simulation_inputs,
-                method_corr,
-                ticker=comparison_ticker,
-                target_probability=0.50,
-                days_to_target=int(days_to_target),
-                simulations=int(simulations),
-                seed=int(seed),
-            )
-            if 0.0 < polymarket_price < 1.0:
-                poly_boundary = find_market_cap_boundary_for_winner_probability(
-                    simulation_inputs,
-                    method_corr,
-                    ticker=comparison_ticker,
-                    target_probability=polymarket_price,
-                    days_to_target=int(days_to_target),
-                    simulations=int(simulations),
-                    seed=int(seed),
-                )
-                poly_cap = poly_boundary.boundary_market_cap
-                poly_move = poly_boundary.relative_gap
-            else:
-                poly_cap = np.nan
-                poly_move = np.nan
-
-            current_cap = float(method_row["Current market cap"])
-            comparison_rows.append(
-                {
-                    "Correlation method": method,
-                    "Current market cap": current_cap,
-                    "Current P(#1)": float(method_row["Model probability"]),
-                    "Polymarket price": polymarket_price,
-                    "Cap for 50% P(#1)": boundary_50.boundary_market_cap,
-                    "Move to 50%": boundary_50.relative_gap,
-                    "Polymarket-implied cap": poly_cap,
-                    "Polymarket-implied move": poly_move,
-                }
-            )
-
-        scenario_table = pd.DataFrame(comparison_rows)
-        st.dataframe(display_scenario_table(scenario_table), use_container_width=True, hide_index=True)
+            cols = st.columns(4)
+            cols[0].metric("Target P(#1)", pct(float(inverse_target)))
+            cols[1].metric("Implied current cap", dollars_trillions(boundary.boundary_market_cap))
+            cols[2].metric("Move vs current", pct(boundary.relative_gap))
+            cols[3].metric("Achieved P(#1)", pct(boundary.achieved_probability))
 
 with roadmap_tab:
     st.subheader("Phase 2 Roadmap")
-    st.write("Phase 2 should stay focused on probability boundaries, not hedging. New Phase 2 modules should be added here as tabs instead of separate sidebar pages.")
+    st.write("Phase 2 should stay focused on conditional probability boundaries from simulated scenarios. New Phase 2 modules should be added here as tabs instead of separate sidebar pages.")
     st.markdown(
         """
-- Conditional winner boundaries: implemented.
-- Pairwise probability boundaries, including all ordered ticker combinations: implemented.
-- Polymarket-implied boundary as inverse consistency check: implemented.
-- Boundary comparison across Phase 1 correlation assumptions: implemented as a side tab.
+- Conditional win/loss boundaries from simulated terminal market-cap bins: implemented.
+- Conditional probability chart with confidence levels and boundary markers: implemented.
+- Rank chart by selected terminal market-cap bin: implemented.
+- Scenario/bin table: implemented.
+- All-ticker boundary summary: implemented.
+- Inverse Polymarket-style check: diagnostic only.
 - Hedging and payoff surfaces: defer to Phase 3 and Phase 4.
         """
     )
