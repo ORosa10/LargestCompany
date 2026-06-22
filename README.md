@@ -40,8 +40,7 @@ The core outputs are:
 - average simulated rank
 - model probability versus Polymarket YES price
 - terminal market-cap distribution percentiles
-- pairwise probability diagnostics
-- conditional market-cap boundaries for target probabilities
+- conditional win/loss boundary zones for a selected ticker
 
 ## What This Tool Does Not Do
 
@@ -78,20 +77,45 @@ The `-0.5 * sigma^2 * T` term is the lognormal adjustment. It is not an expected
 
 Phase 2 lives in the `Phase 2` Streamlit page. Inside that page, Phase 2 modules are organized as tabs so they do not mix with the earlier Phase 1 diagnostic pages in the sidebar.
 
-The first Phase 2 tab is `Conditional Boundaries`. It answers questions such as:
+The main Phase 2 method uses the actual Phase 1 Monte Carlo scenarios:
 
-- what market cap does NVDA need for 50%, 60%, 70%, or 80% probability of finishing #1?
-- how much would the selected company's market cap need to move versus today to reach that probability?
-- what selected-company market cap corresponds to 50/50, 60/40, 70/30 pairwise odds versus each competitor?
-- how does P(#1) change as the selected company's market cap is shocked up or down?
+1. Simulate final market caps for all companies.
+2. Store the selected ticker's terminal market cap.
+3. Store the selected ticker's final rank.
+4. Store whether the selected ticker finished #1.
+5. Sort/bin scenarios by selected ticker terminal market cap.
+6. Estimate conditional probabilities inside each bin.
 
-There are two boundary methods:
+For each selected ticker, the app builds a conditional curve:
 
-1. Full winner boundaries: solved by repeatedly rerunning the Phase 1 Monte Carlo engine while changing only the selected company's current market cap. This captures the full multi-company event where the selected ticker must beat every company in the universe.
+```text
+P(selected ticker wins | selected ticker terminal market cap is around level X)
+```
 
-2. Pairwise boundaries: solved with the analytic lognormal ratio formula for `P(selected terminal market cap > competitor terminal market cap)`. Pairwise boundaries are fast and useful for understanding nearest competitors, but they are not the same as full P(#1).
+The default confidence levels are:
 
-Phase 2 is still probability analysis only. It does not construct hedges or optimize payoffs.
+- 80%
+- 90%
+- 95%
+- 99%
+
+For each confidence level, Phase 2 estimates:
+
+- lower loss boundary: highest selected-ticker market-cap bin where P(loss) is at least the confidence level
+- upper win boundary: lowest selected-ticker market-cap bin where P(win) is at least the confidence level
+- each boundary as a percentage of the selected ticker's current market cap
+
+The Phase 2 page shows:
+
+- boundary table
+- conditional probability chart
+- average-rank chart
+- scenario/bin table
+- optional all-ticker boundary summary
+
+These boundaries are not deterministic truths. They are conditional probabilities from the Monte Carlo model and depend on IVs, correlations, current market caps, and target date. They are intended to become useful inputs for later option-strike and hedge-structure analysis.
+
+The `Inverse Check` tab is diagnostic only. It asks what current market cap would make the full Monte Carlo P(#1) equal a selected target such as the manual Polymarket price. It is not the main Phase 2 methodology.
 
 ## Drift And Dividends
 
@@ -147,6 +171,7 @@ The test suite covers:
 - bad company inputs are rejected
 - correlation matrices are reindexed, symmetrized, and repaired where appropriate
 - pairwise conditional boundaries hit their target probabilities
+- scenario-based conditional win curves and all-ticker boundary summaries
 - winner probability rises when the selected company's market cap rises
 
 Run tests with:
