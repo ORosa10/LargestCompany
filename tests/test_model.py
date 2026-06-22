@@ -29,7 +29,7 @@ def test_probability_bookkeeping_sums_to_one():
     assert (result.results["Probability Top 3"] >= result.results["Probability Top 2"]).all()
 
     rank_sums = result.rank_distribution.groupby("Ticker")["Probability"].sum()
-    assert (rank_sums == pytest.approx(1.0)).all()
+    assert np.allclose(rank_sums.to_numpy(), 1.0)
 
 
 def test_two_company_top_two_is_certain():
@@ -50,7 +50,7 @@ def test_two_company_top_two_is_certain():
     )
 
     assert result.results["Model probability"].sum() == pytest.approx(1.0)
-    assert (result.results["Probability Top 2"] == pytest.approx(1.0)).all()
+    assert np.allclose(result.results["Probability Top 2"].to_numpy(), 1.0)
 
 
 def test_input_validation_rejects_bad_rows():
