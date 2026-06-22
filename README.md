@@ -1,6 +1,6 @@
 # LargestCompany
 
-Phase 1 of the Polymarket Ranking Engine.
+Polymarket Ranking Engine.
 
 This is an experimental quantitative research app for estimating fair probabilities that each company in a universe finishes with the largest market capitalization at a target date.
 
@@ -8,9 +8,9 @@ The objective is not to predict stock prices and not to outperform the option ma
 
 This is research software, not investment advice.
 
-## Phase 1 Baseline
+## Baseline Model
 
-The default Phase 1 model is intentionally simple and auditable:
+The default model is intentionally simple and auditable:
 
 - Current market capitalization: Yahoo Finance current market cap via `yfinance`
 - Annualized implied volatility: manual input
@@ -20,7 +20,7 @@ The default Phase 1 model is intentionally simple and auditable:
 - Drift: zero expected excess return, with only the lognormal convexity adjustment
 - Dividends: ignored for now
 
-The app also contains diagnostic pages for correlation sensitivity, IV sensitivity, and return-distribution shape, but those are analysis views. The baseline probability output should be read through the default model above unless a different assumption set is explicitly selected.
+The app also contains diagnostic pages for correlation sensitivity, IV sensitivity, return-distribution shape, and conditional boundaries. Those are analysis views. The baseline probability output should be read through the default model above unless a different assumption set is explicitly selected.
 
 ## What This Tool Does
 
@@ -41,10 +41,11 @@ The core outputs are:
 - model probability versus Polymarket YES price
 - terminal market-cap distribution percentiles
 - pairwise probability diagnostics
+- conditional market-cap boundaries for target probabilities
 
 ## What This Tool Does Not Do
 
-Phase 1 does not include:
+The current app does not include:
 
 - stock-price forecasting
 - alpha generation against option markets
@@ -56,7 +57,7 @@ Phase 1 does not include:
 
 Those belong to later phases.
 
-## Model
+## Phase 1: Probability Engine
 
 The app uses correlated lognormal simulations of future market capitalizations:
 
@@ -73,9 +74,28 @@ Where:
 
 The `-0.5 * sigma^2 * T` term is the lognormal adjustment. It is not an expected-return forecast.
 
+## Phase 2: Conditional Probability Boundaries
+
+Phase 2 adds a `Conditional Boundaries` page.
+
+This page answers questions such as:
+
+- what market cap does NVDA need for 50%, 60%, 70%, or 80% probability of finishing #1?
+- how much would the selected company's market cap need to move versus today to reach that probability?
+- what selected-company market cap corresponds to 50/50, 60/40, 70/30 pairwise odds versus each competitor?
+- how does P(#1) change as the selected company's market cap is shocked up or down?
+
+There are two boundary methods:
+
+1. Full winner boundaries: solved by repeatedly rerunning the Phase 1 Monte Carlo engine while changing only the selected company's current market cap. This captures the full multi-company event where the selected ticker must beat every company in the universe.
+
+2. Pairwise boundaries: solved with the analytic lognormal ratio formula for `P(selected terminal market cap > competitor terminal market cap)`. Pairwise boundaries are fast and useful for understanding nearest competitors, but they are not the same as full P(#1).
+
+Phase 2 is still probability analysis only. It does not construct hedges or optimize payoffs.
+
 ## Drift And Dividends
 
-For Phase 1, the model does not add a risk-free drift, equity risk premium, or dividend yield.
+For now, the model does not add a risk-free drift, equity risk premium, or dividend yield.
 
 That is deliberate. This tool is comparing relative ranking probabilities using current market caps, implied volatility, and correlation assumptions. For short-dated ranking markets, drift and dividends are usually second-order compared with current market-cap gaps and volatility. They can be added later as explicit scenario inputs if needed.
 
@@ -109,7 +129,7 @@ These are useful for understanding sensitivity, not because there is one obvious
 
 ## Volatility Inputs
 
-Manual IV is the baseline because Phase 1 is a probability engine, not a full option-surface engine.
+Manual IV is the baseline because this is a probability engine, not a full option-surface engine.
 
 A Yahoo option-chain near-ATM IV helper exists as an MVP diagnostic source. It selects the option expiry closest to the target date, finds the strike nearest spot, and averages call/put implied volatility at that strike. This is not a full volatility surface and should not be treated as final production-quality IV ingestion.
 
@@ -119,13 +139,15 @@ Polymarket YES prices are manual for now. A later module can ingest prices from 
 
 ## Validation
 
-The probability engine has sanity tests covering:
+The test suite covers:
 
 - winner probabilities sum to 100%
 - Top 2 / Top 3 probabilities are internally consistent
 - rank distributions sum to 100% for each ticker
 - bad company inputs are rejected
 - correlation matrices are reindexed, symmetrized, and repaired where appropriate
+- pairwise conditional boundaries hit their target probabilities
+- winner probability rises when the selected company's market cap rises
 
 Run tests with:
 
@@ -149,17 +171,20 @@ python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 ## Files
 
 ```text
-app.py                         Streamlit app loader
-app_core.py                    Main Streamlit dashboard
-model.py                       Probability engine
-market_data.py                 Yahoo current market-cap extraction
-correlations.py                Historical and volatility-adjusted correlation estimation
-iv_surfaces.py                 Yahoo option-chain near-ATM IV extraction
+app.py                          Streamlit app loader
+app_core.py                     Main Streamlit dashboard
+model.py                        Probability engine
+boundaries.py                   Conditional probability boundary calculations
+market_data.py                  Yahoo current market-cap extraction
+correlations.py                 Historical and volatility-adjusted correlation estimation
+iv_surfaces.py                  Yahoo option-chain near-ATM IV extraction
+pages/Conditional_Boundaries.py Conditional boundaries page
 pages/Correlation_Comparison.py Correlation analysis page
-pages/IV_Analysis.py           IV sensitivity page
-pages/Return_Diagnostics.py    Return-shape diagnostics page
-tests/test_model.py            Probability engine sanity tests
-requirements.txt               Python dependencies
+pages/IV_Analysis.py            IV sensitivity page
+pages/Return_Diagnostics.py     Return-shape diagnostics page
+tests/test_model.py             Probability engine sanity tests
+tests/test_boundaries.py        Conditional boundary tests
+requirements.txt                Python dependencies
 ```
 
 ## Phase Roadmap
