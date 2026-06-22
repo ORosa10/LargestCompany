@@ -1,8 +1,48 @@
 import pandas as pd
 import pytest
 
-from boundaries import pairwise_market_cap_boundary, pairwise_probability, winner_probability_at_market_cap
-from model import run_probability_engine
+from boundaries import (
+    calculate_boundaries_for_all_tickers,
+    calculate_conditional_win_curve,
+    find_probability_boundaries,
+    pairwise_market_cap_boundary,
+    pairwise_probability,
+    winner_probability_at_market_cap,
+)
+
+
+def test_conditional_win_curve_and_boundaries_from_scenarios():
+    simulated_caps = pd.DataFrame(
+        {
+            "AAA": [80, 85, 90, 95, 100, 105, 110, 115, 120, 125],
+            "BBB": [120, 115, 110, 105, 100, 95, 90, 85, 80, 75],
+            "CCC": [90, 90, 90, 90, 90, 90, 90, 90, 90, 90],
+        }
+    )
+
+    curve = calculate_conditional_win_curve(simulated_caps, "AAA", current_market_cap=100.0, n_bins=5)
+    boundaries = find_probability_boundaries(curve, [0.80], current_market_cap=100.0, ticker="AAA")
+
+    assert set(["win_probability", "loss_probability", "average_rank", "scenario_count"]).issubset(curve.columns)
+    assert curve["scenario_count"].sum() == len(simulated_caps)
+    assert boundaries.loc[0, "Ticker"] == "AAA"
+    assert boundaries.loc[0, "Upper win boundary"] > boundaries.loc[0, "Lower loss boundary"]
+
+
+def test_all_ticker_conditional_boundaries_returns_each_ticker():
+    simulated_caps = pd.DataFrame(
+        {
+            "AAA": [80, 90, 100, 110, 120, 130],
+            "BBB": [130, 120, 110, 100, 90, 80],
+            "CCC": [95, 95, 95, 95, 95, 95],
+        }
+    )
+    current_caps = pd.Series({"AAA": 100.0, "BBB": 100.0, "CCC": 95.0})
+
+    table = calculate_boundaries_for_all_tickers(simulated_caps, current_caps, [0.80], n_bins=3)
+
+    assert set(table["Ticker"]) == {"AAA", "BBB", "CCC"}
+    assert (table["Confidence level"] == 0.80).all()
 
 
 def test_pairwise_boundary_hits_target_probability():
