@@ -20,7 +20,7 @@ The default model is intentionally simple and auditable:
 - Drift: zero expected excess return, with only the lognormal convexity adjustment
 - Dividends: ignored for now
 
-The app also contains diagnostic pages for correlation sensitivity, IV sensitivity, return-distribution shape, and conditional boundaries. Those are analysis views. The baseline probability output should be read through the default model above unless a different assumption set is explicitly selected.
+The app also contains diagnostic pages for correlation sensitivity, IV sensitivity, return-distribution shape, and a Phase 2 workspace. Those are analysis views. The baseline probability output should be read through the default model above unless a different assumption set is explicitly selected.
 
 ## What This Tool Does
 
@@ -76,9 +76,9 @@ The `-0.5 * sigma^2 * T` term is the lognormal adjustment. It is not an expected
 
 ## Phase 2: Conditional Probability Boundaries
 
-Phase 2 adds a `Conditional Boundaries` page.
+Phase 2 lives in the `Phase 2` Streamlit page. Inside that page, Phase 2 modules are organized as tabs so they do not mix with the earlier Phase 1 diagnostic pages in the sidebar.
 
-This page answers questions such as:
+The first Phase 2 tab is `Conditional Boundaries`. It answers questions such as:
 
 - what market cap does NVDA need for 50%, 60%, 70%, or 80% probability of finishing #1?
 - how much would the selected company's market cap need to move versus today to reach that probability?
@@ -178,7 +178,7 @@ boundaries.py                   Conditional probability boundary calculations
 market_data.py                  Yahoo current market-cap extraction
 correlations.py                 Historical and volatility-adjusted correlation estimation
 iv_surfaces.py                  Yahoo option-chain near-ATM IV extraction
-pages/Conditional_Boundaries.py Conditional boundaries page
+pages/Phase_2.py                Phase 2 workspace with internal tabs
 pages/Correlation_Comparison.py Correlation analysis page
 pages/IV_Analysis.py            IV sensitivity page
 pages/Return_Diagnostics.py     Return-shape diagnostics page
