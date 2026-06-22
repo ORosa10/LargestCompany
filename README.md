@@ -4,30 +4,57 @@ Phase 1 of the Polymarket Ranking Engine.
 
 This is an experimental quantitative research app for estimating fair probabilities that each company in a universe finishes with the largest market capitalization at a target date.
 
-The goal is not to predict stock prices and not to outperform the option market. The goal is to translate current market capitalization, option-implied volatility, target-date horizon, and correlation assumptions into ranking probabilities, then compare those probabilities with Polymarket YES prices.
+The objective is not to predict stock prices and not to outperform the option market. The objective is to translate observable market inputs into ranking probabilities, then compare those fair probabilities with Polymarket YES prices.
 
-## Prototype Status
+This is research software, not investment advice.
 
-Current data sources:
+## Phase 1 Baseline
 
-- Current market capitalization: Yahoo Finance current market cap via `yfinance`, or manual input
-- Annualized implied volatility: manual input or Yahoo Finance option-chain near-ATM IV via `yfinance`
+The default Phase 1 model is intentionally simple and auditable:
+
+- Current market capitalization: Yahoo Finance current market cap via `yfinance`
+- Annualized implied volatility: manual input
 - Polymarket YES price: manual input
-- Correlation matrix: Yahoo Finance historical adjusted close prices via `yfinance`, or manual input
-- Target date / maturity: user-selected date
+- Correlation matrix: EWMA historical correlation from Yahoo Finance adjusted close prices
+- Shock distribution: normal shocks
+- Drift: zero expected excess return, with only the lognormal convexity adjustment
+- Dividends: ignored for now
 
-The next important product step is to replace manual Polymarket placeholders with an explicit Polymarket price pipeline or uploaded market snapshot.
+The app also contains diagnostic pages for correlation sensitivity, IV sensitivity, and return-distribution shape, but those are analysis views. The baseline probability output should be read through the default model above unless a different assumption set is explicitly selected.
 
-## Phase 1 Scope
+## What This Tool Does
 
-This phase builds the probability engine, current market-cap ingestion, historical correlation estimation, volatility-adjusted correlation sensitivity, and an MVP implied-volatility source.
+The engine estimates probabilities for ranking events such as:
 
-It does not include:
+```text
+Which company will have the largest market capitalization at the target date?
+```
 
-- full volatility skew or smile calibration
+For each simulation path, the app simulates terminal market capitalization for every company, ranks the companies, and records the winner and rank distribution.
+
+The core outputs are:
+
+- probability each company finishes #1
+- probability each company finishes Top 2
+- probability each company finishes Top 3
+- average simulated rank
+- model probability versus Polymarket YES price
+- terminal market-cap distribution percentiles
+- pairwise probability diagnostics
+
+## What This Tool Does Not Do
+
+Phase 1 does not include:
+
+- stock-price forecasting
+- alpha generation against option markets
 - hedging logic
 - option payoff heatmaps
 - portfolio optimization
+- full volatility skew or smile calibration
+- automated Polymarket odds ingestion
+
+Those belong to later phases.
 
 ## Model
 
@@ -44,100 +71,67 @@ Where:
 - `T = days_to_target / 365`
 - `Z` is a correlated normal shock
 
-## Implied Volatility Source
+The `-0.5 * sigma^2 * T` term is the lognormal adjustment. It is not an expected-return forecast.
 
-The app supports two IV modes:
+## Drift And Dividends
 
-1. Manual IV inputs
-2. Yahoo option-chain near-ATM IV
+For Phase 1, the model does not add a risk-free drift, equity risk premium, or dividend yield.
 
-Yahoo IV mode uses `yfinance` option chains, selects the expiry closest to the target date, finds the strike nearest spot, and averages call/put implied volatility at that strike.
-
-This is an MVP near-ATM estimate. It is not a full volatility smile/surface calibration.
+That is deliberate. This tool is comparing relative ranking probabilities using current market caps, implied volatility, and correlation assumptions. For short-dated ranking markets, drift and dividends are usually second-order compared with current market-cap gaps and volatility. They can be added later as explicit scenario inputs if needed.
 
 ## Correlation Estimation
 
-The app supports these correlation modes:
+The default correlation method is EWMA historical correlation using Yahoo Finance adjusted close prices.
 
-1. EWMA historical correlation, default
-2. Vol-adjusted smooth correlation
-3. Rolling historical correlation
-4. Low-vol regime correlation
-5. High-vol regime correlation
-6. IV-based hard-switch regime correlation
-7. Manual correlation matrix
-
-Historical methods use adjusted close prices from Yahoo Finance through `yfinance`.
-
-### EWMA
+Daily log returns are calculated as:
 
 ```text
 r_t = log(P_t / P_{t-1})
+```
+
+EWMA covariance is estimated as:
+
+```text
 Cov_t = lambda * Cov_{t-1} + (1 - lambda) * r_t r_t'
 Corr_ij = Cov_ij / sqrt(Cov_ii * Cov_jj)
 ```
 
-### Vol-Adjusted Smooth Correlation
+The app also provides diagnostic alternatives:
 
-This is the preferred volatility-regime sensitivity mode.
+- rolling historical correlation
+- volatility-adjusted smooth correlation
+- low-vol regime correlation
+- high-vol regime correlation
+- IV-based hard-switch regime correlation
+- constant-correlation stress tests
 
-For each pair of companies:
+These are useful for understanding sensitivity, not because there is one obviously perfect correlation model.
 
-```text
-realized_vol_i,t = rolling_std(return_i, window) * sqrt(252)
-pair_realized_vol_ij,t = average(realized_vol_i,t, realized_vol_j,t)
-avg_current_IV_ij = average(IV_i, IV_j)
-```
+## Volatility Inputs
 
-The current average pair IV is mapped into the historical distribution of pair realized volatility:
+Manual IV is the baseline because Phase 1 is a probability engine, not a full option-surface engine.
 
-```text
-w_ij = percentile_rank(avg_current_IV_ij, historical_pair_realized_vol_ij)
-```
-
-Then the pair correlation is blended smoothly:
-
-```text
-Corr_ij = (1 - w_ij) * Corr_low_ij + w_ij * Corr_high_ij
-```
-
-Where:
-
-- `Corr_low_ij` is the pair correlation on low-vol historical days, default bottom 40% of pair realized-vol observations
-- `Corr_high_ij` is the pair correlation on high-vol historical days, default top 40% of pair realized-vol observations
-- `w_ij` is calculated from data, not manually chosen
-
-This avoids a hard arbitrary switch such as 49.9% IV = low regime and 50.1% IV = high regime.
-
-### Hard-Switch Regime Correlation
-
-The older hard-switch mode remains available as a diagnostic:
-
-```text
-if avg_current_IV_ij >= threshold:
-    use high-vol historical correlation for pair i,j
-else:
-    use low-vol historical correlation for pair i,j
-```
-
-This is less smooth and more threshold-sensitive than the preferred vol-adjusted smooth mode.
-
-## Outputs
-
-The app includes:
-
-- statistical ranking probabilities
-- ticker drilldown directly on the main Results tab
-- selected ticker rank distribution
-- pairwise probability audit
-- volatility-adjusted correlation diagnostics
-- interactive company comparison box plot
-- terminal market-cap distribution percentiles for every company
-- exact rank probability matrix
+A Yahoo option-chain near-ATM IV helper exists as an MVP diagnostic source. It selects the option expiry closest to the target date, finds the strike nearest spot, and averages call/put implied volatility at that strike. This is not a full volatility surface and should not be treated as final production-quality IV ingestion.
 
 ## Polymarket Odds
 
-Polymarket YES prices remain manual for now. A later module can ingest market prices from Polymarket APIs and still allow manual overrides.
+Polymarket YES prices are manual for now. A later module can ingest prices from Polymarket APIs or uploaded market snapshots while still allowing manual overrides.
+
+## Validation
+
+The probability engine has sanity tests covering:
+
+- winner probabilities sum to 100%
+- Top 2 / Top 3 probabilities are internally consistent
+- rank distributions sum to 100% for each ticker
+- bad company inputs are rejected
+- correlation matrices are reindexed, symmetrized, and repaired where appropriate
+
+Run tests with:
+
+```bash
+pytest
+```
 
 ## Run
 
@@ -146,15 +140,34 @@ pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
+In GitHub Codespaces, expose the Streamlit server with:
+
+```bash
+python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+```
+
 ## Files
 
 ```text
-app.py            Streamlit dashboard
-model.py          Probability engine
-market_data.py    Yahoo current market-cap extraction
-correlations.py   Historical and volatility-adjusted correlation estimation
-iv_surfaces.py    Yahoo option-chain near-ATM IV extraction
-requirements.txt  Python dependencies
+app.py                         Streamlit app loader
+app_core.py                    Main Streamlit dashboard
+model.py                       Probability engine
+market_data.py                 Yahoo current market-cap extraction
+correlations.py                Historical and volatility-adjusted correlation estimation
+iv_surfaces.py                 Yahoo option-chain near-ATM IV extraction
+pages/Correlation_Comparison.py Correlation analysis page
+pages/IV_Analysis.py           IV sensitivity page
+pages/Return_Diagnostics.py    Return-shape diagnostics page
+tests/test_model.py            Probability engine sanity tests
+requirements.txt               Python dependencies
 ```
 
-This is research software, not investment advice.
+## Phase Roadmap
+
+Phase 1: probability engine.
+
+Phase 2: conditional probability boundaries.
+
+Phase 3: option-based hedge structures.
+
+Phase 4: payoff surfaces and portfolio construction.
