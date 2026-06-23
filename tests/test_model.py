@@ -73,7 +73,7 @@ def test_input_validation_rejects_bad_rows():
 def test_correlation_cleaning_repairs_order_symmetry_and_diagonal():
     tickers = ["AAA", "BBB"]
     corr = pd.DataFrame(
-        [[0.8, 0.20], [0.40, 1.2]],
+        [[0.8, 0.20], [0.40, 0.9]],
         index=["BBB", "AAA"],
         columns=["BBB", "AAA"],
     )
