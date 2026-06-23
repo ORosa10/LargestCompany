@@ -16,7 +16,7 @@ def test_conditional_win_curve_and_boundaries_from_scenarios():
         {
             "AAA": [80, 85, 90, 95, 100, 105, 110, 115, 120, 125],
             "BBB": [120, 115, 110, 105, 100, 95, 90, 85, 80, 75],
-            "CCC": [90, 90, 90, 90, 90, 90, 90, 90, 90, 90],
+            "CCC": [88, 89, 90, 91, 92, 93, 94, 95, 96, 97],
         }
     )
 
@@ -34,7 +34,7 @@ def test_all_ticker_conditional_boundaries_returns_each_ticker():
         {
             "AAA": [80, 90, 100, 110, 120, 130],
             "BBB": [130, 120, 110, 100, 90, 80],
-            "CCC": [95, 95, 95, 95, 95, 95],
+            "CCC": [85, 95, 105, 115, 125, 135],
         }
     )
     current_caps = pd.Series({"AAA": 100.0, "BBB": 100.0, "CCC": 95.0})
