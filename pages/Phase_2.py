@@ -86,6 +86,23 @@ def display_curve_table(table: pd.DataFrame) -> pd.DataFrame:
     return display[["Bin low", "Bin high", "Average terminal market cap", "Average cap / current", "Win probability", "Loss probability", "Average rank", "Scenario count"]]
 
 
+def display_distribution_table(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.copy().rename(
+        columns={
+            "bin_label": "Terminal cap / current bin",
+            "scenario_probability": "Scenario probability",
+            "win_probability": "Conditional win probability",
+            "win_contribution": "Contribution to total P(#1)",
+            "average_rank": "Average rank",
+            "scenario_count": "Scenario count",
+        }
+    )
+    for column in ["Scenario probability", "Conditional win probability", "Contribution to total P(#1)"]:
+        display[column] = display[column].map(pct)
+    display["Average rank"] = display["Average rank"].map(lambda value: f"{value:.2f}")
+    return display[["Terminal cap / current bin", "Scenario probability", "Conditional win probability", "Contribution to total P(#1)", "Average rank", "Scenario count"]]
+
+
 def build_correlation_matrix(
     method: str,
     prices: pd.DataFrame,
@@ -120,6 +137,44 @@ def selected_result_row(results: pd.DataFrame, ticker: str) -> pd.Series:
     return row.iloc[0]
 
 
+def calculate_probability_weighted_bins(
+    terminal_market_caps: pd.DataFrame,
+    ranks: pd.DataFrame,
+    selected_ticker: str,
+    current_market_cap: float,
+    bin_width: float,
+) -> pd.DataFrame:
+    terminal_ratio = terminal_market_caps[selected_ticker].astype(float) / float(current_market_cap)
+    selected_ranks = ranks[selected_ticker].astype(float)
+    data = pd.DataFrame({"terminal_ratio": terminal_ratio, "rank": selected_ranks})
+    data["won"] = data["rank"] == 1
+    data = data.dropna()
+    if data.empty:
+        return pd.DataFrame()
+
+    low_edge = np.floor(data["terminal_ratio"].min() / bin_width) * bin_width
+    high_edge = np.ceil(data["terminal_ratio"].max() / bin_width) * bin_width
+    edges = np.arange(low_edge, high_edge + bin_width, bin_width)
+    if len(edges) < 2:
+        edges = np.array([low_edge, low_edge + bin_width])
+
+    data["bin"] = pd.cut(data["terminal_ratio"], bins=edges, include_lowest=True, right=False)
+    grouped = data.groupby("bin", observed=True)
+    total_count = len(data)
+    table = grouped.agg(
+        bin_low=("terminal_ratio", "min"),
+        bin_high=("terminal_ratio", "max"),
+        average_ratio=("terminal_ratio", "mean"),
+        win_probability=("won", "mean"),
+        average_rank=("rank", "mean"),
+        scenario_count=("won", "size"),
+    ).reset_index(drop=True)
+    table["scenario_probability"] = table["scenario_count"] / total_count
+    table["win_contribution"] = table["scenario_probability"] * table["win_probability"]
+    table["bin_label"] = table.apply(lambda row: f"{row['bin_low']:.0%} to {row['bin_high']:.0%}", axis=1)
+    return table
+
+
 def conditional_probability_figure(curve: pd.DataFrame, boundaries: pd.DataFrame, confidence_levels: list[float], selected_ticker: str) -> go.Figure:
     fig = px.line(
         curve,
@@ -151,6 +206,42 @@ def conditional_probability_figure(curve: pd.DataFrame, boundaries: pd.DataFrame
     return fig
 
 
+def probability_weighted_figure(distribution: pd.DataFrame, selected_ticker: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_bar(
+        x=distribution["bin_label"],
+        y=distribution["scenario_probability"],
+        name="Scenario probability",
+        marker_color="#7aa6ff",
+        yaxis="y",
+    )
+    fig.add_scatter(
+        x=distribution["bin_label"],
+        y=distribution["win_probability"],
+        name="Conditional win probability",
+        mode="lines+markers",
+        yaxis="y2",
+        line=dict(color="#1f3a8a", width=3),
+    )
+    fig.add_bar(
+        x=distribution["bin_label"],
+        y=distribution["win_contribution"],
+        name="Contribution to P(#1)",
+        marker_color="#22c55e",
+        opacity=0.55,
+        yaxis="y",
+    )
+    fig.update_layout(
+        title=f"{selected_ticker}: probability-weighted terminal market-cap bins",
+        xaxis_title="Selected terminal market cap / current market cap",
+        yaxis=dict(title="Scenario probability / contribution", tickformat=".0%"),
+        yaxis2=dict(title="Conditional win probability", tickformat=".0%", overlaying="y", side="right", range=[0, 1]),
+        barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    return fig
+
+
 def rank_figure(curve: pd.DataFrame, selected_ticker: str) -> go.Figure:
     fig = px.line(
         curve,
@@ -174,6 +265,7 @@ with st.sidebar:
     simulations = st.number_input("Monte Carlo simulations", min_value=2_000, max_value=1_000_000, value=100_000, step=10_000)
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
     n_bins = st.slider("Market-cap quantile bins", min_value=10, max_value=100, value=30, step=5)
+    distribution_bin_width = st.selectbox("Distribution bin width", [0.05, 0.10, 0.20], index=1, format_func=lambda value: f"{value:.0%} points")
 
     st.header("Correlation")
     correlation_method = st.selectbox("Correlation method", CORRELATION_METHODS, index=0)
@@ -292,12 +384,25 @@ with conditional_tab:
             current_market_cap=current_cap,
             ticker=selected_ticker,
         )
+        distribution = calculate_probability_weighted_bins(
+            result.terminal_market_caps,
+            result.ranks,
+            selected_ticker,
+            current_cap,
+            float(distribution_bin_width),
+        )
 
         st.subheader("Boundary table")
         st.dataframe(display_boundary_table(boundaries), use_container_width=True, hide_index=True)
 
         st.subheader("Conditional probability chart")
         st.plotly_chart(conditional_probability_figure(curve, boundaries, [float(value) for value in selected_confidence_levels], selected_ticker), use_container_width=True)
+
+        st.subheader("Probability-weighted scenario distribution")
+        st.write("Bars show how likely each terminal market-cap zone is. The line shows conditional win probability in that zone. Green bars show how much each zone contributes to total P(#1).")
+        st.plotly_chart(probability_weighted_figure(distribution, selected_ticker), use_container_width=True)
+        with st.expander("Probability-weighted bin table"):
+            st.dataframe(display_distribution_table(distribution), use_container_width=True, hide_index=True)
 
         st.subheader("Rank chart")
         st.plotly_chart(rank_figure(curve, selected_ticker), use_container_width=True)
@@ -364,6 +469,7 @@ with roadmap_tab:
         """
 - Conditional win/loss boundaries from simulated terminal market-cap bins: implemented.
 - Conditional probability chart with confidence levels and boundary markers: implemented.
+- Probability-weighted terminal market-cap bins: implemented.
 - Rank chart by selected terminal market-cap bin: implemented.
 - Scenario/bin table: implemented.
 - All-ticker boundary summary: implemented.
