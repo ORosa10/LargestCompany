@@ -20,7 +20,7 @@ The default model is intentionally simple and auditable:
 - Drift: zero expected excess return, with only the lognormal convexity adjustment
 - Dividends: ignored for now
 
-The app also contains diagnostic pages for correlation sensitivity, IV sensitivity, return-distribution shape, and a Phase 2 workspace. Those are analysis views. The baseline probability output should be read through the default model above unless a different assumption set is explicitly selected.
+The app also contains diagnostic pages for correlation sensitivity, IV sensitivity, return-distribution shape, and phase workspaces. Those are analysis views. The baseline probability output should be read through the default model above unless a different assumption set is explicitly selected.
 
 ## What This Tool Does
 
@@ -41,6 +41,7 @@ The core outputs are:
 - model probability versus Polymarket YES price
 - terminal market-cap distribution percentiles
 - conditional win/loss boundary zones for a selected ticker
+- candidate option building blocks derived from those boundaries
 
 ## What This Tool Does Not Do
 
@@ -48,8 +49,8 @@ The current app does not include:
 
 - stock-price forecasting
 - alpha generation against option markets
-- hedging logic
-- option payoff heatmaps
+- hedge ratio optimization
+- combined option portfolio payoff surfaces
 - portfolio optimization
 - full volatility skew or smile calibration
 - automated Polymarket odds ingestion
@@ -92,12 +93,7 @@ For each selected ticker, the app builds a conditional curve:
 P(selected ticker wins | selected ticker terminal market cap is around level X)
 ```
 
-The default confidence levels are:
-
-- 80%
-- 90%
-- 95%
-- 99%
+The default confidence levels are 80%, 90%, 95%, and 99%.
 
 For each confidence level, Phase 2 estimates:
 
@@ -105,17 +101,34 @@ For each confidence level, Phase 2 estimates:
 - upper win boundary: lowest selected-ticker market-cap bin where P(win) is at least the confidence level
 - each boundary as a percentage of the selected ticker's current market cap
 
-The Phase 2 page shows:
-
-- boundary table
-- conditional probability chart
-- average-rank chart
-- scenario/bin table
-- optional all-ticker boundary summary
-
 These boundaries are not deterministic truths. They are conditional probabilities from the Monte Carlo model and depend on IVs, correlations, current market caps, and target date. They are intended to become useful inputs for later option-strike and hedge-structure analysis.
 
-The `Inverse Check` tab is diagnostic only. It asks what current market cap would make the full Monte Carlo P(#1) equal a selected target such as the manual Polymarket price. It is not the main Phase 2 methodology.
+## Phase 3: Option Construction Engine
+
+Phase 3 lives in the `Phase 3` Streamlit page.
+
+Phase 3 does not optimize anything. It only constructs natural vanilla option building blocks from Phase 2 boundaries.
+
+Construction rules:
+
+- selected ticker upper win boundary -> short call
+- selected ticker lower loss boundary -> long put
+- competitor upper win boundary -> long call
+- competitor lower loss boundary -> short put
+
+Market-cap boundaries are converted to stock-price strikes with:
+
+```text
+strike = spot price * boundary market cap / current market cap
+```
+
+The output is:
+
+- suggested option structure
+- explanation table for every instrument
+- standalone payoff chart for each option leg
+
+Phase 3 does not combine legs, choose hedge ratios, estimate optimal quantities, or build a full payoff surface. Those belong to Phase 4 and Phase 5.
 
 ## Drift And Dividends
 
@@ -173,6 +186,8 @@ The test suite covers:
 - pairwise conditional boundaries hit their target probabilities
 - scenario-based conditional win curves and all-ticker boundary summaries
 - winner probability rises when the selected company's market cap rises
+- option-strike construction from market-cap boundaries
+- standalone option payoff signs
 
 Run tests with:
 
@@ -200,15 +215,18 @@ app.py                          Streamlit app loader
 app_core.py                     Main Streamlit dashboard
 model.py                        Probability engine
 boundaries.py                   Conditional probability boundary calculations
-market_data.py                  Yahoo current market-cap extraction
+option_construction.py          Phase 3 option construction engine
+market_data.py                  Yahoo market-cap and spot-price extraction
 correlations.py                 Historical and volatility-adjusted correlation estimation
 iv_surfaces.py                  Yahoo option-chain near-ATM IV extraction
 pages/Phase_2.py                Phase 2 workspace with internal tabs
+pages/Phase_3.py                Phase 3 option construction workspace
 pages/Correlation_Comparison.py Correlation analysis page
 pages/IV_Analysis.py            IV sensitivity page
 pages/Return_Diagnostics.py     Return-shape diagnostics page
 tests/test_model.py             Probability engine sanity tests
 tests/test_boundaries.py        Conditional boundary tests
+tests/test_option_construction.py Option construction tests
 requirements.txt                Python dependencies
 ```
 
@@ -218,6 +236,10 @@ Phase 1: probability engine.
 
 Phase 2: conditional probability boundaries.
 
-Phase 3: option-based hedge structures.
+Phase 3: option construction engine.
 
-Phase 4: payoff surfaces and portfolio construction.
+Phase 4: payoff surface engine.
+
+Phase 5: optimization engine.
+
+Phase 6: robustness engine.
