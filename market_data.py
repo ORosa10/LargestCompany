@@ -1,4 +1,4 @@
-"""Market data helpers for current market capitalization."""
+"""Market data helpers for current market capitalization and spot prices."""
 
 from __future__ import annotations
 
@@ -46,6 +46,50 @@ def fetch_market_caps(tickers: list[str]) -> pd.DataFrame:
                 "ticker": ticker,
                 "yahoo_ticker": yahoo_ticker,
                 "market_cap": float(market_cap),
+                "source": source or "Yahoo Finance",
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def fetch_spot_prices(tickers: list[str]) -> pd.DataFrame:
+    """Fetch current spot prices from Yahoo Finance."""
+
+    rows = []
+    for ticker in tickers:
+        yahoo_ticker = yahoo_symbol(ticker)
+        yft = yf.Ticker(yahoo_ticker)
+        spot = None
+        source = None
+
+        try:
+            fast_info = yft.fast_info
+            for key in ["last_price", "regular_market_price", "previous_close"]:
+                spot = fast_info.get(key) if hasattr(fast_info, "get") else None
+                if spot:
+                    source = f"Yahoo fast_info.{key}"
+                    break
+        except Exception:
+            spot = None
+
+        if not spot:
+            try:
+                history = yft.history(period="5d", auto_adjust=False)
+                if not history.empty:
+                    spot = float(history["Close"].dropna().iloc[-1])
+                    source = "Yahoo recent close"
+            except Exception:
+                spot = None
+
+        if not spot or spot <= 0:
+            raise ValueError(f"Could not fetch a valid spot price for {ticker} ({yahoo_ticker}).")
+
+        rows.append(
+            {
+                "ticker": ticker,
+                "yahoo_ticker": yahoo_ticker,
+                "spot_price": float(spot),
                 "source": source or "Yahoo Finance",
             }
         )
