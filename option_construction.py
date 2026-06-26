@@ -6,6 +6,8 @@ Phase 2 probability boundaries into natural vanilla option building blocks.
 
 from __future__ import annotations
 
+from math import erf, exp, log, sqrt
+
 import numpy as np
 import pandas as pd
 
@@ -22,6 +24,92 @@ OPTION_COLUMNS = [
     "Spot",
     "Purpose",
 ]
+
+VALUED_OPTION_COLUMNS = OPTION_COLUMNS + [
+    "Model IV",
+    "Risk-free rate",
+    "Time to expiry",
+    "Theoretical premium",
+    "Premium direction",
+]
+
+
+def normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + erf(value / sqrt(2.0)))
+
+
+def black_scholes_price(
+    spot: float,
+    strike: float,
+    time_to_expiry: float,
+    volatility: float,
+    risk_free_rate: float,
+    option_type: str,
+) -> float:
+    """Black-Scholes option value with no dividends.
+
+    This is a simplified Phase 3 theoretical quote. It deliberately uses one IV
+    per ticker rather than a full volatility surface.
+    """
+
+    if spot <= 0 or strike <= 0:
+        raise ValueError("spot and strike must be positive.")
+    if time_to_expiry <= 0:
+        option = option_type.lower()
+        if option == "call":
+            return float(max(spot - strike, 0.0))
+        if option == "put":
+            return float(max(strike - spot, 0.0))
+        raise ValueError("option_type must be Call or Put.")
+    if volatility <= 0:
+        raise ValueError("volatility must be positive.")
+
+    sigma_sqrt_t = volatility * sqrt(time_to_expiry)
+    d1 = (log(spot / strike) + (risk_free_rate + 0.5 * volatility**2) * time_to_expiry) / sigma_sqrt_t
+    d2 = d1 - sigma_sqrt_t
+    option = option_type.lower()
+    if option == "call":
+        return float(spot * normal_cdf(d1) - strike * exp(-risk_free_rate * time_to_expiry) * normal_cdf(d2))
+    if option == "put":
+        return float(strike * exp(-risk_free_rate * time_to_expiry) * normal_cdf(-d2) - spot * normal_cdf(-d1))
+    raise ValueError("option_type must be Call or Put.")
+
+
+def attach_theoretical_premiums(
+    structure: pd.DataFrame,
+    implied_volatilities: pd.Series | dict[str, float],
+    *,
+    time_to_expiry: float,
+    risk_free_rate: float,
+) -> pd.DataFrame:
+    """Attach simplified Black-Scholes premiums to candidate option legs."""
+
+    ivs = pd.Series(implied_volatilities, dtype=float)
+    valued = structure.copy()
+    premiums = []
+    model_ivs = []
+    premium_directions = []
+    for _, leg in valued.iterrows():
+        ticker = str(leg["Ticker"])
+        iv = float(ivs.loc[ticker])
+        premium = black_scholes_price(
+            spot=float(leg["Spot"]),
+            strike=float(leg["Strike"]),
+            time_to_expiry=float(time_to_expiry),
+            volatility=iv,
+            risk_free_rate=float(risk_free_rate),
+            option_type=str(leg["Option type"]),
+        )
+        model_ivs.append(iv)
+        premiums.append(premium)
+        premium_directions.append("Credit" if str(leg["Position"]).lower() == "short" else "Debit")
+
+    valued["Model IV"] = model_ivs
+    valued["Risk-free rate"] = float(risk_free_rate)
+    valued["Time to expiry"] = float(time_to_expiry)
+    valued["Theoretical premium"] = premiums
+    valued["Premium direction"] = premium_directions
+    return valued[VALUED_OPTION_COLUMNS]
 
 
 def boundary_cap_to_strike(boundary_market_cap: float, current_market_cap: float, spot_price: float) -> float:
@@ -182,8 +270,7 @@ def option_payoff(option_type: str, position: str, strike: float, terminal_price
     """Calculate standalone option payoff at expiry for one contract/share.
 
     Premium is included as a cash cost for long options and a cash credit for
-    short options. In Phase 3 the default premium is zero because we are building
-    blocks, not valuing full hedge packages yet.
+    short options.
     """
 
     option = option_type.lower()
@@ -202,15 +289,16 @@ def option_payoff(option_type: str, position: str, strike: float, terminal_price
     raise ValueError("position must be Long or Short.")
 
 
-def payoff_grid_for_leg(leg: pd.Series, *, price_min: float | None = None, price_max: float | None = None, points: int = 200, premium: float = 0.0) -> pd.DataFrame:
+def payoff_grid_for_leg(leg: pd.Series, *, price_min: float | None = None, price_max: float | None = None, points: int = 200, premium: float | None = None) -> pd.DataFrame:
     """Generate standalone payoff curve for a single option leg."""
 
     spot = float(leg["Spot"])
     strike = float(leg["Strike"])
+    leg_premium = float(leg.get("Theoretical premium", 0.0)) if premium is None else float(premium)
     low = price_min if price_min is not None else max(0.01, min(spot, strike) * 0.5)
     high = price_max if price_max is not None else max(spot, strike) * 1.8
     terminal_prices = np.linspace(low, high, points)
-    payoffs = option_payoff(str(leg["Option type"]), str(leg["Position"]), strike, terminal_prices, premium=premium)
+    payoffs = option_payoff(str(leg["Option type"]), str(leg["Position"]), strike, terminal_prices, premium=leg_premium)
     return pd.DataFrame(
         {
             "Instrument": leg["Instrument"],
@@ -218,5 +306,6 @@ def payoff_grid_for_leg(leg: pd.Series, *, price_min: float | None = None, price
             "Payoff": payoffs,
             "Strike": strike,
             "Spot": spot,
+            "Premium": leg_premium,
         }
     )
