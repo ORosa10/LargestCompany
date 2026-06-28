@@ -2,7 +2,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from payoff_surface import calculate_scenario_payoffs, payoff_summary, payoff_surface_bins, polymarket_payoff, winner_from_ranks
+from payoff_surface import (
+    calculate_scenario_payoffs,
+    payoff_summary,
+    payoff_surface_bins,
+    polymarket_payoff,
+    selected_payoff_profile_bins,
+    winner_from_ranks,
+)
 
 
 def test_polymarket_yes_and_no_payoffs_are_net_of_entry_price():
@@ -104,6 +111,32 @@ def test_payoff_summary_reports_expected_payoff_and_loss_probability():
     assert summary["Expected payoff"] == pytest.approx(2.5)
     assert summary["Probability of loss"] == pytest.approx(0.25)
     assert summary["Worst payoff"] == pytest.approx(-5.0)
+
+
+def test_selected_payoff_profile_bins_returns_expected_payoff_bridge():
+    terminal_caps = pd.DataFrame({"AAA": [100.0, 110.0, 120.0, 130.0], "BBB": [90.0, 95.0, 105.0, 115.0]})
+    current_caps = pd.Series({"AAA": 100.0, "BBB": 100.0})
+    scenario = pd.DataFrame(
+        {
+            "Winner": ["AAA", "BBB", "AAA", "AAA"],
+            "Selected terminal stock price": [50.0, 55.0, 60.0, 65.0],
+            "Polymarket payoff": [1.0, -1.0, 1.0, 1.0],
+            "Option payoff": [0.0, 1.0, 2.0, 3.0],
+            "Total payoff": [1.0, 0.0, 3.0, 4.0],
+        }
+    )
+
+    profile = selected_payoff_profile_bins(
+        scenario,
+        terminal_caps,
+        current_caps,
+        selected_ticker="AAA",
+        bins=2,
+    )
+
+    assert not profile.empty
+    assert profile["scenario_probability"].sum() == pytest.approx(1.0)
+    assert profile["weighted_payoff_contribution"].sum() == pytest.approx(scenario["Total payoff"].mean())
 
 
 def test_payoff_surface_bins_returns_weighted_contributions():
