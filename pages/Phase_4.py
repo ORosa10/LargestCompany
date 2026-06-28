@@ -119,7 +119,14 @@ def display_profile(table: pd.DataFrame) -> pd.DataFrame:
         display[column] = display[column].map(pct)
     for column in ["selected_market_cap"]:
         display[column] = display[column].map(dollars_trillions)
-    for column in ["selected_stock_price", "expected_polymarket_payoff", "expected_option_payoff", "expected_payoff", "weighted_payoff_contribution"]:
+    for column in [
+        "selected_stock_price",
+        "expected_polymarket_payoff",
+        "expected_option_payoff",
+        "expected_payoff",
+        "payoff_standard_deviation",
+        "weighted_payoff_contribution",
+    ]:
         display[column] = display[column].map(dollars)
     return display.rename(
         columns={
@@ -133,6 +140,7 @@ def display_profile(table: pd.DataFrame) -> pd.DataFrame:
             "expected_polymarket_payoff": "Avg Polymarket payoff",
             "expected_option_payoff": "Avg option payoff",
             "expected_payoff": "Avg total payoff",
+            "payoff_standard_deviation": "Payoff SD inside bin",
             "scenario_probability": "Scenario probability",
             "weighted_payoff_contribution": "Contribution to expected payoff",
             "scenario_count": "Scenario count",
@@ -384,12 +392,13 @@ with summary_tab:
             st.session_state.phase4_profile = profile
 
             summary = payoff_summary(scenario)
-            cols = st.columns(5)
+            cols = st.columns(6)
             cols[0].metric("Expected payoff", dollars(float(summary["Expected payoff"])))
-            cols[1].metric("Median payoff", dollars(float(summary["Median payoff"])))
-            cols[2].metric("P(loss)", pct(float(summary["Probability of loss"])))
-            cols[3].metric("Expected shortfall 5%", dollars(float(summary["Expected shortfall 5%"])))
-            cols[4].metric("Worst payoff", dollars(float(summary["Worst payoff"])))
+            cols[1].metric("Payoff SD", dollars(float(summary["Payoff standard deviation"])))
+            cols[2].metric("Median payoff", dollars(float(summary["Median payoff"])))
+            cols[3].metric("P(loss)", pct(float(summary["Probability of loss"])))
+            cols[4].metric("Expected shortfall 5%", dollars(float(summary["Expected shortfall 5%"])))
+            cols[5].metric("Worst payoff", dollars(float(summary["Worst payoff"])))
 
             st.subheader("Payoff components")
             component_summary = scenario[["Polymarket payoff", "Option payoff", "Total payoff"]].mean().to_frame("Expected payoff").reset_index().rename(columns={"index": "Component"})
@@ -439,7 +448,7 @@ Workflow:
 - Convert terminal market caps into terminal stock prices and calculate option payoff in each scenario.
 - Add Polymarket payoff and option payoff into total scenario payoff.
 - Bin scenarios by the selected ticker's terminal market-cap ratio.
-- Calculate scenario probability, conditional win probability, average payoff, and weighted contribution in each bin.
+- Calculate scenario probability, conditional win probability, average payoff, payoff dispersion, and weighted contribution in each bin.
 
 Polymarket payoff:
 
@@ -453,6 +462,22 @@ Expected payoff bridge:
 ```text
 Global expected payoff = sum(bin scenario probability * average payoff in bin)
 ```
+
+Payoff standard deviation:
+
+```text
+Payoff SD = sqrt(sum(probability_scenario * (payoff_scenario - expected payoff)^2))
+```
+
+Because Monte Carlo scenarios are equally weighted, this is the standard deviation of total payoff across simulated scenarios. It measures payoff dispersion, not prediction accuracy.
+
+How to read the profile:
+
+- Scenario probability tells how often the selected ticker ends inside that terminal market-cap zone.
+- Conditional P(#1) tells how often it wins given that it ended in that zone.
+- Avg total payoff tells what the strategy earns on average inside that zone.
+- Contribution to expected payoff equals scenario probability times average payoff in that zone.
+- Summing all bin contributions gives the global expected payoff.
 
 Boundary confidence affects Phase 4 through option construction. Different boundary confidence levels create different option strikes and premiums. If all option quantities are zero, the expected payoff is only the Polymarket payoff and the boundary confidence level has no effect on payoff.
 
