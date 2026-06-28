@@ -146,7 +146,11 @@ def calculate_scenario_payoffs(
 
 
 def payoff_summary(scenario_payoffs: pd.DataFrame, *, shortfall_probability: float = 0.05) -> pd.Series:
-    """Summary metrics for a scenario payoff distribution."""
+    """Summary metrics for a scenario payoff distribution.
+
+    Monte Carlo scenarios are equally weighted, so the standard deviation is the
+    probability-weighted dispersion of total payoff across simulated outcomes.
+    """
 
     payoff = scenario_payoffs["Total payoff"].astype(float)
     threshold = payoff.quantile(shortfall_probability)
@@ -154,6 +158,7 @@ def payoff_summary(scenario_payoffs: pd.DataFrame, *, shortfall_probability: flo
     return pd.Series(
         {
             "Expected payoff": payoff.mean(),
+            "Payoff standard deviation": payoff.std(ddof=0),
             "Median payoff": payoff.median(),
             "P5 payoff": payoff.quantile(0.05),
             "P1 payoff": payoff.quantile(0.01),
@@ -209,6 +214,7 @@ def selected_payoff_profile_bins(
         expected_polymarket_payoff=("polymarket_payoff", "mean"),
         expected_option_payoff=("option_payoff", "mean"),
         expected_payoff=("total_payoff", "mean"),
+        payoff_standard_deviation=("total_payoff", lambda values: values.std(ddof=0)),
         scenario_count=("total_payoff", "size"),
     ).reset_index(drop=True)
     profile["scenario_probability"] = profile["scenario_count"] / len(data)
