@@ -42,7 +42,7 @@ The core outputs are:
 - terminal market-cap distribution percentiles
 - conditional win/loss boundary zones for a selected ticker
 - candidate option building blocks derived from those boundaries
-- scenario-level payoff and payoff surface diagnostics
+- scenario-level payoff and payoff profile diagnostics
 
 ## What This Tool Does Not Do
 
@@ -130,11 +130,11 @@ The output is:
 
 Phase 3 does not combine legs into a portfolio, choose hedge ratios, or estimate optimal quantities. Those belong to Phase 4 and Phase 5.
 
-## Phase 4: Payoff Surface Engine
+## Phase 4: Payoff Profile Engine
 
 Phase 4 lives in the `Phase 4` Streamlit page.
 
-Phase 4 combines Polymarket event payoff and manually sized Phase 3 option legs across the same Monte Carlo scenarios.
+Phase 4 combines Polymarket event payoff and Phase 3 option legs across the same Monte Carlo scenarios. It is still not an optimizer: option quantities are editable construction-preview inputs, and Phase 5 will search quantities and strikes systematically.
 
 It calculates:
 
@@ -146,10 +146,17 @@ It calculates:
 - probability of loss
 - worst payoff
 - expected shortfall for the worst 5% of scenarios
-- probability-weighted payoff surface bins
-- a two-dimensional payoff heatmap for selected ticker versus competitor terminal market-cap ratios
+- selected-ticker payoff profile bins
+- one-dimensional payoff heatmap by selected ticker terminal market-cap ratio
+- probability-weighted payoff contribution by selected ticker terminal market-cap bin
 
-Phase 4 still does not optimize quantities. Option quantities are manually editable so the user can inspect payoff surfaces before Phase 5 optimization.
+The payoff bridge is:
+
+```text
+Global expected payoff = sum(bin scenario probability * average payoff in bin)
+```
+
+Boundary confidence affects Phase 4 through option construction: different confidence levels create different strikes and theoretical premiums. If every option quantity is zero, the expected payoff becomes only the Polymarket payoff and boundary confidence has no payoff effect.
 
 ## Drift And Dividends
 
@@ -212,7 +219,7 @@ The test suite covers:
 - Phase 3 construction modes
 - theoretical option premiums
 - Phase 4 Polymarket payoff and scenario payoff aggregation
-- payoff surface binning and expected-payoff contributions
+- selected-ticker payoff profile binning and expected-payoff contributions
 
 Run tests with:
 
@@ -241,20 +248,20 @@ app_core.py                     Main Streamlit dashboard
 model.py                        Probability engine
 boundaries.py                   Conditional probability boundary calculations
 option_construction.py          Phase 3 option construction engine
-payoff_surface.py               Phase 4 payoff surface engine
+payoff_surface.py               Phase 4 payoff surface/profile engine
 market_data.py                  Yahoo market-cap and spot-price extraction
 correlations.py                 Historical and volatility-adjusted correlation estimation
 iv_surfaces.py                  Yahoo option-chain near-ATM IV extraction
 pages/Phase_2.py                Phase 2 workspace with internal tabs
 pages/Phase_3.py                Phase 3 option construction workspace
-pages/Phase_4.py                Phase 4 payoff surface workspace
+pages/Phase_4.py                Phase 4 payoff profile workspace
 pages/Correlation_Comparison.py Correlation analysis page
 pages/IV_Analysis.py            IV sensitivity page
 pages/Return_Diagnostics.py     Return-shape diagnostics page
 tests/test_model.py             Probability engine sanity tests
 tests/test_boundaries.py        Conditional boundary tests
 tests/test_option_construction.py Option construction tests
-tests/test_payoff_surface.py    Payoff surface tests
+tests/test_payoff_surface.py    Payoff surface/profile tests
 requirements.txt                Python dependencies
 ```
 
@@ -266,7 +273,7 @@ Phase 2: conditional probability boundaries.
 
 Phase 3: option construction engine.
 
-Phase 4: payoff surface engine.
+Phase 4: payoff profile engine.
 
 Phase 5: optimization engine.
 
