@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -57,6 +58,42 @@ def test_calculate_scenario_payoffs_combines_polymarket_and_options():
     assert scenario["Polymarket payoff"].tolist() == pytest.approx([6.0, -4.0])
     assert scenario["Option payoff"].tolist() == pytest.approx([-1.0, 4.0])
     assert scenario["Total payoff"].tolist() == pytest.approx([5.0, 0.0])
+
+
+def test_calculate_scenario_payoffs_rejects_quantity_on_missing_boundary_strike():
+    terminal_caps = pd.DataFrame({"AAA": [120.0, 80.0], "BBB": [90.0, 130.0]})
+    ranks = pd.DataFrame({"AAA": [1, 2], "BBB": [2, 1]})
+    current_caps = pd.Series({"AAA": 100.0, "BBB": 100.0})
+    spots = pd.Series({"AAA": 50.0, "BBB": 40.0})
+    option_legs = pd.DataFrame(
+        [
+            {
+                "Instrument": "Long AAA Put",
+                "Ticker": "AAA",
+                "Option type": "Put",
+                "Position": "Long",
+                "Strike": np.nan,
+                "Spot": 50.0,
+                "Theoretical premium": 1.0,
+                "Quantity": 1.0,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="no valid strike"):
+        calculate_scenario_payoffs(
+            terminal_caps,
+            ranks,
+            current_caps,
+            spots,
+            option_legs,
+            selected_ticker="AAA",
+            polymarket_side="YES",
+            polymarket_entry_price=0.4,
+            polymarket_quantity=10.0,
+            contract_multiplier=1.0,
+            include_option_premiums=True,
+        )
 
 
 def test_payoff_summary_reports_expected_payoff_and_loss_probability():
