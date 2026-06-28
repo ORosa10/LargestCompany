@@ -103,12 +103,13 @@ def test_calculate_scenario_payoffs_rejects_quantity_on_missing_boundary_strike(
         )
 
 
-def test_payoff_summary_reports_expected_payoff_and_loss_probability():
+def test_payoff_summary_reports_expected_payoff_loss_probability_and_dispersion():
     scenario = pd.DataFrame({"Total payoff": [10.0, -5.0, 0.0, 5.0]})
 
     summary = payoff_summary(scenario)
 
     assert summary["Expected payoff"] == pytest.approx(2.5)
+    assert summary["Payoff standard deviation"] == pytest.approx(np.std([10.0, -5.0, 0.0, 5.0]))
     assert summary["Probability of loss"] == pytest.approx(0.25)
     assert summary["Worst payoff"] == pytest.approx(-5.0)
 
@@ -137,6 +138,7 @@ def test_selected_payoff_profile_bins_returns_expected_payoff_bridge():
     assert not profile.empty
     assert profile["scenario_probability"].sum() == pytest.approx(1.0)
     assert profile["weighted_payoff_contribution"].sum() == pytest.approx(scenario["Total payoff"].mean())
+    assert "payoff_standard_deviation" in profile.columns
 
 
 def test_payoff_surface_bins_returns_weighted_contributions():
