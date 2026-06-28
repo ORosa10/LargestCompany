@@ -42,6 +42,7 @@ The core outputs are:
 - terminal market-cap distribution percentiles
 - conditional win/loss boundary zones for a selected ticker
 - candidate option building blocks derived from those boundaries
+- scenario-level payoff and payoff surface diagnostics
 
 ## What This Tool Does Not Do
 
@@ -50,7 +51,6 @@ The current app does not include:
 - stock-price forecasting
 - alpha generation against option markets
 - hedge ratio optimization
-- combined option portfolio payoff surfaces
 - portfolio optimization
 - full volatility skew or smile calibration
 - automated Polymarket odds ingestion
@@ -109,12 +109,11 @@ Phase 3 lives in the `Phase 3` Streamlit page.
 
 Phase 3 does not optimize anything. It only constructs natural vanilla option building blocks from Phase 2 boundaries.
 
-Construction rules:
+Construction modes:
 
-- selected ticker upper win boundary -> short call
-- selected ticker lower loss boundary -> long put
-- competitor upper win boundary -> long call
-- competitor lower loss boundary -> short put
+- selected-only hedge: short call and long put on the ticker behind the YES bet
+- selected + single competitor diagnostic: adds candidate competitor call/put legs for one chosen rival
+- selected + full universe competitors: adds competitor protection candidates for every non-selected ticker
 
 Market-cap boundaries are converted to stock-price strikes with:
 
@@ -126,9 +125,31 @@ The output is:
 
 - suggested option structure
 - explanation table for every instrument
+- theoretical Black-Scholes premium diagnostics
 - standalone payoff chart for each option leg
 
-Phase 3 does not combine legs, choose hedge ratios, estimate optimal quantities, or build a full payoff surface. Those belong to Phase 4 and Phase 5.
+Phase 3 does not combine legs into a portfolio, choose hedge ratios, or estimate optimal quantities. Those belong to Phase 4 and Phase 5.
+
+## Phase 4: Payoff Surface Engine
+
+Phase 4 lives in the `Phase 4` Streamlit page.
+
+Phase 4 combines Polymarket event payoff and manually sized Phase 3 option legs across the same Monte Carlo scenarios.
+
+It calculates:
+
+- scenario-level Polymarket payoff
+- scenario-level option payoff
+- total payoff per scenario
+- expected payoff
+- median payoff
+- probability of loss
+- worst payoff
+- expected shortfall for the worst 5% of scenarios
+- probability-weighted payoff surface bins
+- a two-dimensional payoff heatmap for selected ticker versus competitor terminal market-cap ratios
+
+Phase 4 still does not optimize quantities. Option quantities are manually editable so the user can inspect payoff surfaces before Phase 5 optimization.
 
 ## Drift And Dividends
 
@@ -188,6 +209,10 @@ The test suite covers:
 - winner probability rises when the selected company's market cap rises
 - option-strike construction from market-cap boundaries
 - standalone option payoff signs
+- Phase 3 construction modes
+- theoretical option premiums
+- Phase 4 Polymarket payoff and scenario payoff aggregation
+- payoff surface binning and expected-payoff contributions
 
 Run tests with:
 
@@ -216,17 +241,20 @@ app_core.py                     Main Streamlit dashboard
 model.py                        Probability engine
 boundaries.py                   Conditional probability boundary calculations
 option_construction.py          Phase 3 option construction engine
+payoff_surface.py               Phase 4 payoff surface engine
 market_data.py                  Yahoo market-cap and spot-price extraction
 correlations.py                 Historical and volatility-adjusted correlation estimation
 iv_surfaces.py                  Yahoo option-chain near-ATM IV extraction
 pages/Phase_2.py                Phase 2 workspace with internal tabs
 pages/Phase_3.py                Phase 3 option construction workspace
+pages/Phase_4.py                Phase 4 payoff surface workspace
 pages/Correlation_Comparison.py Correlation analysis page
 pages/IV_Analysis.py            IV sensitivity page
 pages/Return_Diagnostics.py     Return-shape diagnostics page
 tests/test_model.py             Probability engine sanity tests
 tests/test_boundaries.py        Conditional boundary tests
 tests/test_option_construction.py Option construction tests
+tests/test_payoff_surface.py    Payoff surface tests
 requirements.txt                Python dependencies
 ```
 
