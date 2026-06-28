@@ -219,7 +219,9 @@ with st.sidebar:
     include_competitor_short_puts = st.checkbox("Include competitor short puts", value=construction_mode == "single_competitor")
     risk_free_rate = st.number_input("Risk-free rate", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
     contract_multiplier = st.number_input("Option contract multiplier", min_value=1.0, value=100.0, step=1.0)
+    default_option_quantity = st.number_input("Default contracts per valid option leg", min_value=0.0, value=1.0, step=1.0)
     include_option_premiums = st.checkbox("Include theoretical option premiums", value=True)
+    st.caption("The default contract quantity makes Phase 4 a hedge-construction preview. You can still set any leg quantity to zero in the editable table.")
 
     st.header("Correlation")
     correlation_method = st.selectbox("Correlation method", CORRELATION_METHODS, index=0)
@@ -267,7 +269,7 @@ with summary_tab:
     default_entry = float(company_inputs.loc[company_inputs["Ticker"] == selected_ticker, "Polymarket YES price"].iloc[0])
     polymarket_entry_price = st.number_input("Polymarket entry price", min_value=0.0, max_value=1.0, value=default_entry, step=0.01, format="%.2f")
 
-    st.caption("Boundary confidence affects expected payoff only through constructed option strikes and premiums. If option quantities are zero, expected payoff is just the Polymarket payoff.")
+    st.caption("Boundary confidence affects expected payoff through the option strikes and premiums. If every option quantity is zero, expected payoff is just the Polymarket payoff and boundary confidence has no effect.")
 
     if run_button:
         with st.spinner("Running scenarios, constructing option candidates, and calculating payoff profile..."):
@@ -319,6 +321,8 @@ with summary_tab:
                     risk_free_rate=float(risk_free_rate),
                 )
                 valued_structure["Quantity"] = 0.0
+                valid_strikes = valued_structure["Strike"].notna()
+                valued_structure.loc[valid_strikes, "Quantity"] = float(default_option_quantity)
                 st.session_state.phase4_inputs_used = simulation_inputs
                 st.session_state.phase4_result = result
                 st.session_state.phase4_spots = spots
@@ -341,6 +345,7 @@ with summary_tab:
         st.info("Build the payoff profile to generate scenario-level payoff outputs.")
     else:
         st.subheader("Candidate option legs and quantities")
+        st.caption("These quantities are construction-preview inputs, not optimized hedge ratios. Phase 5 will search quantities and strikes systematically.")
         editable_legs = option_legs.copy()
         edited_legs = st.data_editor(
             editable_legs,
@@ -428,7 +433,8 @@ Workflow:
 - Run the same Monte Carlo scenario engine as Phase 1.
 - Recalculate Phase 2 boundaries for the selected confidence level.
 - Construct Phase 3 candidate option legs.
-- Let the user enter option quantities manually.
+- Assign a default manual quantity to valid option legs so the payoff preview is active.
+- Let the user edit option quantities manually.
 - Calculate Polymarket payoff in each scenario.
 - Convert terminal market caps into terminal stock prices and calculate option payoff in each scenario.
 - Add Polymarket payoff and option payoff into total scenario payoff.
