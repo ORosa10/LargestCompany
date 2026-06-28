@@ -33,6 +33,12 @@ VALUED_OPTION_COLUMNS = OPTION_COLUMNS + [
     "Premium direction",
 ]
 
+CONSTRUCTION_MODES = [
+    "selected_only",
+    "single_competitor",
+    "full_universe",
+]
+
 
 def normal_cdf(value: float) -> float:
     return 0.5 * (1.0 + erf(value / sqrt(2.0)))
@@ -182,6 +188,7 @@ def construct_competitor_legs(
     current_market_cap: float,
     spot_price: float,
     confidence_level: float,
+    include_short_put: bool = True,
 ) -> list[dict]:
     """Construct natural option legs for a competing ticker."""
 
@@ -191,7 +198,7 @@ def construct_competitor_legs(
     upper_strike = boundary_cap_to_strike(upper_cap, current_market_cap, spot_price)
     lower_strike = boundary_cap_to_strike(lower_cap, current_market_cap, spot_price)
 
-    return [
+    legs = [
         {
             "Instrument": f"Long {competitor_ticker} Call",
             "Ticker": competitor_ticker,
@@ -202,21 +209,25 @@ def construct_competitor_legs(
             "Boundary market cap": upper_cap,
             "Boundary / current cap": upper_cap / current_market_cap,
             "Spot": spot_price,
-            "Purpose": "Protect against a runaway competitor winning the ranking event.",
-        },
-        {
-            "Instrument": f"Short {competitor_ticker} Put",
-            "Ticker": competitor_ticker,
-            "Option type": "Put",
-            "Position": "Short",
-            "Strike": lower_strike,
-            "Boundary used": f"{confidence_level:.0%} competitor loss boundary",
-            "Boundary market cap": lower_cap,
-            "Boundary / current cap": lower_cap / current_market_cap,
-            "Spot": spot_price,
-            "Purpose": "Collect premium in competitor downside zones where the selected ticker is less threatened.",
-        },
+            "Purpose": "Protect against this competitor winning the ranking event.",
+        }
     ]
+    if include_short_put:
+        legs.append(
+            {
+                "Instrument": f"Short {competitor_ticker} Put",
+                "Ticker": competitor_ticker,
+                "Option type": "Put",
+                "Position": "Short",
+                "Strike": lower_strike,
+                "Boundary used": f"{confidence_level:.0%} competitor loss boundary",
+                "Boundary market cap": lower_cap,
+                "Boundary / current cap": lower_cap / current_market_cap,
+                "Spot": spot_price,
+                "Purpose": "Optional income leg in competitor downside zones where this competitor is less threatening.",
+            }
+        )
+    return legs
 
 
 def strongest_competitor(results: pd.DataFrame, selected_ticker: str) -> str:
@@ -228,6 +239,15 @@ def strongest_competitor(results: pd.DataFrame, selected_ticker: str) -> str:
     return str(competitors.sort_values("Model probability", ascending=False).iloc[0]["Ticker"])
 
 
+def ordered_competitors(results: pd.DataFrame, selected_ticker: str) -> list[str]:
+    """Return competitors sorted by unconditional win probability."""
+
+    competitors = results[results["Ticker"] != selected_ticker].copy()
+    if competitors.empty:
+        return []
+    return competitors.sort_values("Model probability", ascending=False)["Ticker"].astype(str).tolist()
+
+
 def construct_candidate_option_structure(
     boundaries: pd.DataFrame,
     results: pd.DataFrame,
@@ -237,12 +257,22 @@ def construct_candidate_option_structure(
     selected_ticker: str,
     competitor_ticker: str | None,
     confidence_level: float,
+    construction_mode: str = "single_competitor",
+    include_competitor_short_puts: bool = True,
 ) -> pd.DataFrame:
-    """Create the Phase 3 candidate option building blocks."""
+    """Create the Phase 3 candidate option building blocks.
+
+    Modes:
+    - selected_only: hedge only the ticker underlying the Polymarket YES bet.
+    - single_competitor: add diagnostic legs for one chosen competitor.
+    - full_universe: add competitor protection legs for every other ticker.
+    """
+
+    if construction_mode not in CONSTRUCTION_MODES:
+        raise ValueError(f"construction_mode must be one of {CONSTRUCTION_MODES}.")
 
     current_caps = pd.Series(current_market_caps, dtype=float)
     spots = pd.Series(spot_prices, dtype=float)
-    competitor = competitor_ticker or strongest_competitor(results, selected_ticker)
 
     legs = []
     legs.extend(
@@ -254,15 +284,26 @@ def construct_candidate_option_structure(
             confidence_level=confidence_level,
         )
     )
-    legs.extend(
-        construct_competitor_legs(
-            boundaries,
-            competitor_ticker=competitor,
-            current_market_cap=float(current_caps.loc[competitor]),
-            spot_price=float(spots.loc[competitor]),
-            confidence_level=confidence_level,
+
+    if construction_mode == "selected_only":
+        return pd.DataFrame(legs)[OPTION_COLUMNS]
+
+    if construction_mode == "single_competitor":
+        competitors = [competitor_ticker or strongest_competitor(results, selected_ticker)]
+    else:
+        competitors = ordered_competitors(results, selected_ticker)
+
+    for competitor in competitors:
+        legs.extend(
+            construct_competitor_legs(
+                boundaries,
+                competitor_ticker=competitor,
+                current_market_cap=float(current_caps.loc[competitor]),
+                spot_price=float(spots.loc[competitor]),
+                confidence_level=confidence_level,
+                include_short_put=include_competitor_short_puts,
+            )
         )
-    )
     return pd.DataFrame(legs)[OPTION_COLUMNS]
 
 
