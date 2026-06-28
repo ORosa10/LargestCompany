@@ -146,7 +146,7 @@ def display_profile(table: pd.DataFrame) -> pd.DataFrame:
         "weighted_payoff_contribution",
     ]:
         display[column] = display[column].map(dollars)
-    return display.rename(
+    renamed = display.rename(
         columns={
             "bin_label": "Selected terminal cap bin",
             "selected_ratio_low": "Bin low / current",
@@ -164,6 +164,23 @@ def display_profile(table: pd.DataFrame) -> pd.DataFrame:
             "scenario_count": "Scenario count",
         }
     )
+    preferred_order = [
+        "Selected terminal cap bin",
+        "Scenario probability",
+        "Conditional P(#1)",
+        "Avg total payoff",
+        "Contribution to expected payoff",
+        "Avg option payoff",
+        "Avg Polymarket payoff",
+        "Payoff SD inside bin",
+        "Scenario count",
+        "Avg cap / current",
+        "Avg terminal market cap",
+        "Avg terminal stock price",
+        "Bin low / current",
+        "Bin high / current",
+    ]
+    return renamed[[column for column in preferred_order if column in renamed.columns]]
 
 
 def display_risk_summary(summary: pd.Series) -> pd.DataFrame:
@@ -237,6 +254,128 @@ def payoff_by_bin_figure(profile: pd.DataFrame, selected_ticker: str) -> go.Figu
     return fig
 
 
+def single_option_payoff(option_type: str, position: str, terminal_price: float, strike: float, premium: float) -> float:
+    if option_type == "Call":
+        intrinsic = max(float(terminal_price) - float(strike), 0.0)
+    else:
+        intrinsic = max(float(strike) - float(terminal_price), 0.0)
+    if position == "Long":
+        return intrinsic - float(premium)
+    return float(premium) - intrinsic
+
+
+def manual_calculator_defaults(option_legs: pd.DataFrame | None) -> dict[str, float]:
+    defaults = {
+        "spot": 200.0,
+        "call_strike": 260.0,
+        "call_premium": 2.0,
+        "call_quantity": 0.01,
+        "put_strike": 140.0,
+        "put_premium": 3.0,
+        "put_quantity": 0.01,
+        "multiplier": 100.0,
+    }
+    if option_legs is None or option_legs.empty:
+        return defaults
+    legs = option_legs.copy()
+    if "Spot" in legs.columns and legs["Spot"].notna().any():
+        defaults["spot"] = float(legs["Spot"].dropna().iloc[0])
+    call = legs[(legs["Option type"] == "Call") & (legs["Strike"].notna())]
+    put = legs[(legs["Option type"] == "Put") & (legs["Strike"].notna())]
+    if not call.empty:
+        first_call = call.iloc[0]
+        defaults["call_strike"] = float(first_call["Strike"])
+        defaults["call_premium"] = float(first_call.get("Theoretical premium", 0.0))
+        defaults["call_quantity"] = float(first_call.get("Quantity", defaults["call_quantity"]))
+    if not put.empty:
+        first_put = put.iloc[0]
+        defaults["put_strike"] = float(first_put["Strike"])
+        defaults["put_premium"] = float(first_put.get("Theoretical premium", 0.0))
+        defaults["put_quantity"] = float(first_put.get("Quantity", defaults["put_quantity"]))
+    return defaults
+
+
+def manual_option_calculator(option_legs: pd.DataFrame | None) -> None:
+    st.subheader("Manual option payoff intuition calculator")
+    st.write("This is deliberately not Monte Carlo. It is a simple price-grid calculator for understanding premium, strike distance, quantity, multiplier, and tail payoff mechanics.")
+    defaults = manual_calculator_defaults(option_legs)
+
+    input_cols = st.columns(4)
+    spot = input_cols[0].number_input("Current stock price", min_value=0.01, value=defaults["spot"], step=1.0, format="%.2f")
+    multiplier = input_cols[1].number_input("Shares per contract", min_value=1.0, value=defaults["multiplier"], step=1.0)
+    price_min_pct = input_cols[2].number_input("Terminal grid low (% of spot)", min_value=1.0, value=50.0, step=5.0)
+    price_max_pct = input_cols[3].number_input("Terminal grid high (% of spot)", min_value=1.0, value=180.0, step=5.0)
+
+    call_cols = st.columns(4)
+    call_strike = call_cols[0].number_input("Short call strike", min_value=0.01, value=defaults["call_strike"], step=1.0, format="%.2f")
+    call_premium = call_cols[1].number_input("Call premium received", min_value=0.0, value=defaults["call_premium"], step=0.1, format="%.2f")
+    call_quantity = call_cols[2].number_input("Short call quantity", min_value=0.0, value=defaults["call_quantity"], step=0.01, format="%.2f")
+    include_call = call_cols[3].checkbox("Include short call", value=True)
+
+    put_cols = st.columns(4)
+    put_strike = put_cols[0].number_input("Long put strike", min_value=0.01, value=defaults["put_strike"], step=1.0, format="%.2f")
+    put_premium = put_cols[1].number_input("Put premium paid", min_value=0.0, value=defaults["put_premium"], step=0.1, format="%.2f")
+    put_quantity = put_cols[2].number_input("Long put quantity", min_value=0.0, value=defaults["put_quantity"], step=0.01, format="%.2f")
+    include_put = put_cols[3].checkbox("Include long put", value=True)
+
+    low = min(price_min_pct, price_max_pct) / 100.0 * spot
+    high = max(price_min_pct, price_max_pct) / 100.0 * spot
+    terminal_prices = [low + (high - low) * i / 24 for i in range(25)]
+    rows = []
+    for terminal_price in terminal_prices:
+        call_payoff = 0.0
+        put_payoff = 0.0
+        if include_call:
+            call_payoff = single_option_payoff("Call", "Short", terminal_price, call_strike, call_premium) * call_quantity * multiplier
+        if include_put:
+            put_payoff = single_option_payoff("Put", "Long", terminal_price, put_strike, put_premium) * put_quantity * multiplier
+        rows.append(
+            {
+                "Terminal stock price": terminal_price,
+                "Terminal / spot": terminal_price / spot,
+                "Short call payoff": call_payoff,
+                "Long put payoff": put_payoff,
+                "Total option payoff": call_payoff + put_payoff,
+            }
+        )
+    table = pd.DataFrame(rows)
+
+    fig = go.Figure()
+    fig.add_scatter(x=table["Terminal stock price"], y=table["Short call payoff"], mode="lines", name="Short call payoff")
+    fig.add_scatter(x=table["Terminal stock price"], y=table["Long put payoff"], mode="lines", name="Long put payoff")
+    fig.add_scatter(x=table["Terminal stock price"], y=table["Total option payoff"], mode="lines", name="Total option payoff", line=dict(width=4))
+    fig.add_hline(y=0, line_dash="dash", line_color="#6b7280")
+    fig.add_vline(x=spot, line_dash="dot", line_color="#6b7280", annotation_text="spot")
+    fig.add_vline(x=call_strike, line_dash="dash", line_color="#dc2626", annotation_text="call strike")
+    fig.add_vline(x=put_strike, line_dash="dash", line_color="#2563eb", annotation_text="put strike")
+    fig.update_layout(
+        title="Manual option payoff by terminal stock price",
+        xaxis_title="Terminal stock price",
+        yaxis_title="Option payoff",
+        yaxis=dict(tickprefix="$"),
+        height=460,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    display = table.copy()
+    display["Terminal / spot"] = display["Terminal / spot"].map(pct)
+    for column in ["Terminal stock price", "Short call payoff", "Long put payoff", "Total option payoff"]:
+        display[column] = display[column].map(dollars)
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+    st.markdown(
+        """
+What this shows:
+
+- If both options expire out-of-the-money, total option payoff is mainly the net premium.
+- A short call can look harmless at 99% boundary, but it creates large negative payoff once terminal price crosses the strike.
+- A long put creates large positive payoff only once terminal price falls below the strike.
+- Scaling matters: `payoff = per-share option payoff * quantity * multiplier`.
+- Payoff SD can be high even when tail scenarios are rare, because large tail payoffs enter the variance calculation squared.
+        """
+    )
+
+
 with st.sidebar:
     st.header("Phase 4 controls")
     target_date = st.date_input("Target date / maturity", value=date.today() + timedelta(days=365), min_value=date.today() + timedelta(days=1))
@@ -286,7 +425,7 @@ with st.sidebar:
 
     run_button = st.button("Build payoff profile", type="primary", use_container_width=True)
 
-summary_tab, profile_tab, scenarios_tab, methodology_tab = st.tabs(["Payoff Summary", "Payoff Profile", "Scenario Table", "Methodology"])
+summary_tab, profile_tab, calculator_tab, scenarios_tab, methodology_tab = st.tabs(["Payoff Summary", "Payoff Profile", "Manual Calculator", "Scenario Table", "Methodology"])
 
 with summary_tab:
     st.subheader("Inputs")
@@ -475,6 +614,9 @@ with profile_tab:
         st.subheader("Probability-weighted payoff bins")
         st.write("Each row is a selected-ticker terminal price/cap zone. Scenario probability times average payoff gives that bin's contribution to total expected payoff. The contributions sum to the global expected payoff.")
         st.dataframe(display_profile(profile), use_container_width=True, hide_index=True)
+
+with calculator_tab:
+    manual_option_calculator(st.session_state.get("phase4_option_legs"))
 
 with scenarios_tab:
     scenario = st.session_state.get("phase4_scenario_payoffs")
