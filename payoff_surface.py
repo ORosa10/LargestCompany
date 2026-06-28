@@ -76,11 +76,16 @@ def option_leg_scenario_payoff(
 ) -> pd.Series:
     """Calculate scenario payoff for one option leg."""
 
+    strike = float(leg["Strike"])
+    if not np.isfinite(strike):
+        raise ValueError(f"Option leg {leg['Instrument']} has no valid strike. Lower the boundary confidence level or choose another construction mode.")
     premium = float(leg.get("Theoretical premium", 0.0)) if include_premium else 0.0
+    if not np.isfinite(premium):
+        raise ValueError(f"Option leg {leg['Instrument']} has no valid theoretical premium.")
     payoff = option_payoff(
         str(leg["Option type"]),
         str(leg["Position"]),
-        float(leg["Strike"]),
+        strike,
         terminal_prices.to_numpy(dtype=float),
         premium=premium,
     )
