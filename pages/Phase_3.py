@@ -61,6 +61,11 @@ def years(days: int) -> float:
     return max(int(days), 1) / 365.0
 
 
+def theoretical_cashflow(structure: pd.DataFrame) -> float:
+    signs = structure["Premium direction"].map({"Credit": 1.0, "Debit": -1.0}).fillna(0.0)
+    return float((structure["Theoretical premium"].astype(float) * signs).sum())
+
+
 def build_correlation_matrix(
     method: str,
     prices: pd.DataFrame,
@@ -272,6 +277,17 @@ with construction_tab:
             risk_free_rate=float(risk_free_rate),
         )
         st.session_state.phase3_structure = valued_structure
+
+        st.subheader("Construction summary")
+        debit_count = int((valued_structure["Premium direction"] == "Debit").sum())
+        credit_count = int((valued_structure["Premium direction"] == "Credit").sum())
+        net_cashflow = theoretical_cashflow(valued_structure)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Selected ticker", selected_ticker)
+        col2.metric("Mode", construction_mode_label)
+        col3.metric("Option legs", f"{len(valued_structure)}")
+        col4.metric("Net theoretical premium", dollars(net_cashflow), help="Positive means net credit. Negative means net debit. This ignores contract multipliers and hedge ratios.")
+        st.caption(f"Premium mix: {credit_count} credit leg(s), {debit_count} debit leg(s). Values are per share/option model unit before contract multipliers and before any quantity optimization.")
 
         st.subheader("Suggested option structure")
         st.dataframe(display_structure(valued_structure), use_container_width=True, hide_index=True)
