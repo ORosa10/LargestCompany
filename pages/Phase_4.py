@@ -18,11 +18,7 @@ st.set_page_config(page_title="Phase 4", layout="wide")
 st.title("Phase 4")
 st.caption("Payoff Profile Engine. This phase combines Polymarket payoff and candidate option legs across Monte Carlo scenarios. It does not optimize hedge ratios.")
 
-CORRELATION_METHODS = [
-    "EWMA historical correlation",
-    "Vol-adjusted smooth correlation",
-    "Rolling historical correlation",
-]
+CORRELATION_METHODS = ["EWMA historical correlation", "Vol-adjusted smooth correlation", "Rolling historical correlation"]
 CONFIDENCE_LEVELS = [0.80, 0.90, 0.95, 0.99]
 CONSTRUCTION_MODE_LABELS = {
     "Selected-only hedge": "selected_only",
@@ -62,15 +58,7 @@ def years(days: int) -> float:
     return max(int(days), 1) / 365.0
 
 
-def build_correlation_matrix(
-    method: str,
-    prices: pd.DataFrame,
-    simulation_inputs: pd.DataFrame,
-    ewma_lambda: float,
-    rolling_lookback: int,
-    smooth_low_quantile: float,
-    smooth_high_quantile: float,
-) -> pd.DataFrame:
+def build_correlation_matrix(method: str, prices: pd.DataFrame, simulation_inputs: pd.DataFrame, ewma_lambda: float, rolling_lookback: int, smooth_low_quantile: float, smooth_high_quantile: float) -> pd.DataFrame:
     if method == "EWMA historical correlation":
         return ewma_correlation(prices, ewma_lambda)
     if method == "Rolling historical correlation":
@@ -110,7 +98,6 @@ def editable_option_legs_view(table: pd.DataFrame) -> pd.DataFrame:
         display["Boundary market cap"] = display["Boundary market cap"].map(dollars_trillions)
     if "Boundary / current cap" in display.columns:
         display["Boundary / current cap"] = display["Boundary / current cap"].map(pct)
-    if "Boundary / current cap" in display.columns:
         display = display.rename(columns={"Boundary / current cap": "Boundary / current cap (%)"})
     return display
 
@@ -137,14 +124,7 @@ def display_profile(table: pd.DataFrame) -> pd.DataFrame:
         display[column] = display[column].map(pct)
     for column in ["selected_market_cap"]:
         display[column] = display[column].map(dollars_trillions)
-    for column in [
-        "selected_stock_price",
-        "expected_polymarket_payoff",
-        "expected_option_payoff",
-        "expected_payoff",
-        "payoff_standard_deviation",
-        "weighted_payoff_contribution",
-    ]:
+    for column in ["selected_stock_price", "expected_polymarket_payoff", "expected_option_payoff", "expected_payoff", "payoff_standard_deviation", "weighted_payoff_contribution"]:
         display[column] = display[column].map(dollars)
     renamed = display.rename(
         columns={
@@ -165,20 +145,9 @@ def display_profile(table: pd.DataFrame) -> pd.DataFrame:
         }
     )
     preferred_order = [
-        "Selected terminal cap bin",
-        "Scenario probability",
-        "Conditional P(#1)",
-        "Avg total payoff",
-        "Contribution to expected payoff",
-        "Avg option payoff",
-        "Avg Polymarket payoff",
-        "Payoff SD inside bin",
-        "Scenario count",
-        "Avg cap / current",
-        "Avg terminal market cap",
-        "Avg terminal stock price",
-        "Bin low / current",
-        "Bin high / current",
+        "Selected terminal cap bin", "Scenario probability", "Conditional P(#1)", "Avg total payoff", "Contribution to expected payoff",
+        "Avg option payoff", "Avg Polymarket payoff", "Payoff SD inside bin", "Scenario count", "Avg cap / current",
+        "Avg terminal market cap", "Avg terminal stock price", "Bin low / current", "Bin high / current",
     ]
     return renamed[[column for column in preferred_order if column in renamed.columns]]
 
@@ -198,29 +167,9 @@ def display_risk_summary(summary: pd.Series) -> pd.DataFrame:
 
 def payoff_profile_figure(profile: pd.DataFrame, selected_ticker: str) -> go.Figure:
     fig = go.Figure()
-    fig.add_bar(
-        x=profile["bin_label"],
-        y=profile["scenario_probability"],
-        name="Scenario probability",
-        marker_color="#7aa6ff",
-        yaxis="y",
-    )
-    fig.add_bar(
-        x=profile["bin_label"],
-        y=profile["weighted_payoff_contribution"],
-        name="Contribution to expected payoff",
-        marker_color="#22c55e",
-        opacity=0.6,
-        yaxis="y2",
-    )
-    fig.add_scatter(
-        x=profile["bin_label"],
-        y=profile["expected_payoff"],
-        name="Avg payoff in bin",
-        mode="lines+markers",
-        line=dict(color="#1f3a8a", width=3),
-        yaxis="y2",
-    )
+    fig.add_bar(x=profile["bin_label"], y=profile["scenario_probability"], name="Scenario probability", marker_color="#7aa6ff", yaxis="y")
+    fig.add_bar(x=profile["bin_label"], y=profile["weighted_payoff_contribution"], name="Contribution to expected payoff", marker_color="#22c55e", opacity=0.6, yaxis="y2")
+    fig.add_scatter(x=profile["bin_label"], y=profile["expected_payoff"], name="Avg payoff in bin", mode="lines+markers", line=dict(color="#1f3a8a", width=3), yaxis="y2")
     fig.update_layout(
         title=f"{selected_ticker}: payoff profile by terminal market-cap bin",
         xaxis_title=f"{selected_ticker} terminal market cap / current market cap",
@@ -235,46 +184,19 @@ def payoff_profile_figure(profile: pd.DataFrame, selected_ticker: str) -> go.Fig
 def payoff_by_bin_figure(profile: pd.DataFrame, selected_ticker: str) -> go.Figure:
     colors = ["#16a34a" if value >= 0 else "#dc2626" for value in profile["expected_payoff"]]
     fig = go.Figure()
-    fig.add_bar(
-        x=profile["bin_label"],
-        y=profile["expected_payoff"],
-        marker_color=colors,
-        hovertemplate="Terminal cap bin=%{x}<br>Avg payoff=$%{y:,.2f}<extra></extra>",
-        name="Avg payoff",
-    )
+    fig.add_bar(x=profile["bin_label"], y=profile["expected_payoff"], marker_color=colors, hovertemplate="Terminal cap bin=%{x}<br>Avg payoff=$%{y:,.2f}<extra></extra>", name="Avg payoff")
     fig.add_hline(y=0, line_dash="dash", line_color="#6b7280")
-    fig.update_layout(
-        title=f"{selected_ticker}: average payoff by terminal market-cap bin",
-        xaxis_title=f"{selected_ticker} terminal market cap / current market cap",
-        yaxis_title="Average payoff in bin",
-        yaxis=dict(tickprefix="$"),
-        height=420,
-        showlegend=False,
-    )
+    fig.update_layout(title=f"{selected_ticker}: average payoff by terminal market-cap bin", xaxis_title=f"{selected_ticker} terminal market cap / current market cap", yaxis_title="Average payoff in bin", yaxis=dict(tickprefix="$"), height=420, showlegend=False)
     return fig
 
 
 def single_option_payoff(option_type: str, position: str, terminal_price: float, strike: float, premium: float) -> float:
-    if option_type == "Call":
-        intrinsic = max(float(terminal_price) - float(strike), 0.0)
-    else:
-        intrinsic = max(float(strike) - float(terminal_price), 0.0)
-    if position == "Long":
-        return intrinsic - float(premium)
-    return float(premium) - intrinsic
+    intrinsic = max(float(terminal_price) - float(strike), 0.0) if option_type == "Call" else max(float(strike) - float(terminal_price), 0.0)
+    return intrinsic - float(premium) if position == "Long" else float(premium) - intrinsic
 
 
 def manual_calculator_defaults(option_legs: pd.DataFrame | None) -> dict[str, float]:
-    defaults = {
-        "spot": 200.0,
-        "call_strike": 260.0,
-        "call_premium": 2.0,
-        "call_quantity": 0.01,
-        "put_strike": 140.0,
-        "put_premium": 3.0,
-        "put_quantity": 0.01,
-        "multiplier": 100.0,
-    }
+    defaults = {"spot": 200.0, "call_strike": 260.0, "call_premium": 2.0, "call_quantity": 0.01, "put_strike": 140.0, "put_premium": 3.0, "put_quantity": 0.01, "multiplier": 100.0}
     if option_legs is None or option_legs.empty:
         return defaults
     legs = option_legs.copy()
@@ -295,9 +217,31 @@ def manual_calculator_defaults(option_legs: pd.DataFrame | None) -> dict[str, fl
     return defaults
 
 
-def manual_option_calculator(option_legs: pd.DataFrame | None) -> None:
+def polymarket_conditional_ev_and_sd(side: str, win_probability: float, entry_price: float, quantity: float) -> tuple[float, float]:
+    p_win = min(max(float(win_probability), 0.0), 1.0)
+    if side == "YES":
+        win_payoff = 1.0 - float(entry_price)
+        lose_payoff = -float(entry_price)
+        ev_per_share = p_win * win_payoff + (1.0 - p_win) * lose_payoff
+        variance_per_share = p_win * (win_payoff - ev_per_share) ** 2 + (1.0 - p_win) * (lose_payoff - ev_per_share) ** 2
+    else:
+        win_payoff = -float(entry_price)
+        lose_payoff = 1.0 - float(entry_price)
+        ev_per_share = p_win * win_payoff + (1.0 - p_win) * lose_payoff
+        variance_per_share = p_win * (win_payoff - ev_per_share) ** 2 + (1.0 - p_win) * (lose_payoff - ev_per_share) ** 2
+    return ev_per_share * float(quantity), variance_per_share ** 0.5 * float(quantity)
+
+
+def nearest_profile_row(profile: pd.DataFrame | None, terminal_price: float) -> pd.Series | None:
+    if profile is None or profile.empty or "selected_stock_price" not in profile.columns:
+        return None
+    distances = (profile["selected_stock_price"].astype(float) - float(terminal_price)).abs()
+    return profile.loc[distances.idxmin()]
+
+
+def manual_option_calculator(option_legs: pd.DataFrame | None, profile: pd.DataFrame | None, polymarket_side: str, polymarket_entry_price: float, polymarket_quantity: float) -> None:
     st.subheader("Manual option payoff intuition calculator")
-    st.write("This is deliberately not Monte Carlo. It is a simple price-grid calculator for understanding premium, strike distance, quantity, multiplier, and tail payoff mechanics.")
+    st.write("This is a price-grid calculator plus a nearest-bin Monte Carlo lookup. The option payoff is calculated from your manual inputs; scenario probability and P(#1) come from the closest Phase 4 simulated terminal-price bin.")
     defaults = manual_calculator_defaults(option_legs)
 
     input_cols = st.columns(4)
@@ -323,55 +267,69 @@ def manual_option_calculator(option_legs: pd.DataFrame | None) -> None:
     terminal_prices = [low + (high - low) * i / 24 for i in range(25)]
     rows = []
     for terminal_price in terminal_prices:
-        call_payoff = 0.0
-        put_payoff = 0.0
-        if include_call:
-            call_payoff = single_option_payoff("Call", "Short", terminal_price, call_strike, call_premium) * call_quantity * multiplier
-        if include_put:
-            put_payoff = single_option_payoff("Put", "Long", terminal_price, put_strike, put_premium) * put_quantity * multiplier
+        call_payoff = single_option_payoff("Call", "Short", terminal_price, call_strike, call_premium) * call_quantity * multiplier if include_call else 0.0
+        put_payoff = single_option_payoff("Put", "Long", terminal_price, put_strike, put_premium) * put_quantity * multiplier if include_put else 0.0
+        option_payoff = call_payoff + put_payoff
+        matched = nearest_profile_row(profile, terminal_price)
+        scenario_probability = float(matched["scenario_probability"]) if matched is not None else 0.0
+        win_probability = float(matched["win_probability"]) if matched is not None else 0.0
+        matched_sd = float(matched.get("payoff_standard_deviation", 0.0)) if matched is not None else 0.0
+        pm_ev, pm_sd = polymarket_conditional_ev_and_sd(polymarket_side, win_probability, polymarket_entry_price, polymarket_quantity)
+        conditional_ev = pm_ev + option_payoff
         rows.append(
             {
                 "Terminal stock price": terminal_price,
                 "Terminal / spot": terminal_price / spot,
+                "Nearest MC bin probability": scenario_probability,
+                "P(Polymarket wins | bin)": win_probability,
+                "Polymarket EV | bin": pm_ev,
+                "Polymarket SD | bin": pm_sd,
                 "Short call payoff": call_payoff,
                 "Long put payoff": put_payoff,
-                "Total option payoff": call_payoff + put_payoff,
+                "Total option payoff": option_payoff,
+                "Total conditional EV | bin": conditional_ev,
+                "Contribution to global EV": conditional_ev * scenario_probability,
+                "Matched MC bin payoff SD": matched_sd,
             }
         )
     table = pd.DataFrame(rows)
 
     fig = go.Figure()
-    fig.add_scatter(x=table["Terminal stock price"], y=table["Short call payoff"], mode="lines", name="Short call payoff")
-    fig.add_scatter(x=table["Terminal stock price"], y=table["Long put payoff"], mode="lines", name="Long put payoff")
-    fig.add_scatter(x=table["Terminal stock price"], y=table["Total option payoff"], mode="lines", name="Total option payoff", line=dict(width=4))
+    fig.add_scatter(x=table["Terminal stock price"], y=table["Total option payoff"], mode="lines", name="Manual option payoff", line=dict(width=3))
+    fig.add_scatter(x=table["Terminal stock price"], y=table["Total conditional EV | bin"], mode="lines", name="Total EV using nearest MC bin", line=dict(width=4))
+    fig.add_bar(x=table["Terminal stock price"], y=table["Nearest MC bin probability"], name="Nearest-bin scenario probability", opacity=0.35, yaxis="y2")
     fig.add_hline(y=0, line_dash="dash", line_color="#6b7280")
     fig.add_vline(x=spot, line_dash="dot", line_color="#6b7280", annotation_text="spot")
     fig.add_vline(x=call_strike, line_dash="dash", line_color="#dc2626", annotation_text="call strike")
     fig.add_vline(x=put_strike, line_dash="dash", line_color="#2563eb", annotation_text="put strike")
     fig.update_layout(
-        title="Manual option payoff by terminal stock price",
+        title="Manual payoff with nearest Monte Carlo probability lookup",
         xaxis_title="Terminal stock price",
-        yaxis_title="Option payoff",
-        yaxis=dict(tickprefix="$"),
-        height=460,
+        yaxis=dict(title="Payoff / EV", tickprefix="$"),
+        yaxis2=dict(title="Scenario probability", overlaying="y", side="right", tickformat=".0%"),
+        height=500,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     st.plotly_chart(fig, use_container_width=True)
 
     display = table.copy()
-    display["Terminal / spot"] = display["Terminal / spot"].map(pct)
-    for column in ["Terminal stock price", "Short call payoff", "Long put payoff", "Total option payoff"]:
+    for column in ["Terminal / spot", "Nearest MC bin probability", "P(Polymarket wins | bin)"]:
+        display[column] = display[column].map(pct)
+    for column in ["Terminal stock price", "Polymarket EV | bin", "Polymarket SD | bin", "Short call payoff", "Long put payoff", "Total option payoff", "Total conditional EV | bin", "Contribution to global EV", "Matched MC bin payoff SD"]:
         display[column] = display[column].map(dollars)
     st.dataframe(display, use_container_width=True, hide_index=True)
 
     st.markdown(
         """
-What this shows:
+How to read this calculator:
 
-- If both options expire out-of-the-money, total option payoff is mainly the net premium.
-- A short call can look harmless at 99% boundary, but it creates large negative payoff once terminal price crosses the strike.
-- A long put creates large positive payoff only once terminal price falls below the strike.
-- Scaling matters: `payoff = per-share option payoff * quantity * multiplier`.
-- Payoff SD can be high even when tail scenarios are rare, because large tail payoffs enter the variance calculation squared.
+- `Nearest MC bin probability` is the approximate probability that the selected ticker finishes near that terminal price zone.
+- `P(Polymarket wins | bin)` is the conditional win probability from the nearest simulated bin.
+- `Polymarket EV | bin` is the expected Polymarket payoff conditional on that bin.
+- `Total option payoff` is deterministic for the manual terminal price you entered.
+- `Total conditional EV | bin` combines the conditional Polymarket EV and manual option payoff.
+- `Contribution to global EV` multiplies that conditional EV by the bin probability.
+- `Matched MC bin payoff SD` is the realized payoff dispersion inside the nearest simulated bin from the full Phase 4 run.
         """
     )
 
@@ -397,21 +355,8 @@ with st.sidebar:
     construction_mode = CONSTRUCTION_MODE_LABELS[construction_mode_label]
     include_competitor_short_puts = st.checkbox("Include competitor short puts", value=construction_mode == "single_competitor")
     risk_free_rate = st.number_input("Risk-free rate", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
-    contract_multiplier = st.number_input(
-        "Shares per option contract (multiplier)",
-        min_value=1.0,
-        value=100.0,
-        step=1.0,
-        help="Usually 100 for listed US equity options. This is not the number of contracts; use Quantity in the option-leg table for that.",
-    )
-    default_option_quantity = st.number_input(
-        "Default contracts per valid option leg",
-        min_value=0.0,
-        value=0.01,
-        step=0.01,
-        format="%.2f",
-        help="Analytical preview size. One listed option contract can dwarf a small Polymarket position, so the default is fractional for research scaling.",
-    )
+    contract_multiplier = st.number_input("Shares per option contract (multiplier)", min_value=1.0, value=100.0, step=1.0, help="Usually 100 for listed US equity options. This is not the number of contracts; use Quantity in the option-leg table for that.")
+    default_option_quantity = st.number_input("Default contracts per valid option leg", min_value=0.0, value=0.01, step=0.01, format="%.2f", help="Analytical preview size. One listed option contract can dwarf a small Polymarket position, so the default is fractional for research scaling.")
     include_option_premiums = st.checkbox("Include theoretical option premiums", value=True)
     st.caption("Quantity is the number of contracts. Multiplier is shares per contract, usually 100. One full listed option contract can be much larger than 100 Polymarket shares.")
 
@@ -470,48 +415,13 @@ with summary_tab:
                 spots = load_spot_prices(tuple(tickers))
                 simulation_inputs = apply_market_caps(company_inputs, market_caps)
                 prices = load_adjusted_close(tuple(tickers), price_history_period)
-                corr = build_correlation_matrix(
-                    correlation_method,
-                    prices,
-                    simulation_inputs,
-                    float(ewma_lambda),
-                    int(rolling_lookback),
-                    float(smooth_low_quantile),
-                    float(smooth_high_quantile),
-                )
-                result = run_probability_engine(
-                    simulation_inputs,
-                    corr,
-                    days_to_target=int(days_to_target),
-                    simulations=int(simulations),
-                    seed=int(seed),
-                )
+                corr = build_correlation_matrix(correlation_method, prices, simulation_inputs, float(ewma_lambda), int(rolling_lookback), float(smooth_low_quantile), float(smooth_high_quantile))
+                result = run_probability_engine(simulation_inputs, corr, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed))
                 current_caps = simulation_inputs.set_index("Ticker")["Current market cap"]
-                boundaries = calculate_boundaries_for_all_tickers(
-                    result.terminal_market_caps,
-                    current_caps,
-                    [float(confidence_level)],
-                    ranks=result.ranks,
-                    n_bins=int(boundary_bins),
-                )
+                boundaries = calculate_boundaries_for_all_tickers(result.terminal_market_caps, current_caps, [float(confidence_level)], ranks=result.ranks, n_bins=int(boundary_bins))
                 spot_series = spots.set_index("ticker")["spot_price"]
-                structure = construct_candidate_option_structure(
-                    boundaries,
-                    result.results,
-                    current_caps,
-                    spot_series,
-                    selected_ticker=selected_ticker,
-                    competitor_ticker=competitor_ticker,
-                    confidence_level=float(confidence_level),
-                    construction_mode=construction_mode,
-                    include_competitor_short_puts=bool(include_competitor_short_puts),
-                )
-                valued_structure = attach_theoretical_premiums(
-                    structure,
-                    simulation_inputs.set_index("Ticker")["Implied volatility"],
-                    time_to_expiry=years(int(days_to_target)),
-                    risk_free_rate=float(risk_free_rate),
-                )
+                structure = construct_candidate_option_structure(boundaries, result.results, current_caps, spot_series, selected_ticker=selected_ticker, competitor_ticker=competitor_ticker, confidence_level=float(confidence_level), construction_mode=construction_mode, include_competitor_short_puts=bool(include_competitor_short_puts))
+                valued_structure = attach_theoretical_premiums(structure, simulation_inputs.set_index("Ticker")["Implied volatility"], time_to_expiry=years(int(days_to_target)), risk_free_rate=float(risk_free_rate))
                 valued_structure["Quantity"] = 0.0
                 valid_strikes = valued_structure["Strike"].notna()
                 valued_structure.loc[valid_strikes, "Quantity"] = float(default_option_quantity)
@@ -543,12 +453,7 @@ with summary_tab:
             editable_option_legs_view(editable_legs),
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "Quantity": st.column_config.NumberColumn("Quantity", step=0.01, format="%.2f"),
-                "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
-                "Spot": st.column_config.NumberColumn("Spot", format="$%.2f"),
-                "Theoretical premium": st.column_config.NumberColumn("Theoretical premium", format="$%.2f"),
-            },
+            column_config={"Quantity": st.column_config.NumberColumn("Quantity", step=0.01, format="%.2f"), "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"), "Spot": st.column_config.NumberColumn("Spot", format="$%.2f"), "Theoretical premium": st.column_config.NumberColumn("Theoretical premium", format="$%.2f")},
             disabled=[column for column in editable_option_legs_view(editable_legs).columns if column != "Quantity"],
         )
         edited_legs = merge_edited_quantities(editable_legs, edited_view)
@@ -558,26 +463,8 @@ with summary_tab:
         current_caps = simulation_inputs.set_index("Ticker")["Current market cap"]
         spot_series = spots.set_index("ticker")["spot_price"]
         try:
-            scenario = calculate_scenario_payoffs(
-                result.terminal_market_caps,
-                result.ranks,
-                current_caps,
-                spot_series,
-                edited_legs,
-                selected_ticker=selected,
-                polymarket_side=polymarket_side,
-                polymarket_entry_price=float(polymarket_entry_price),
-                polymarket_quantity=float(polymarket_quantity),
-                contract_multiplier=float(contract_multiplier),
-                include_option_premiums=bool(include_option_premiums),
-            )
-            profile = selected_payoff_profile_bins(
-                scenario,
-                result.terminal_market_caps,
-                current_caps,
-                selected_ticker=selected,
-                bins=int(profile_bins),
-            )
+            scenario = calculate_scenario_payoffs(result.terminal_market_caps, result.ranks, current_caps, spot_series, edited_legs, selected_ticker=selected, polymarket_side=polymarket_side, polymarket_entry_price=float(polymarket_entry_price), polymarket_quantity=float(polymarket_quantity), contract_multiplier=float(contract_multiplier), include_option_premiums=bool(include_option_premiums))
+            profile = selected_payoff_profile_bins(scenario, result.terminal_market_caps, current_caps, selected_ticker=selected, bins=int(profile_bins))
             st.session_state.phase4_scenario_payoffs = scenario
             st.session_state.phase4_profile = profile
 
@@ -616,7 +503,7 @@ with profile_tab:
         st.dataframe(display_profile(profile), use_container_width=True, hide_index=True)
 
 with calculator_tab:
-    manual_option_calculator(st.session_state.get("phase4_option_legs"))
+    manual_option_calculator(st.session_state.get("phase4_option_legs"), st.session_state.get("phase4_profile"), polymarket_side, float(polymarket_entry_price), float(polymarket_quantity))
 
 with scenarios_tab:
     scenario = st.session_state.get("phase4_scenario_payoffs")
@@ -646,12 +533,7 @@ Workflow:
 - Bin scenarios by the selected ticker's terminal market-cap ratio.
 - Calculate scenario probability, conditional win probability, average payoff, payoff dispersion, and weighted contribution in each bin.
 
-Polymarket payoff:
-
-```text
-YES payoff = 1 - entry price if selected ticker wins, otherwise -entry price
-NO payoff  = 1 - entry price if selected ticker loses, otherwise -entry price
-```
+The Manual Calculator tab uses manual option-payoff inputs and then looks up the nearest Monte Carlo bin from the Phase 4 payoff profile. It is an intuition tool, not a separate pricing engine.
 
 Expected payoff bridge:
 
@@ -665,13 +547,10 @@ Payoff standard deviation:
 Payoff SD = sqrt(sum(probability_scenario * (payoff_scenario - expected payoff)^2))
 ```
 
-Because Monte Carlo scenarios are equally weighted, this is the standard deviation of total payoff across simulated scenarios. It measures payoff dispersion, not prediction accuracy.
-
 Quantity versus multiplier:
 
 - Quantity is the number of option contracts for a leg.
 - The option contract multiplier is shares per contract, usually 100 for listed US equity options.
-- Increasing the multiplier is not the same as choosing more contracts; normally the multiplier should stay fixed and Quantity should change.
 - One full listed option contract can be much larger than a small Polymarket position, so fractional quantities are allowed here as analytical preview sizing.
 
 Premium versus payoff dispersion:
@@ -680,17 +559,5 @@ Premium versus payoff dispersion:
 - Premium alone does not eliminate scenario dispersion.
 - Deep out-of-the-money options can still create large tail payoffs when a rare simulated scenario crosses the strike.
 - Short options can collect premium in most scenarios but create large losses in tail scenarios.
-
-How to read the profile:
-
-- Scenario probability tells how often the selected ticker ends inside that terminal market-cap zone.
-- Conditional P(#1) tells how often it wins given that it ended in that zone.
-- Avg total payoff tells what the strategy earns on average inside that zone.
-- Contribution to expected payoff equals scenario probability times average payoff in that zone.
-- Summing all bin contributions gives the global expected payoff.
-
-Boundary confidence affects Phase 4 through option construction. Different boundary confidence levels create different option strikes and premiums. If all option quantities are zero, the expected payoff is only the Polymarket payoff and the boundary confidence level has no effect on payoff.
-
-Option payoff uses the theoretical premiums from Phase 3 when enabled. Quantities are manual because optimization belongs to Phase 5.
         """
     )
