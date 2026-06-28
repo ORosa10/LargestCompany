@@ -403,8 +403,19 @@ with summary_tab:
     if construction_mode == "single_competitor":
         competitor_ticker = st.selectbox("Single competitor for diagnostic option legs", competitor_options, index=0)
 
-    default_entry = float(company_inputs.loc[company_inputs["Ticker"] == selected_ticker, "Polymarket YES price"].iloc[0])
-    polymarket_entry_price = st.number_input("Polymarket entry price", min_value=0.0, max_value=1.0, value=default_entry, step=0.01, format="%.2f")
+    selected_yes_price = float(company_inputs.loc[company_inputs["Ticker"] == selected_ticker, "Polymarket YES price"].iloc[0])
+    default_entry = selected_yes_price if polymarket_side == "YES" else 1.0 - selected_yes_price
+    polymarket_entry_price = st.number_input(
+        f"Polymarket {polymarket_side} entry price",
+        min_value=0.0,
+        max_value=1.0,
+        value=default_entry,
+        step=0.01,
+        format="%.2f",
+        key=f"phase4_entry_{selected_ticker}_{polymarket_side}",
+        help="YES entry defaults to the manual YES price. NO entry defaults to 1 minus the manual YES price.",
+    )
+    st.caption(f"Manual YES price: {selected_yes_price:.2%}. Default {polymarket_side} entry: {default_entry:.2%}. YES and NO expected values are sign-opposites only when their entry prices sum to 100%.")
 
     st.caption("Boundary confidence affects expected payoff through the option strikes and premiums. If every option quantity is zero, expected payoff is just the Polymarket payoff and boundary confidence has no effect.")
 
@@ -532,6 +543,13 @@ Workflow:
 - Add Polymarket payoff and option payoff into total scenario payoff.
 - Bin scenarios by the selected ticker's terminal market-cap ratio.
 - Calculate scenario probability, conditional win probability, average payoff, payoff dispersion, and weighted contribution in each bin.
+
+Polymarket YES versus NO entry:
+
+- YES and NO payoff distributions are exact sign-opposites only when the entry prices are complementary.
+- In other words, YES entry price + NO entry price must equal 100%.
+- The app defaults YES entry to the manual YES price and NO entry to `1 - manual YES price`.
+- If you manually set both YES and NO to the same entry price, both can have negative expected value.
 
 The Manual Calculator tab uses manual option-payoff inputs and then looks up the nearest Monte Carlo bin from the Phase 4 payoff profile. It is an intuition tool, not a separate pricing engine.
 
