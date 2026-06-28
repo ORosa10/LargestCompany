@@ -104,6 +104,24 @@ def display_option_legs(table: pd.DataFrame) -> pd.DataFrame:
     return display
 
 
+def editable_option_legs_view(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.copy()
+    if "Boundary market cap" in display.columns:
+        display["Boundary market cap"] = display["Boundary market cap"].map(dollars_trillions)
+    if "Boundary / current cap" in display.columns:
+        display["Boundary / current cap"] = display["Boundary / current cap"].map(pct)
+    if "Boundary / current cap" in display.columns:
+        display = display.rename(columns={"Boundary / current cap": "Boundary / current cap (%)"})
+    return display
+
+
+def merge_edited_quantities(original: pd.DataFrame, edited_view: pd.DataFrame) -> pd.DataFrame:
+    updated = original.copy()
+    if "Quantity" in edited_view.columns:
+        updated["Quantity"] = pd.to_numeric(edited_view["Quantity"], errors="coerce").fillna(0.0)
+    return updated
+
+
 def display_scenarios(table: pd.DataFrame) -> pd.DataFrame:
     display = table.copy()
     for column in ["Selected terminal market cap"]:
@@ -145,6 +163,19 @@ def display_profile(table: pd.DataFrame) -> pd.DataFrame:
             "weighted_payoff_contribution": "Contribution to expected payoff",
             "scenario_count": "Scenario count",
         }
+    )
+
+
+def display_risk_summary(summary: pd.Series) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"Metric": "Expected payoff", "Value": dollars(float(summary["Expected payoff"])), "How to read": "Probability-weighted average payoff across all simulated scenarios."},
+            {"Metric": "Payoff SD", "Value": dollars(float(summary["Payoff standard deviation"])), "How to read": "Dispersion of total payoff across scenarios. Higher means a more volatile payoff profile."},
+            {"Metric": "Median payoff", "Value": dollars(float(summary["Median payoff"])), "How to read": "Middle scenario payoff."},
+            {"Metric": "P(loss)", "Value": pct(float(summary["Probability of loss"])), "How to read": "Share of scenarios with negative total payoff."},
+            {"Metric": "Expected shortfall 5%", "Value": dollars(float(summary["Expected shortfall 5%"])), "How to read": "Average payoff inside the worst 5% of simulated scenarios."},
+            {"Metric": "Worst payoff", "Value": dollars(float(summary["Worst payoff"])), "How to read": "Worst single simulated payoff."},
+        ]
     )
 
 
@@ -226,10 +257,16 @@ with st.sidebar:
     construction_mode = CONSTRUCTION_MODE_LABELS[construction_mode_label]
     include_competitor_short_puts = st.checkbox("Include competitor short puts", value=construction_mode == "single_competitor")
     risk_free_rate = st.number_input("Risk-free rate", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
-    contract_multiplier = st.number_input("Option contract multiplier", min_value=1.0, value=100.0, step=1.0)
+    contract_multiplier = st.number_input(
+        "Shares per option contract (multiplier)",
+        min_value=1.0,
+        value=100.0,
+        step=1.0,
+        help="Usually 100 for listed US equity options. This is not the number of contracts; use Quantity in the option-leg table for that.",
+    )
     default_option_quantity = st.number_input("Default contracts per valid option leg", min_value=0.0, value=1.0, step=1.0)
     include_option_premiums = st.checkbox("Include theoretical option premiums", value=True)
-    st.caption("The default contract quantity makes Phase 4 a hedge-construction preview. You can still set any leg quantity to zero in the editable table.")
+    st.caption("Quantity is the number of contracts. Multiplier is shares per contract, usually 100. Phase 5 will optimize quantities instead of using this preview size.")
 
     st.header("Correlation")
     correlation_method = st.selectbox("Correlation method", CORRELATION_METHODS, index=0)
@@ -353,15 +390,21 @@ with summary_tab:
         st.info("Build the payoff profile to generate scenario-level payoff outputs.")
     else:
         st.subheader("Candidate option legs and quantities")
-        st.caption("These quantities are construction-preview inputs, not optimized hedge ratios. Phase 5 will search quantities and strikes systematically.")
+        st.caption("Quantity is editable and means number of contracts. These are construction-preview inputs, not optimized hedge ratios.")
         editable_legs = option_legs.copy()
-        edited_legs = st.data_editor(
-            editable_legs,
+        edited_view = st.data_editor(
+            editable_option_legs_view(editable_legs),
             use_container_width=True,
             hide_index=True,
-            column_config={"Quantity": st.column_config.NumberColumn("Quantity", step=1.0)},
-            disabled=[column for column in editable_legs.columns if column != "Quantity"],
+            column_config={
+                "Quantity": st.column_config.NumberColumn("Quantity", step=1.0),
+                "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
+                "Spot": st.column_config.NumberColumn("Spot", format="$%.2f"),
+                "Theoretical premium": st.column_config.NumberColumn("Theoretical premium", format="$%.2f"),
+            },
+            disabled=[column for column in editable_option_legs_view(editable_legs).columns if column != "Quantity"],
         )
+        edited_legs = merge_edited_quantities(editable_legs, edited_view)
         st.session_state.phase4_option_legs = edited_legs
 
         selected = st.session_state.phase4_selected_ticker
@@ -399,6 +442,9 @@ with summary_tab:
             cols[3].metric("P(loss)", pct(float(summary["Probability of loss"])))
             cols[4].metric("Expected shortfall 5%", dollars(float(summary["Expected shortfall 5%"])))
             cols[5].metric("Worst payoff", dollars(float(summary["Worst payoff"])))
+
+            st.subheader("Risk metrics")
+            st.dataframe(display_risk_summary(summary), use_container_width=True, hide_index=True)
 
             st.subheader("Payoff components")
             component_summary = scenario[["Polymarket payoff", "Option payoff", "Total payoff"]].mean().to_frame("Expected payoff").reset_index().rename(columns={"index": "Component"})
@@ -470,6 +516,12 @@ Payoff SD = sqrt(sum(probability_scenario * (payoff_scenario - expected payoff)^
 ```
 
 Because Monte Carlo scenarios are equally weighted, this is the standard deviation of total payoff across simulated scenarios. It measures payoff dispersion, not prediction accuracy.
+
+Quantity versus multiplier:
+
+- Quantity is the number of option contracts for a leg.
+- The option contract multiplier is shares per contract, usually 100 for listed US equity options.
+- Increasing the multiplier is not the same as choosing more contracts; normally the multiplier should stay fixed and Quantity should change.
 
 How to read the profile:
 
