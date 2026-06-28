@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from boundaries import calculate_boundaries_for_all_tickers
@@ -11,12 +11,12 @@ from correlations import ewma_correlation, fetch_adjusted_close, rolling_correla
 from market_data import apply_market_caps, fetch_market_caps, fetch_spot_prices
 from model import default_company_inputs, run_probability_engine
 from option_construction import attach_theoretical_premiums, construct_candidate_option_structure
-from payoff_surface import calculate_scenario_payoffs, payoff_summary, payoff_surface_bins
+from payoff_surface import calculate_scenario_payoffs, payoff_summary, selected_payoff_profile_bins
 
 
 st.set_page_config(page_title="Phase 4", layout="wide")
 st.title("Phase 4")
-st.caption("Payoff Surface Engine. This phase combines Polymarket payoff and candidate option legs across Monte Carlo scenarios. It does not optimize hedge ratios.")
+st.caption("Payoff Profile Engine. This phase combines Polymarket payoff and candidate option legs across Monte Carlo scenarios. It does not optimize hedge ratios.")
 
 CORRELATION_METHODS = [
     "EWMA historical correlation",
@@ -94,9 +94,8 @@ def display_option_legs(table: pd.DataFrame) -> pd.DataFrame:
     for column in ["Strike", "Spot", "Theoretical premium"]:
         if column in display.columns:
             display[column] = display[column].map(dollars)
-    for column in ["Boundary market cap"]:
-        if column in display.columns:
-            display[column] = display[column].map(dollars_trillions)
+    if "Boundary market cap" in display.columns:
+        display["Boundary market cap"] = display["Boundary market cap"].map(dollars_trillions)
     for column in ["Boundary / current cap", "Model IV", "Risk-free rate"]:
         if column in display.columns:
             display[column] = display[column].map(pct)
@@ -105,33 +104,35 @@ def display_option_legs(table: pd.DataFrame) -> pd.DataFrame:
     return display
 
 
-def display_summary(summary: pd.Series) -> pd.DataFrame:
-    display = summary.to_frame("Value").reset_index().rename(columns={"index": "Metric"})
-    display["Value"] = display["Value"].map(lambda value: pct(value) if "Probability" in str(display.loc[display["Value"] == value, "Metric"].iloc[0]) else dollars(value))
-    return display
-
-
 def display_scenarios(table: pd.DataFrame) -> pd.DataFrame:
     display = table.copy()
     for column in ["Selected terminal market cap"]:
         display[column] = display[column].map(dollars_trillions)
-    for column in ["Polymarket payoff", "Option payoff", "Total payoff"]:
+    for column in ["Selected terminal stock price", "Polymarket payoff", "Option payoff", "Total payoff"]:
         display[column] = display[column].map(dollars)
     return display
 
 
-def display_surface(table: pd.DataFrame) -> pd.DataFrame:
+def display_profile(table: pd.DataFrame) -> pd.DataFrame:
     display = table.copy()
-    display["selected_ratio"] = display["selected_ratio"].map(pct)
-    display["competitor_ratio"] = display["competitor_ratio"].map(pct)
-    for column in ["expected_payoff", "weighted_payoff_contribution"]:
+    for column in ["selected_ratio_low", "selected_ratio_high", "selected_ratio", "win_probability", "scenario_probability"]:
+        display[column] = display[column].map(pct)
+    for column in ["selected_market_cap"]:
+        display[column] = display[column].map(dollars_trillions)
+    for column in ["selected_stock_price", "expected_polymarket_payoff", "expected_option_payoff", "expected_payoff", "weighted_payoff_contribution"]:
         display[column] = display[column].map(dollars)
-    display["scenario_probability"] = display["scenario_probability"].map(pct)
     return display.rename(
         columns={
-            "selected_ratio": "Selected cap / current",
-            "competitor_ratio": "Competitor cap / current",
-            "expected_payoff": "Expected payoff in bin",
+            "bin_label": "Selected terminal cap bin",
+            "selected_ratio_low": "Bin low / current",
+            "selected_ratio_high": "Bin high / current",
+            "selected_ratio": "Avg cap / current",
+            "selected_market_cap": "Avg terminal market cap",
+            "selected_stock_price": "Avg terminal stock price",
+            "win_probability": "Conditional P(#1)",
+            "expected_polymarket_payoff": "Avg Polymarket payoff",
+            "expected_option_payoff": "Avg option payoff",
+            "expected_payoff": "Avg total payoff",
             "scenario_probability": "Scenario probability",
             "weighted_payoff_contribution": "Contribution to expected payoff",
             "scenario_count": "Scenario count",
@@ -139,22 +140,60 @@ def display_surface(table: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def heatmap_figure(surface: pd.DataFrame, selected_ticker: str, competitor_ticker: str):
-    pivot = surface.pivot_table(
-        index="competitor_ratio",
-        columns="selected_ratio",
-        values="expected_payoff",
-        aggfunc="mean",
-    ).sort_index(ascending=False)
-    fig = px.imshow(
-        pivot,
-        aspect="auto",
-        color_continuous_scale="RdYlGn",
-        labels={"x": f"{selected_ticker} terminal cap / current", "y": f"{competitor_ticker} terminal cap / current", "color": "Avg payoff"},
-        title=f"Payoff surface: {selected_ticker} vs {competitor_ticker}",
+def payoff_profile_figure(profile: pd.DataFrame, selected_ticker: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_bar(
+        x=profile["bin_label"],
+        y=profile["scenario_probability"],
+        name="Scenario probability",
+        marker_color="#7aa6ff",
+        yaxis="y",
     )
-    fig.update_xaxes(tickformat=".0%")
-    fig.update_yaxes(tickformat=".0%")
+    fig.add_bar(
+        x=profile["bin_label"],
+        y=profile["weighted_payoff_contribution"],
+        name="Contribution to expected payoff",
+        marker_color="#22c55e",
+        opacity=0.6,
+        yaxis="y2",
+    )
+    fig.add_scatter(
+        x=profile["bin_label"],
+        y=profile["expected_payoff"],
+        name="Avg payoff in bin",
+        mode="lines+markers",
+        line=dict(color="#1f3a8a", width=3),
+        yaxis="y2",
+    )
+    fig.update_layout(
+        title=f"{selected_ticker}: payoff profile by terminal market-cap bin",
+        xaxis_title=f"{selected_ticker} terminal market cap / current market cap",
+        yaxis=dict(title="Scenario probability", tickformat=".0%"),
+        yaxis2=dict(title="Payoff / expected payoff contribution", overlaying="y", side="right", tickprefix="$"),
+        barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    return fig
+
+
+def payoff_profile_heatmap(profile: pd.DataFrame, selected_ticker: str) -> go.Figure:
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=[profile["expected_payoff"].to_list()],
+            x=profile["bin_label"],
+            y=["Avg payoff"],
+            colorscale="RdYlGn",
+            colorbar=dict(title="Avg payoff"),
+            text=[[dollars(value) for value in profile["expected_payoff"]]],
+            texttemplate="%{text}",
+        )
+    )
+    fig.update_layout(
+        title=f"{selected_ticker}: one-dimensional payoff heatmap",
+        xaxis_title=f"{selected_ticker} terminal market cap / current market cap",
+        yaxis_title="",
+        height=260,
+    )
     return fig
 
 
@@ -167,7 +206,7 @@ with st.sidebar:
     simulations = st.number_input("Monte Carlo simulations", min_value=2_000, max_value=1_000_000, value=100_000, step=10_000)
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
     boundary_bins = st.slider("Phase 2 market-cap quantile bins", min_value=10, max_value=100, value=30, step=5)
-    surface_bins = st.slider("Payoff surface bins", min_value=4, max_value=25, value=12, step=1)
+    profile_bins = st.slider("Payoff profile bins", min_value=5, max_value=40, value=20, step=1)
     confidence_level = st.selectbox("Boundary confidence level", CONFIDENCE_LEVELS, index=3, format_func=lambda value: f"{value:.0%}")
 
     st.header("Polymarket position")
@@ -190,9 +229,9 @@ with st.sidebar:
     smooth_low_quantile = st.selectbox("Smooth low-vol bucket", [0.30, 0.40, 0.50], index=1, format_func=lambda value: f"{value:.0%}")
     smooth_high_quantile = st.selectbox("Smooth high-vol bucket", [0.50, 0.60, 0.70], index=1, format_func=lambda value: f"{value:.0%}")
 
-    run_button = st.button("Build payoff surface", type="primary", use_container_width=True)
+    run_button = st.button("Build payoff profile", type="primary", use_container_width=True)
 
-summary_tab, surface_tab, scenarios_tab, methodology_tab = st.tabs(["Payoff Summary", "Payoff Surface", "Scenario Table", "Methodology"])
+summary_tab, profile_tab, scenarios_tab, methodology_tab = st.tabs(["Payoff Summary", "Payoff Profile", "Scenario Table", "Methodology"])
 
 with summary_tab:
     st.subheader("Inputs")
@@ -221,13 +260,17 @@ with summary_tab:
     tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
     selected_ticker = st.selectbox("Selected Polymarket ticker", tickers, index=0)
     competitor_options = [ticker for ticker in tickers if ticker != selected_ticker]
-    surface_competitor_ticker = st.selectbox("Surface competitor axis", competitor_options, index=0)
+    competitor_ticker = None
+    if construction_mode == "single_competitor":
+        competitor_ticker = st.selectbox("Single competitor for diagnostic option legs", competitor_options, index=0)
 
     default_entry = float(company_inputs.loc[company_inputs["Ticker"] == selected_ticker, "Polymarket YES price"].iloc[0])
     polymarket_entry_price = st.number_input("Polymarket entry price", min_value=0.0, max_value=1.0, value=default_entry, step=0.01, format="%.2f")
 
+    st.caption("Boundary confidence affects expected payoff only through constructed option strikes and premiums. If option quantities are zero, expected payoff is just the Polymarket payoff.")
+
     if run_button:
-        with st.spinner("Running scenarios, constructing option candidates, and calculating payoff surface..."):
+        with st.spinner("Running scenarios, constructing option candidates, and calculating payoff profile..."):
             try:
                 market_caps = load_yahoo_market_caps(tuple(tickers))
                 spots = load_spot_prices(tuple(tickers))
@@ -258,7 +301,6 @@ with summary_tab:
                     n_bins=int(boundary_bins),
                 )
                 spot_series = spots.set_index("ticker")["spot_price"]
-                competitor_ticker = surface_competitor_ticker if construction_mode == "single_competitor" else None
                 structure = construct_candidate_option_structure(
                     boundaries,
                     result.results,
@@ -283,8 +325,6 @@ with summary_tab:
                 st.session_state.phase4_boundaries = boundaries
                 st.session_state.phase4_option_legs = valued_structure
                 st.session_state.phase4_selected_ticker = selected_ticker
-                st.session_state.phase4_surface_competitor = surface_competitor_ticker
-                st.session_state.phase4_polymarket_entry = float(polymarket_entry_price)
                 st.session_state.phase4_error = None
             except Exception as exc:
                 st.session_state.phase4_error = str(exc)
@@ -298,7 +338,7 @@ with summary_tab:
     spots = st.session_state.get("phase4_spots")
 
     if option_legs is None or result is None or simulation_inputs is None or spots is None:
-        st.info("Build the payoff surface to generate scenario-level payoff outputs.")
+        st.info("Build the payoff profile to generate scenario-level payoff outputs.")
     else:
         st.subheader("Candidate option legs and quantities")
         editable_legs = option_legs.copy()
@@ -312,67 +352,66 @@ with summary_tab:
         st.session_state.phase4_option_legs = edited_legs
 
         selected = st.session_state.phase4_selected_ticker
-        surface_competitor = st.session_state.phase4_surface_competitor
         current_caps = simulation_inputs.set_index("Ticker")["Current market cap"]
         spot_series = spots.set_index("ticker")["spot_price"]
-        scenario = calculate_scenario_payoffs(
-            result.terminal_market_caps,
-            result.ranks,
-            current_caps,
-            spot_series,
-            edited_legs,
-            selected_ticker=selected,
-            polymarket_side=polymarket_side,
-            polymarket_entry_price=float(polymarket_entry_price),
-            polymarket_quantity=float(polymarket_quantity),
-            contract_multiplier=float(contract_multiplier),
-            include_option_premiums=bool(include_option_premiums),
-        )
-        surface = payoff_surface_bins(
-            scenario,
-            result.terminal_market_caps,
-            current_caps,
-            selected_ticker=selected,
-            competitor_ticker=surface_competitor,
-            x_bins=int(surface_bins),
-            y_bins=int(surface_bins),
-        )
-        st.session_state.phase4_scenario_payoffs = scenario
-        st.session_state.phase4_surface = surface
+        try:
+            scenario = calculate_scenario_payoffs(
+                result.terminal_market_caps,
+                result.ranks,
+                current_caps,
+                spot_series,
+                edited_legs,
+                selected_ticker=selected,
+                polymarket_side=polymarket_side,
+                polymarket_entry_price=float(polymarket_entry_price),
+                polymarket_quantity=float(polymarket_quantity),
+                contract_multiplier=float(contract_multiplier),
+                include_option_premiums=bool(include_option_premiums),
+            )
+            profile = selected_payoff_profile_bins(
+                scenario,
+                result.terminal_market_caps,
+                current_caps,
+                selected_ticker=selected,
+                bins=int(profile_bins),
+            )
+            st.session_state.phase4_scenario_payoffs = scenario
+            st.session_state.phase4_profile = profile
 
-        summary = payoff_summary(scenario)
-        cols = st.columns(5)
-        cols[0].metric("Expected payoff", dollars(float(summary["Expected payoff"])))
-        cols[1].metric("Median payoff", dollars(float(summary["Median payoff"])))
-        cols[2].metric("P(loss)", pct(float(summary["Probability of loss"])))
-        cols[3].metric("Expected shortfall 5%", dollars(float(summary["Expected shortfall 5%"])))
-        cols[4].metric("Worst payoff", dollars(float(summary["Worst payoff"])))
+            summary = payoff_summary(scenario)
+            cols = st.columns(5)
+            cols[0].metric("Expected payoff", dollars(float(summary["Expected payoff"])))
+            cols[1].metric("Median payoff", dollars(float(summary["Median payoff"])))
+            cols[2].metric("P(loss)", pct(float(summary["Probability of loss"])))
+            cols[3].metric("Expected shortfall 5%", dollars(float(summary["Expected shortfall 5%"])))
+            cols[4].metric("Worst payoff", dollars(float(summary["Worst payoff"])))
 
-        st.subheader("Payoff components")
-        component_summary = scenario[["Polymarket payoff", "Option payoff", "Total payoff"]].mean().to_frame("Expected payoff").reset_index().rename(columns={"index": "Component"})
-        component_summary["Expected payoff"] = component_summary["Expected payoff"].map(dollars)
-        st.dataframe(component_summary, use_container_width=True, hide_index=True)
+            st.subheader("Payoff components")
+            component_summary = scenario[["Polymarket payoff", "Option payoff", "Total payoff"]].mean().to_frame("Expected payoff").reset_index().rename(columns={"index": "Component"})
+            component_summary["Expected payoff"] = component_summary["Expected payoff"].map(dollars)
+            st.dataframe(component_summary, use_container_width=True, hide_index=True)
+        except Exception as exc:
+            st.error(str(exc))
 
         with st.expander("Option legs used"):
             st.dataframe(display_option_legs(edited_legs), use_container_width=True, hide_index=True)
 
-with surface_tab:
-    surface = st.session_state.get("phase4_surface")
-    result = st.session_state.get("phase4_result")
-    if surface is None or result is None:
-        st.info("Build the payoff surface first.")
+with profile_tab:
+    profile = st.session_state.get("phase4_profile")
+    if profile is None:
+        st.info("Build the payoff profile first.")
     else:
         selected = st.session_state.phase4_selected_ticker
-        surface_competitor = st.session_state.phase4_surface_competitor
-        st.plotly_chart(heatmap_figure(surface, selected, surface_competitor), use_container_width=True)
+        st.plotly_chart(payoff_profile_figure(profile, selected), use_container_width=True)
+        st.plotly_chart(payoff_profile_heatmap(profile, selected), use_container_width=True)
         st.subheader("Probability-weighted payoff bins")
-        st.write("Each row is a two-dimensional scenario bin. Scenario probability times average payoff gives that bin's contribution to total expected payoff.")
-        st.dataframe(display_surface(surface), use_container_width=True, hide_index=True)
+        st.write("Each row is a selected-ticker terminal price/cap zone. Scenario probability times average payoff gives that bin's contribution to total expected payoff. The contributions sum to the global expected payoff.")
+        st.dataframe(display_profile(profile), use_container_width=True, hide_index=True)
 
 with scenarios_tab:
     scenario = st.session_state.get("phase4_scenario_payoffs")
     if scenario is None:
-        st.info("Build the payoff surface first.")
+        st.info("Build the payoff profile first.")
     else:
         st.subheader("Scenario-level payoff sample")
         st.dataframe(display_scenarios(scenario.head(500)), use_container_width=True, hide_index=True)
@@ -393,7 +432,8 @@ Workflow:
 - Calculate Polymarket payoff in each scenario.
 - Convert terminal market caps into terminal stock prices and calculate option payoff in each scenario.
 - Add Polymarket payoff and option payoff into total scenario payoff.
-- Aggregate the scenario distribution into expected payoff, loss probability, tail loss, and payoff surface bins.
+- Bin scenarios by the selected ticker's terminal market-cap ratio.
+- Calculate scenario probability, conditional win probability, average payoff, and weighted contribution in each bin.
 
 Polymarket payoff:
 
@@ -401,6 +441,14 @@ Polymarket payoff:
 YES payoff = 1 - entry price if selected ticker wins, otherwise -entry price
 NO payoff  = 1 - entry price if selected ticker loses, otherwise -entry price
 ```
+
+Expected payoff bridge:
+
+```text
+Global expected payoff = sum(bin scenario probability * average payoff in bin)
+```
+
+Boundary confidence affects Phase 4 through option construction. Different boundary confidence levels create different option strikes and premiums. If all option quantities are zero, the expected payoff is only the Polymarket payoff and the boundary confidence level has no effect on payoff.
 
 Option payoff uses the theoretical premiums from Phase 3 when enabled. Quantities are manual because optimization belongs to Phase 5.
         """
