@@ -113,6 +113,7 @@ def calculate_scenario_payoffs(
     scenario = pd.DataFrame(index=terminal_market_caps.index)
     scenario["Winner"] = winners
     scenario["Selected terminal market cap"] = terminal_market_caps[selected_ticker].astype(float)
+    scenario["Selected terminal stock price"] = terminal_prices[selected_ticker].astype(float)
     scenario["Polymarket payoff"] = polymarket_payoff(
         winners,
         selected_ticker=selected_ticker,
@@ -163,6 +164,59 @@ def payoff_summary(scenario_payoffs: pd.DataFrame, *, shortfall_probability: flo
     )
 
 
+def selected_payoff_profile_bins(
+    scenario_payoffs: pd.DataFrame,
+    terminal_market_caps: pd.DataFrame,
+    current_market_caps: pd.Series | dict[str, float],
+    *,
+    selected_ticker: str,
+    bins: int = 20,
+) -> pd.DataFrame:
+    """Aggregate payoff by selected ticker terminal market-cap ratio.
+
+    This is the primary Phase 4 profile because a YES bet on a ranking winner is
+    naturally read against the terminal level of the selected ticker. The global
+    expected payoff is the sum of each bin's weighted payoff contribution.
+    """
+
+    current_caps = pd.Series(current_market_caps, dtype=float)
+    if selected_ticker not in terminal_market_caps.columns:
+        raise ValueError("selected_ticker must be in terminal_market_caps.")
+    data = pd.DataFrame(
+        {
+            "selected_ratio": terminal_market_caps[selected_ticker].astype(float) / float(current_caps.loc[selected_ticker]),
+            "selected_market_cap": terminal_market_caps[selected_ticker].astype(float),
+            "selected_stock_price": scenario_payoffs["Selected terminal stock price"].astype(float),
+            "polymarket_payoff": scenario_payoffs["Polymarket payoff"].astype(float),
+            "option_payoff": scenario_payoffs["Option payoff"].astype(float),
+            "total_payoff": scenario_payoffs["Total payoff"].astype(float),
+            "won": scenario_payoffs["Winner"].astype(str) == selected_ticker,
+        }
+    ).dropna()
+    effective_bins = min(int(bins), data["selected_ratio"].nunique())
+    if effective_bins < 2:
+        raise ValueError("Not enough distinct selected terminal values for payoff profile bins.")
+
+    data["Selected bin"] = pd.qcut(data["selected_ratio"], q=effective_bins, duplicates="drop")
+    grouped = data.groupby("Selected bin", observed=True)
+    profile = grouped.agg(
+        selected_ratio_low=("selected_ratio", "min"),
+        selected_ratio_high=("selected_ratio", "max"),
+        selected_ratio=("selected_ratio", "mean"),
+        selected_market_cap=("selected_market_cap", "mean"),
+        selected_stock_price=("selected_stock_price", "mean"),
+        win_probability=("won", "mean"),
+        expected_polymarket_payoff=("polymarket_payoff", "mean"),
+        expected_option_payoff=("option_payoff", "mean"),
+        expected_payoff=("total_payoff", "mean"),
+        scenario_count=("total_payoff", "size"),
+    ).reset_index(drop=True)
+    profile["scenario_probability"] = profile["scenario_count"] / len(data)
+    profile["weighted_payoff_contribution"] = profile["expected_payoff"] * profile["scenario_probability"]
+    profile["bin_label"] = profile.apply(lambda row: f"{row['selected_ratio_low']:.0%} to {row['selected_ratio_high']:.0%}", axis=1)
+    return profile
+
+
 def payoff_surface_bins(
     scenario_payoffs: pd.DataFrame,
     terminal_market_caps: pd.DataFrame,
@@ -173,7 +227,7 @@ def payoff_surface_bins(
     x_bins: int = 12,
     y_bins: int = 12,
 ) -> pd.DataFrame:
-    """Aggregate payoff into a 2D surface by selected and competitor cap ratios."""
+    """Aggregate payoff into a 2D diagnostic surface by two cap ratios."""
 
     current_caps = pd.Series(current_market_caps, dtype=float)
     if selected_ticker not in terminal_market_caps.columns or competitor_ticker not in terminal_market_caps.columns:
