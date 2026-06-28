@@ -3,9 +3,12 @@ import pandas as pd
 import pytest
 
 from option_construction import (
+    attach_theoretical_premiums,
+    black_scholes_price,
     boundary_cap_to_strike,
     construct_candidate_option_structure,
     option_payoff,
+    payoff_grid_for_leg,
 )
 
 
@@ -83,3 +86,73 @@ def test_option_payoff_long_and_short_signs():
     assert short_call.tolist() == pytest.approx([0.0, 0.0, -20.0])
     assert long_put.tolist() == pytest.approx([20.0, 0.0, 0.0])
     assert short_put.tolist() == pytest.approx([-20.0, 0.0, 0.0])
+
+
+def test_black_scholes_price_returns_positive_call_and_put_values():
+    call = black_scholes_price(spot=100.0, strike=100.0, time_to_expiry=1.0, volatility=0.25, risk_free_rate=0.04, option_type="Call")
+    put = black_scholes_price(spot=100.0, strike=100.0, time_to_expiry=1.0, volatility=0.25, risk_free_rate=0.04, option_type="Put")
+
+    assert call > 0.0
+    assert put > 0.0
+    assert call > put
+
+
+def test_attach_theoretical_premiums_adds_debit_credit_fields():
+    structure = pd.DataFrame(
+        [
+            {
+                "Instrument": "Long AAA Call",
+                "Ticker": "AAA",
+                "Option type": "Call",
+                "Position": "Long",
+                "Strike": 110.0,
+                "Boundary used": "99% win boundary",
+                "Boundary market cap": 120.0,
+                "Boundary / current cap": 1.2,
+                "Spot": 100.0,
+                "Purpose": "test",
+            },
+            {
+                "Instrument": "Short BBB Put",
+                "Ticker": "BBB",
+                "Option type": "Put",
+                "Position": "Short",
+                "Strike": 90.0,
+                "Boundary used": "99% loss boundary",
+                "Boundary market cap": 80.0,
+                "Boundary / current cap": 0.8,
+                "Spot": 100.0,
+                "Purpose": "test",
+            },
+        ]
+    )
+
+    valued = attach_theoretical_premiums(
+        structure,
+        pd.Series({"AAA": 0.30, "BBB": 0.20}),
+        time_to_expiry=0.5,
+        risk_free_rate=0.04,
+    )
+
+    assert valued["Theoretical premium"].gt(0.0).all()
+    assert valued["Premium direction"].tolist() == ["Debit", "Credit"]
+    assert valued["Model IV"].tolist() == pytest.approx([0.30, 0.20])
+
+
+def test_payoff_grid_uses_theoretical_premium_when_available():
+    leg = pd.Series(
+        {
+            "Instrument": "Long AAA Call",
+            "Option type": "Call",
+            "Position": "Long",
+            "Strike": 100.0,
+            "Spot": 100.0,
+            "Theoretical premium": 5.0,
+        }
+    )
+
+    payoff_with_premium = payoff_grid_for_leg(leg, points=3)
+    payoff_without_premium = payoff_grid_for_leg(leg, points=3, premium=0.0)
+
+    assert payoff_with_premium["Premium"].iloc[0] == pytest.approx(5.0)
+    assert payoff_without_premium["Premium"].iloc[0] == pytest.approx(0.0)
