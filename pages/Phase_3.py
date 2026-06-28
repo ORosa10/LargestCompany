@@ -23,6 +23,11 @@ CORRELATION_METHODS = [
     "Rolling historical correlation",
 ]
 CONFIDENCE_LEVELS = [0.80, 0.90, 0.95, 0.99]
+CONSTRUCTION_MODE_LABELS = {
+    "Selected-only hedge": "selected_only",
+    "Selected + single competitor diagnostic": "single_competitor",
+    "Selected + full universe competitors": "full_universe",
+}
 
 
 @st.cache_data(show_spinner=False, ttl=15 * 60)
@@ -122,6 +127,15 @@ with st.sidebar:
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
     n_bins = st.slider("Phase 2 market-cap quantile bins", min_value=10, max_value=100, value=30, step=5)
     confidence_level = st.selectbox("Boundary confidence level", CONFIDENCE_LEVELS, index=3, format_func=lambda value: f"{value:.0%}")
+
+    st.header("Construction")
+    construction_mode_label = st.selectbox("Option construction mode", list(CONSTRUCTION_MODE_LABELS), index=0)
+    construction_mode = CONSTRUCTION_MODE_LABELS[construction_mode_label]
+    include_competitor_short_puts = st.checkbox(
+        "Include competitor short puts",
+        value=construction_mode == "single_competitor",
+        help="Competitor short puts are optional income legs, not pure protection. They can be useful diagnostics but may add unwanted exposure.",
+    )
 
     st.header("Pricing")
     risk_free_rate = st.number_input(
@@ -227,9 +241,15 @@ with construction_tab:
         tickers = simulation_inputs["Ticker"].tolist()
         selected_ticker = st.selectbox("Selected Polymarket ticker", tickers, index=0)
         competitor_options = [ticker for ticker in tickers if ticker != selected_ticker]
-        auto_competitor = result.results[result.results["Ticker"] != selected_ticker].sort_values("Model probability", ascending=False).iloc[0]["Ticker"]
-        competitor_index = competitor_options.index(auto_competitor) if auto_competitor in competitor_options else 0
-        competitor_ticker = st.selectbox("Competitor ticker", competitor_options, index=competitor_index)
+        competitor_ticker = None
+        if construction_mode == "single_competitor":
+            auto_competitor = result.results[result.results["Ticker"] != selected_ticker].sort_values("Model probability", ascending=False).iloc[0]["Ticker"]
+            competitor_index = competitor_options.index(auto_competitor) if auto_competitor in competitor_options else 0
+            competitor_ticker = st.selectbox("Competitor ticker", competitor_options, index=competitor_index)
+        elif construction_mode == "full_universe":
+            st.caption("Full universe mode adds competitor protection legs for every non-selected ticker, sorted by model win probability.")
+        else:
+            st.caption("Selected-only mode hedges only the underlying ticker behind the YES bet. It does not assume which competitor wins if the selected ticker loses.")
 
         current_caps = simulation_inputs.set_index("Ticker")["Current market cap"]
         spot_series = spots.set_index("ticker")["spot_price"]
@@ -241,6 +261,8 @@ with construction_tab:
             selected_ticker=selected_ticker,
             competitor_ticker=competitor_ticker,
             confidence_level=float(confidence_level),
+            construction_mode=construction_mode,
+            include_competitor_short_puts=bool(include_competitor_short_puts),
         )
         iv_series = simulation_inputs.set_index("Ticker")["Implied volatility"]
         valued_structure = attach_theoretical_premiums(
@@ -255,8 +277,20 @@ with construction_tab:
         st.dataframe(display_structure(valued_structure), use_container_width=True, hide_index=True)
 
         st.subheader("Interpretation")
-        st.write(
-            "These are natural option building blocks from Phase 2 probability boundaries. Theoretical premiums use simplified Black-Scholes with one fixed IV per ticker. They are not live option quotes, and this is still not an optimized hedge package."
+        if construction_mode == "selected_only":
+            st.write(
+                "Selected-only mode is the cleanest hedge construction for a YES bet on one ticker finishing #1. It proposes option legs only on the selected stock, without pretending that one specific competitor is the only risk."
+            )
+        elif construction_mode == "single_competitor":
+            st.write(
+                "Single competitor mode is a diagnostic pair view. It helps inspect one threat, but it is not a complete hedge for a winner-takes-all universe market."
+            )
+        else:
+            st.write(
+                "Full universe mode lists candidate competitor protection legs for every rival. This is more complete, but it can become expensive and will need Phase 5 optimization before being treated as a portfolio."
+            )
+        st.caption(
+            "Theoretical premiums use simplified Black-Scholes with one fixed IV per ticker. They are not live option quotes, and this is still not an optimized hedge package."
         )
 
         with st.expander("Phase 2 boundaries used"):
@@ -301,12 +335,21 @@ with methodology_tab:
     st.write("Phase 3 translates Phase 2 market-cap boundaries into option strikes. It does not choose quantities, combine legs, optimize hedge ratios, or calculate a full portfolio payoff surface.")
     st.markdown(
         """
-Construction rules:
+Construction modes:
+
+- Selected-only hedge: Short Call and Long Put on the ticker behind the YES bet. This is the clean default because it does not assume which competitor wins if the selected ticker loses.
+- Selected + single competitor diagnostic: adds candidate Long Call and optional Short Put legs for one chosen rival. This is useful for pairwise threat analysis, not a full universe hedge.
+- Selected + full universe competitors: adds competitor protection legs for every non-selected ticker. This is more complete but likely too broad until Phase 5 optimization chooses quantities and filters.
+
+Core selected-ticker rules:
 
 - Selected ticker upper win boundary -> Short Call
 - Selected ticker lower loss boundary -> Long Put
+
+Competitor extension rules:
+
 - Competitor upper win boundary -> Long Call
-- Competitor lower loss boundary -> Short Put
+- Competitor lower loss boundary -> optional Short Put
 
 Market-cap boundaries are converted to stock-price strikes with:
 
