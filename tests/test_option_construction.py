@@ -12,18 +12,8 @@ from option_construction import (
 )
 
 
-def test_boundary_cap_to_strike_scales_with_market_cap_ratio():
-    strike = boundary_cap_to_strike(
-        boundary_market_cap=120.0,
-        current_market_cap=100.0,
-        spot_price=50.0,
-    )
-
-    assert strike == pytest.approx(60.0)
-
-
-def test_construct_candidate_option_structure_creates_four_legs():
-    boundaries = pd.DataFrame(
+def sample_boundaries() -> pd.DataFrame:
+    return pd.DataFrame(
         [
             {
                 "Ticker": "AAA",
@@ -41,20 +31,45 @@ def test_construct_candidate_option_structure_creates_four_legs():
                 "Lower loss boundary / current": 0.9,
                 "Upper win boundary / current": 1.3,
             },
+            {
+                "Ticker": "CCC",
+                "Confidence level": 0.99,
+                "Lower loss boundary": 70.0,
+                "Upper win boundary": 150.0,
+                "Lower loss boundary / current": 0.7,
+                "Upper win boundary / current": 1.5,
+            },
         ]
     )
-    results = pd.DataFrame(
+
+
+def sample_results() -> pd.DataFrame:
+    return pd.DataFrame(
         [
             {"Ticker": "AAA", "Model probability": 0.6},
-            {"Ticker": "BBB", "Model probability": 0.4},
+            {"Ticker": "BBB", "Model probability": 0.3},
+            {"Ticker": "CCC", "Model probability": 0.1},
         ]
     )
-    current_caps = pd.Series({"AAA": 100.0, "BBB": 100.0})
-    spots = pd.Series({"AAA": 50.0, "BBB": 40.0})
+
+
+def test_boundary_cap_to_strike_scales_with_market_cap_ratio():
+    strike = boundary_cap_to_strike(
+        boundary_market_cap=120.0,
+        current_market_cap=100.0,
+        spot_price=50.0,
+    )
+
+    assert strike == pytest.approx(60.0)
+
+
+def test_construct_candidate_option_structure_creates_four_legs_by_default():
+    current_caps = pd.Series({"AAA": 100.0, "BBB": 100.0, "CCC": 100.0})
+    spots = pd.Series({"AAA": 50.0, "BBB": 40.0, "CCC": 30.0})
 
     structure = construct_candidate_option_structure(
-        boundaries,
-        results,
+        sample_boundaries(),
+        sample_results(),
         current_caps,
         spots,
         selected_ticker="AAA",
@@ -72,6 +87,43 @@ def test_construct_candidate_option_structure_creates_four_legs():
     assert structure.loc[structure["Instrument"] == "Long AAA Put", "Strike"].iloc[0] == pytest.approx(40.0)
     assert structure.loc[structure["Instrument"] == "Long BBB Call", "Strike"].iloc[0] == pytest.approx(52.0)
     assert structure.loc[structure["Instrument"] == "Short BBB Put", "Strike"].iloc[0] == pytest.approx(36.0)
+
+
+def test_selected_only_construction_mode_uses_only_selected_ticker_legs():
+    structure = construct_candidate_option_structure(
+        sample_boundaries(),
+        sample_results(),
+        pd.Series({"AAA": 100.0, "BBB": 100.0, "CCC": 100.0}),
+        pd.Series({"AAA": 50.0, "BBB": 40.0, "CCC": 30.0}),
+        selected_ticker="AAA",
+        competitor_ticker="BBB",
+        confidence_level=0.99,
+        construction_mode="selected_only",
+    )
+
+    assert structure["Instrument"].tolist() == ["Short AAA Call", "Long AAA Put"]
+    assert structure["Ticker"].tolist() == ["AAA", "AAA"]
+
+
+def test_full_universe_mode_adds_all_competitor_call_protection_without_optional_puts():
+    structure = construct_candidate_option_structure(
+        sample_boundaries(),
+        sample_results(),
+        pd.Series({"AAA": 100.0, "BBB": 100.0, "CCC": 100.0}),
+        pd.Series({"AAA": 50.0, "BBB": 40.0, "CCC": 30.0}),
+        selected_ticker="AAA",
+        competitor_ticker=None,
+        confidence_level=0.99,
+        construction_mode="full_universe",
+        include_competitor_short_puts=False,
+    )
+
+    assert structure["Instrument"].tolist() == [
+        "Short AAA Call",
+        "Long AAA Put",
+        "Long BBB Call",
+        "Long CCC Call",
+    ]
 
 
 def test_option_payoff_long_and_short_signs():
