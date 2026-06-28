@@ -215,23 +215,24 @@ def payoff_profile_figure(profile: pd.DataFrame, selected_ticker: str) -> go.Fig
     return fig
 
 
-def payoff_profile_heatmap(profile: pd.DataFrame, selected_ticker: str) -> go.Figure:
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=[profile["expected_payoff"].to_list()],
-            x=profile["bin_label"],
-            y=["Avg payoff"],
-            colorscale="RdYlGn",
-            colorbar=dict(title="Avg payoff"),
-            text=[[dollars(value) for value in profile["expected_payoff"]]],
-            texttemplate="%{text}",
-        )
+def payoff_by_bin_figure(profile: pd.DataFrame, selected_ticker: str) -> go.Figure:
+    colors = ["#16a34a" if value >= 0 else "#dc2626" for value in profile["expected_payoff"]]
+    fig = go.Figure()
+    fig.add_bar(
+        x=profile["bin_label"],
+        y=profile["expected_payoff"],
+        marker_color=colors,
+        hovertemplate="Terminal cap bin=%{x}<br>Avg payoff=$%{y:,.2f}<extra></extra>",
+        name="Avg payoff",
     )
+    fig.add_hline(y=0, line_dash="dash", line_color="#6b7280")
     fig.update_layout(
-        title=f"{selected_ticker}: one-dimensional payoff heatmap",
+        title=f"{selected_ticker}: average payoff by terminal market-cap bin",
         xaxis_title=f"{selected_ticker} terminal market cap / current market cap",
-        yaxis_title="",
-        height=260,
+        yaxis_title="Average payoff in bin",
+        yaxis=dict(tickprefix="$"),
+        height=420,
+        showlegend=False,
     )
     return fig
 
@@ -264,9 +265,16 @@ with st.sidebar:
         step=1.0,
         help="Usually 100 for listed US equity options. This is not the number of contracts; use Quantity in the option-leg table for that.",
     )
-    default_option_quantity = st.number_input("Default contracts per valid option leg", min_value=0.0, value=1.0, step=1.0)
+    default_option_quantity = st.number_input(
+        "Default contracts per valid option leg",
+        min_value=0.0,
+        value=0.01,
+        step=0.01,
+        format="%.2f",
+        help="Analytical preview size. One listed option contract can dwarf a small Polymarket position, so the default is fractional for research scaling.",
+    )
     include_option_premiums = st.checkbox("Include theoretical option premiums", value=True)
-    st.caption("Quantity is the number of contracts. Multiplier is shares per contract, usually 100. Phase 5 will optimize quantities instead of using this preview size.")
+    st.caption("Quantity is the number of contracts. Multiplier is shares per contract, usually 100. One full listed option contract can be much larger than 100 Polymarket shares.")
 
     st.header("Correlation")
     correlation_method = st.selectbox("Correlation method", CORRELATION_METHODS, index=0)
@@ -397,7 +405,7 @@ with summary_tab:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Quantity": st.column_config.NumberColumn("Quantity", step=1.0),
+                "Quantity": st.column_config.NumberColumn("Quantity", step=0.01, format="%.2f"),
                 "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
                 "Spot": st.column_config.NumberColumn("Spot", format="$%.2f"),
                 "Theoretical premium": st.column_config.NumberColumn("Theoretical premium", format="$%.2f"),
@@ -463,7 +471,7 @@ with profile_tab:
     else:
         selected = st.session_state.phase4_selected_ticker
         st.plotly_chart(payoff_profile_figure(profile, selected), use_container_width=True)
-        st.plotly_chart(payoff_profile_heatmap(profile, selected), use_container_width=True)
+        st.plotly_chart(payoff_by_bin_figure(profile, selected), use_container_width=True)
         st.subheader("Probability-weighted payoff bins")
         st.write("Each row is a selected-ticker terminal price/cap zone. Scenario probability times average payoff gives that bin's contribution to total expected payoff. The contributions sum to the global expected payoff.")
         st.dataframe(display_profile(profile), use_container_width=True, hide_index=True)
@@ -522,6 +530,14 @@ Quantity versus multiplier:
 - Quantity is the number of option contracts for a leg.
 - The option contract multiplier is shares per contract, usually 100 for listed US equity options.
 - Increasing the multiplier is not the same as choosing more contracts; normally the multiplier should stay fixed and Quantity should change.
+- One full listed option contract can be much larger than a small Polymarket position, so fractional quantities are allowed here as analytical preview sizing.
+
+Premium versus payoff dispersion:
+
+- Option premium shifts expected payoff because it is paid or received up front.
+- Premium alone does not eliminate scenario dispersion.
+- Deep out-of-the-money options can still create large tail payoffs when a rare simulated scenario crosses the strike.
+- Short options can collect premium in most scenarios but create large losses in tail scenarios.
 
 How to read the profile:
 
