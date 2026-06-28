@@ -10,7 +10,7 @@ from boundaries import calculate_boundaries_for_all_tickers
 from correlations import ewma_correlation, fetch_adjusted_close, rolling_correlation, smooth_vol_adjusted_correlation
 from market_data import apply_market_caps, fetch_market_caps, fetch_spot_prices
 from model import default_company_inputs, run_probability_engine
-from option_construction import construct_candidate_option_structure, payoff_grid_for_leg
+from option_construction import attach_theoretical_premiums, construct_candidate_option_structure, payoff_grid_for_leg
 
 
 st.set_page_config(page_title="Phase 3", layout="wide")
@@ -52,6 +52,10 @@ def dollars_trillions(value: float) -> str:
     return "" if pd.isna(value) else f"${value / 1e12:,.2f}T"
 
 
+def years(days: int) -> float:
+    return max(int(days), 1) / 365.0
+
+
 def build_correlation_matrix(
     method: str,
     prices: pd.DataFrame,
@@ -85,6 +89,14 @@ def display_structure(table: pd.DataFrame) -> pd.DataFrame:
     display["Boundary market cap"] = display["Boundary market cap"].map(dollars_trillions)
     display["Boundary / current cap"] = display["Boundary / current cap"].map(pct)
     display["Spot"] = display["Spot"].map(dollars)
+    if "Model IV" in display.columns:
+        display["Model IV"] = display["Model IV"].map(pct)
+    if "Risk-free rate" in display.columns:
+        display["Risk-free rate"] = display["Risk-free rate"].map(pct)
+    if "Time to expiry" in display.columns:
+        display["Time to expiry"] = display["Time to expiry"].map(lambda value: "" if pd.isna(value) else f"{value:.2f}y")
+    if "Theoretical premium" in display.columns:
+        display["Theoretical premium"] = display["Theoretical premium"].map(dollars)
     return display
 
 
@@ -110,6 +122,16 @@ with st.sidebar:
     seed = st.number_input("Random seed", min_value=0, value=42, step=1)
     n_bins = st.slider("Phase 2 market-cap quantile bins", min_value=10, max_value=100, value=30, step=5)
     confidence_level = st.selectbox("Boundary confidence level", CONFIDENCE_LEVELS, index=3, format_func=lambda value: f"{value:.0%}")
+
+    st.header("Pricing")
+    risk_free_rate = st.number_input(
+        "Risk-free rate for theoretical premiums",
+        min_value=0.0,
+        max_value=0.20,
+        value=0.04,
+        step=0.005,
+        format="%.3f",
+    )
 
     st.header("Correlation")
     correlation_method = st.selectbox("Correlation method", CORRELATION_METHODS, index=0)
@@ -220,13 +242,22 @@ with construction_tab:
             competitor_ticker=competitor_ticker,
             confidence_level=float(confidence_level),
         )
-        st.session_state.phase3_structure = structure
+        iv_series = simulation_inputs.set_index("Ticker")["Implied volatility"]
+        valued_structure = attach_theoretical_premiums(
+            structure,
+            iv_series,
+            time_to_expiry=years(int(days_to_target)),
+            risk_free_rate=float(risk_free_rate),
+        )
+        st.session_state.phase3_structure = valued_structure
 
         st.subheader("Suggested option structure")
-        st.dataframe(display_structure(structure), use_container_width=True, hide_index=True)
+        st.dataframe(display_structure(valued_structure), use_container_width=True, hide_index=True)
 
         st.subheader("Interpretation")
-        st.write("These are natural option building blocks from Phase 2 probability boundaries. They are not optimized and should not be read as a final hedge package.")
+        st.write(
+            "These are natural option building blocks from Phase 2 probability boundaries. Theoretical premiums use simplified Black-Scholes with one fixed IV per ticker. They are not live option quotes, and this is still not an optimized hedge package."
+        )
 
         with st.expander("Phase 2 boundaries used"):
             boundary_display = boundaries.copy()
@@ -248,9 +279,10 @@ with payoff_tab:
     if structure is None or structure.empty:
         st.info("Construct option building blocks first.")
     else:
+        include_premium = st.toggle("Include theoretical premium", value=True)
         selected_instrument = st.selectbox("Instrument", structure["Instrument"].tolist())
         leg = structure[structure["Instrument"] == selected_instrument].iloc[0]
-        payoff = payoff_grid_for_leg(leg)
+        payoff = payoff_grid_for_leg(leg, premium=None if include_premium else 0.0)
         fig = px.line(
             payoff,
             x="Terminal price",
@@ -258,6 +290,7 @@ with payoff_tab:
             title=f"Standalone payoff: {selected_instrument}",
             labels={"Terminal price": "Underlying terminal price", "Payoff": "Option payoff before strategy combination"},
         )
+        fig.add_hline(y=0.0, line_dash="dot")
         fig.add_vline(x=float(leg["Strike"]), line_dash="dash", annotation_text="strike")
         fig.add_vline(x=float(leg["Spot"]), line_dash="dot", annotation_text="spot")
         st.plotly_chart(fig, use_container_width=True)
@@ -280,6 +313,15 @@ Market-cap boundaries are converted to stock-price strikes with:
 ```text
 strike = spot price * boundary market cap / current market cap
 ```
+
+Theoretical premiums are diagnostic only. They use simplified Black-Scholes assumptions:
+
+- current spot price from Yahoo Finance
+- strike from the probability boundary conversion above
+- target-date maturity from the sidebar
+- one manual ticker-level IV from the input table
+- one simplified risk-free rate from the sidebar
+- no dividends and no volatility smile/surface yet
 
 The output is a set of option building blocks. Phase 4 will combine these with Polymarket payoff surfaces. Phase 5 will optimize quantities and strike offsets.
         """
