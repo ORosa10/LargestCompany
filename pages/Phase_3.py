@@ -49,8 +49,16 @@ def pct(value: float) -> str:
     return "" if pd.isna(value) else f"{value:.2%}"
 
 
+def pct_or_not_reached(value: float) -> str:
+    return "Not reached" if pd.isna(value) else f"{value:.2%}"
+
+
 def dollars(value: float) -> str:
     return "" if pd.isna(value) else f"${value:,.2f}"
+
+
+def dollars_or_not_reached(value: float) -> str:
+    return "Not reached" if pd.isna(value) else f"${value / 1e12:,.2f}T"
 
 
 def dollars_trillions(value: float) -> str:
@@ -108,6 +116,29 @@ def display_structure(table: pd.DataFrame) -> pd.DataFrame:
     if "Theoretical premium" in display.columns:
         display["Theoretical premium"] = display["Theoretical premium"].map(dollars)
     return display
+
+
+def display_boundary_table(boundaries: pd.DataFrame) -> pd.DataFrame:
+    display = boundaries.copy()
+    display["Lower loss status"] = display["Lower loss boundary"].map(lambda value: "Reached" if pd.notna(value) else "Not reached")
+    display["Upper win status"] = display["Upper win boundary"].map(lambda value: "Reached" if pd.notna(value) else "Not reached")
+    display["Lower loss boundary"] = display["Lower loss boundary"].map(dollars_or_not_reached)
+    display["Upper win boundary"] = display["Upper win boundary"].map(dollars_or_not_reached)
+    display["Confidence level"] = display["Confidence level"].map(pct)
+    display["Lower loss boundary / current"] = display["Lower loss boundary / current"].map(pct_or_not_reached)
+    display["Upper win boundary / current"] = display["Upper win boundary / current"].map(pct_or_not_reached)
+    return display[
+        [
+            "Ticker",
+            "Confidence level",
+            "Lower loss boundary",
+            "Lower loss status",
+            "Upper win boundary",
+            "Upper win status",
+            "Lower loss boundary / current",
+            "Upper win boundary / current",
+        ]
+    ]
 
 
 def display_market_caps(market_caps: pd.DataFrame) -> pd.DataFrame:
@@ -310,12 +341,10 @@ with construction_tab:
         )
 
         with st.expander("Phase 2 boundaries used"):
-            boundary_display = boundaries.copy()
-            for column in ["Lower loss boundary", "Upper win boundary"]:
-                boundary_display[column] = boundary_display[column].map(dollars_trillions)
-            for column in ["Confidence level", "Lower loss boundary / current", "Upper win boundary / current"]:
-                boundary_display[column] = boundary_display[column].map(pct)
-            st.dataframe(boundary_display, use_container_width=True, hide_index=True)
+            st.caption(
+                "Not reached means the selected confidence level was not observed in the empirical Monte Carlo bins. For example, an empty 99% win boundary means no simulated market-cap bin reached P(#1) >= 99%."
+            )
+            st.dataframe(display_boundary_table(boundaries), use_container_width=True, hide_index=True)
 
         with st.expander("Yahoo spot prices used"):
             st.dataframe(display_spots(spots), use_container_width=True, hide_index=True)
@@ -372,6 +401,11 @@ Market-cap boundaries are converted to stock-price strikes with:
 ```text
 strike = spot price * boundary market cap / current market cap
 ```
+
+Boundary availability:
+
+- A boundary is only shown when the selected confidence level is reached in the empirical Monte Carlo bins.
+- Not reached does not mean an error. It means the simulated conditional probability curve never crossed that threshold at the selected bin resolution and confidence level.
 
 Theoretical premiums are diagnostic only. They use simplified Black-Scholes assumptions:
 
