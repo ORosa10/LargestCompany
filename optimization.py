@@ -108,18 +108,19 @@ def objective_score(
     payoffs: np.ndarray, *, objective: str, risk_aversion: float,
     tail_weight: float, minimum_expected_payoff: float,
 ) -> float:
-    metrics = payoff_metrics(payoffs)
-    mean = float(metrics["Expected payoff"])
-    sd = float(metrics["Payoff standard deviation"])
-    expected_shortfall = float(metrics["Expected shortfall 5%"])
+    """Score only the statistics required by the selected objective."""
+    values = np.asarray(payoffs, dtype=float)
+    mean = float(values.mean())
     if objective == "Maximum expected payoff":
         return mean
     if objective == "Risk-adjusted payoff":
-        return mean - float(risk_aversion) * sd
+        return mean - float(risk_aversion) * float(values.std(ddof=0))
     if objective == "Tail-aware payoff":
+        threshold = np.quantile(values, 0.05)
+        expected_shortfall = float(values[values <= threshold].mean())
         return mean + float(tail_weight) * expected_shortfall
     if objective == "Minimum SD with baseline EV floor":
-        return -sd if mean >= minimum_expected_payoff else -np.inf
+        return -float(values.std(ddof=0)) if mean >= minimum_expected_payoff else -np.inf
     raise ValueError(f"Unknown objective: {objective}")
 
 
