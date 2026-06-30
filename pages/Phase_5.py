@@ -1,35 +1,20 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from correlations import ewma_correlation, fetch_adjusted_close, rolling_correlation, smooth_vol_adjusted_correlation
-from market_data import apply_market_caps, fetch_market_caps, fetch_spot_prices
-from model import default_company_inputs, run_probability_engine
-from optimization import (
-    OBJECTIVES,
-    build_candidate_option_universe,
-    long_option_payoff_matrix,
-    optimize_option_portfolio,
-)
+from market_data import fetch_spot_prices
+from optimization import OBJECTIVES, build_candidate_option_universe, long_option_payoff_matrix, optimize_option_portfolio
 from payoff_surface import polymarket_payoff, selected_payoff_profile_bins, terminal_stock_prices, winner_from_ranks
 from phase4_ui import display_profile, dollars, payoff_by_bin_figure, payoff_profile_figure, pct
+from simulation_store import load_simulation_snapshot
 
 
 st.set_page_config(page_title="Phase 5", layout="wide")
 st.title("Phase 5")
-st.caption("Optimization Engine. Search option strikes, positions, and quantities against the Monte Carlo payoff distribution.")
-
-CORRELATION_METHODS = ["EWMA historical correlation", "Vol-adjusted smooth correlation", "Rolling historical correlation"]
-
-
-@st.cache_data(show_spinner=False, ttl=15 * 60)
-def load_market_caps(tickers: tuple[str, ...]) -> pd.DataFrame:
-    return fetch_market_caps(list(tickers))
+st.caption("Option Chain & Optimization Dashboard. Reuse completed Monte Carlo scenarios and explore option structures without rerunning the probability engine.")
 
 
 @st.cache_data(show_spinner=False, ttl=15 * 60)
@@ -37,26 +22,29 @@ def load_spots(tickers: tuple[str, ...]) -> pd.DataFrame:
     return fetch_spot_prices(list(tickers))
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)
-def load_prices(tickers: tuple[str, ...], period: str) -> pd.DataFrame:
-    return fetch_adjusted_close(list(tickers), period=period)
-
-
-def build_correlation(method: str, prices: pd.DataFrame, inputs: pd.DataFrame, ewma_lambda: float, lookback: int) -> pd.DataFrame:
-    if method == "EWMA historical correlation":
-        return ewma_correlation(prices, ewma_lambda)
-    if method == "Rolling historical correlation":
-        return rolling_correlation(prices, lookback)
-    ivs = inputs.set_index("Ticker")["Implied volatility"].astype(float)
-    corr, _ = smooth_vol_adjusted_correlation(
-        prices,
-        ivs,
-        vol_window=63,
-        low_quantile=0.40,
-        high_quantile=0.60,
-        min_observations=30,
-    )
-    return corr
+def available_snapshot() -> dict | None:
+    """Prefer the newest in-session phase result, then the persisted Phase 1 snapshot."""
+    if st.session_state.get("phase4_result") is not None and st.session_state.get("phase4_inputs_used") is not None:
+        metadata = {}
+        legs = st.session_state.get("phase4_option_legs")
+        if legs is not None and not legs.empty and "Time to expiry" in legs.columns:
+            metadata["days_to_target"] = int(round(float(legs["Time to expiry"].iloc[0]) * 365.0))
+        return {
+            "result": st.session_state.phase4_result,
+            "simulation_inputs": st.session_state.phase4_inputs_used,
+            "run_metadata": metadata,
+            "source": "Phase 4 session snapshot",
+            "spots": st.session_state.get("phase4_spots"),
+        }
+    if st.session_state.get("last_result") is not None and st.session_state.get("last_simulation_inputs") is not None:
+        return {
+            "result": st.session_state.last_result,
+            "simulation_inputs": st.session_state.last_simulation_inputs,
+            "run_metadata": st.session_state.get("last_run") or {},
+            "source": "Phase 1 session snapshot",
+            "spots": None,
+        }
+    return load_simulation_snapshot()
 
 
 def metrics_comparison(baseline: pd.Series, optimized: pd.Series) -> pd.DataFrame:
@@ -72,6 +60,16 @@ def metrics_comparison(baseline: pd.Series, optimized: pd.Series) -> pd.DataFram
             "Worst payoff": dollars(float(metrics["Worst payoff"])),
         })
     return pd.DataFrame(rows)
+
+
+def display_option_chain(chain: pd.DataFrame) -> pd.DataFrame:
+    display = chain.copy()
+    display["Strike"] = display["Strike"].map(dollars)
+    display["Strike / spot"] = display["Strike / spot"].map(pct)
+    display["Spot"] = display["Spot"].map(dollars)
+    display["Model IV"] = display["Model IV"].map(pct)
+    display["Theoretical premium"] = display["Theoretical premium"].map(dollars)
+    return display[["Ticker", "Option type", "Strike", "Strike / spot", "Spot", "Model IV", "Theoretical premium"]]
 
 
 def display_optimized_legs(legs: pd.DataFrame) -> pd.DataFrame:
@@ -99,19 +97,37 @@ def distribution_figure(baseline: np.ndarray, optimized: np.ndarray) -> go.Figur
     return fig
 
 
-with st.sidebar:
-    st.header("Phase 5 controls")
-    target_date = st.date_input("Target date / maturity", value=date.today() + timedelta(days=365), min_value=date.today() + timedelta(days=1))
-    days_to_target = max((target_date - date.today()).days, 1)
-    time_to_expiry = days_to_target / 365.0
-    st.caption(f"Horizon: {days_to_target} days ({time_to_expiry:.2f} years)")
-    simulations = st.number_input("Monte Carlo simulations", min_value=5_000, max_value=500_000, value=50_000, step=5_000)
-    seed = st.number_input("Random seed", min_value=0, value=42, step=1)
+snapshot = available_snapshot()
+if snapshot is None:
+    st.error("No Monte Carlo snapshot is available. Open Phase 1, run the baseline once, then return here. Future Streamlit restarts will restore that saved snapshot automatically.")
+    st.stop()
 
-    st.header("Candidate option library")
+result = snapshot["result"]
+simulation_inputs = snapshot["simulation_inputs"].copy()
+run_metadata = snapshot.get("run_metadata") or {}
+tickers = result.terminal_market_caps.columns.astype(str).tolist()
+days_to_target = int(run_metadata.get("days_to_target", 365))
+time_to_expiry = max(days_to_target, 1) / 365.0
+
+spots_table = snapshot.get("spots")
+if spots_table is None:
+    spots_table = load_spots(tuple(tickers))
+spot_series = spots_table.set_index("ticker")["spot_price"].astype(float)
+current_caps = simulation_inputs.set_index("Ticker")["Current market cap"].astype(float)
+terminal_prices = terminal_stock_prices(result.terminal_market_caps, current_caps, spot_series)
+winners = winner_from_ranks(result.ranks)
+
+st.success(
+    f"Using {snapshot.get('source', 'saved simulation')} | target {run_metadata.get('target_date', 'saved horizon')} | "
+    f"{days_to_target} days | {len(result.terminal_market_caps):,} stored paths | seed {run_metadata.get('seed', 'saved')}"
+)
+st.caption("Changing option settings below does not rerun Monte Carlo. It reprices the option library and evaluates payoffs on these stored paths.")
+
+with st.sidebar:
+    st.header("Option-chain monitor")
     strike_min_pct = st.number_input("Minimum strike (% of spot)", min_value=10.0, max_value=300.0, value=50.0, step=5.0)
     strike_max_pct = st.number_input("Maximum strike (% of spot)", min_value=10.0, max_value=500.0, value=200.0, step=5.0)
-    strike_step_pct = st.number_input("Strike grid step (percentage points)", min_value=1.0, max_value=50.0, value=10.0, step=1.0)
+    strike_step_pct = st.number_input("Strike step (percentage points)", min_value=1.0, max_value=50.0, value=10.0, step=1.0)
     include_calls = st.checkbox("Include calls", value=True)
     include_puts = st.checkbox("Include puts", value=True)
     allow_long = st.checkbox("Allow long positions", value=True)
@@ -120,199 +136,195 @@ with st.sidebar:
     include_premiums = st.checkbox("Include theoretical premiums", value=True)
     risk_free_rate = st.number_input("Risk-free rate", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
 
-    st.header("Optimization")
+    st.header("Portfolio search")
     objective = st.selectbox("Objective", OBJECTIVES, index=1)
     max_legs = st.number_input("Maximum active option legs", min_value=0, max_value=10, value=4, step=1)
     max_quantity_per_leg = st.number_input("Maximum absolute quantity per leg", min_value=0.0, value=0.25, step=0.025, format="%.3f")
     quantity_step = st.number_input("Quantity grid step", min_value=0.001, value=0.025, step=0.005, format="%.3f")
     max_total_quantity = st.number_input("Maximum total absolute quantity", min_value=0.0, value=0.50, step=0.05, format="%.2f")
-    optimization_scenarios = st.number_input("Scenarios used during search", min_value=2_000, max_value=100_000, value=20_000, step=2_000)
+    optimization_scenarios = st.number_input(
+        "Stored paths used during search",
+        min_value=2_000,
+        max_value=max(2_000, len(result.terminal_market_caps)),
+        value=min(20_000, len(result.terminal_market_caps)),
+        step=2_000,
+    )
     risk_aversion = st.number_input("SD penalty lambda", min_value=0.0, value=0.25, step=0.05)
     tail_weight = st.number_input("Expected-shortfall weight", min_value=0.0, value=0.10, step=0.05)
-
-    st.header("Correlation")
-    correlation_method = st.selectbox("Correlation method", CORRELATION_METHODS, index=0)
-    history_period = st.selectbox("Yahoo price history", ["1y", "3y", "5y", "10y"], index=2)
-    ewma_lambda = st.selectbox("EWMA lambda", [0.94, 0.97], index=1)
-    rolling_lookback = st.selectbox("Rolling lookback days", [63, 126, 252, 504, 756], index=2)
-
-    run_button = st.button("Run optimization", type="primary", use_container_width=True)
+    auto_optimize = st.checkbox("Auto-update optimizer", value=False, help="When enabled, changing any control immediately reruns only the option optimizer, never Monte Carlo.")
+    update_button = st.button("Update optimized portfolio", type="primary", use_container_width=True)
 
 
-results_tab, payoff_tab, library_tab, methodology_tab = st.tabs(["Optimization Results", "Payoff Distribution", "Candidate Library", "Methodology"])
+results_tab, chain_tab, payoff_tab, methodology_tab = st.tabs(
+    ["Portfolio Dashboard", "Option Chain Monitor", "Payoff Distribution", "Methodology"]
+)
 
 with results_tab:
-    st.subheader("Inputs")
-    if "phase5_company_inputs" not in st.session_state:
-        st.session_state.phase5_company_inputs = default_company_inputs()
+    left, right = st.columns(2)
+    with left:
+        selected_ticker = st.selectbox("Selected Polymarket ticker", tickers, index=0)
+        polymarket_side = st.segmented_control("Polymarket side", ["YES", "NO"], default="YES")
+        yes_price = float(simulation_inputs.set_index("Ticker").loc[selected_ticker, "Polymarket YES price"])
+        default_entry = yes_price if polymarket_side == "YES" else 1.0 - yes_price
+        entry_price = st.number_input(
+            f"{polymarket_side} entry price",
+            min_value=0.0,
+            max_value=1.0,
+            value=default_entry,
+            step=0.01,
+            key=f"phase5_entry_{selected_ticker}_{polymarket_side}",
+        )
+        polymarket_quantity = st.number_input("Polymarket shares", min_value=0.0, value=100.0, step=10.0)
+    with right:
+        option_underlyings = st.multiselect("Option underlyings", tickers, default=[selected_ticker])
+        pricing_iv_source = simulation_inputs.set_index("Ticker")["Implied volatility"].reindex(option_underlyings)
+        pricing_iv_table = pd.DataFrame({"Ticker": option_underlyings, "Option pricing IV": pricing_iv_source.to_numpy(dtype=float)})
+        edited_pricing_ivs = st.data_editor(
+            pricing_iv_table,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Ticker": st.column_config.TextColumn(disabled=True),
+                "Option pricing IV": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01, format="%.2f"),
+            },
+        )
+        st.caption("These IVs reprice the option chain only. They do not alter the stored Monte Carlo paths.")
 
-    stored = st.session_state.phase5_company_inputs.copy()
-    edited = st.data_editor(
-        stored[["Ticker", "Implied volatility", "Polymarket YES price"]],
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
-        column_config={
-            "Ticker": st.column_config.TextColumn(required=True),
-            "Implied volatility": st.column_config.NumberColumn("Manual IV", min_value=0.0001, max_value=5.0, step=0.01),
-            "Polymarket YES price": st.column_config.NumberColumn("Manual Polymarket YES", min_value=0.0, max_value=1.0, step=0.01),
-        },
-    )
-    fallback_caps = stored.set_index("Ticker")["Current market cap"].to_dict()
-    company_inputs = edited.copy()
-    company_inputs["Current market cap"] = company_inputs["Ticker"].map(fallback_caps).fillna(1_000_000_000_000.0)
-    company_inputs = company_inputs[["Ticker", "Current market cap", "Implied volatility", "Polymarket YES price"]]
-    st.session_state.phase5_company_inputs = company_inputs
+    validation_error = None
+    if not option_underlyings:
+        validation_error = "Select at least one option underlying."
+    elif not include_calls and not include_puts:
+        validation_error = "Enable calls, puts, or both."
+    elif not allow_long and not allow_short:
+        validation_error = "Enable long positions, short positions, or both."
+    elif strike_min_pct >= strike_max_pct:
+        validation_error = "Minimum strike must be below maximum strike."
 
-    tickers = company_inputs["Ticker"].astype(str).str.strip().tolist()
-    selected_ticker = st.selectbox("Selected Polymarket ticker", tickers, index=0)
-    option_underlyings = st.multiselect("Option underlyings", tickers, default=[selected_ticker])
-    polymarket_side = st.selectbox("Polymarket side", ["YES", "NO"], index=0)
-    yes_price = float(company_inputs.loc[company_inputs["Ticker"] == selected_ticker, "Polymarket YES price"].iloc[0])
-    default_entry = yes_price if polymarket_side == "YES" else 1.0 - yes_price
-    entry_price = st.number_input(
-        f"Polymarket {polymarket_side} entry price",
-        min_value=0.0,
-        max_value=1.0,
-        value=default_entry,
-        step=0.01,
-        key=f"phase5_entry_{selected_ticker}_{polymarket_side}",
-    )
-    polymarket_quantity = st.number_input("Polymarket shares", min_value=0.0, value=100.0, step=10.0)
+    candidates = None
+    payoff_matrix = None
+    base_payoff = polymarket_payoff(
+        winners,
+        selected_ticker=selected_ticker,
+        side=polymarket_side,
+        entry_price=float(entry_price),
+        quantity=float(polymarket_quantity),
+    ).to_numpy(dtype=float)
 
-    if run_button:
-        if not option_underlyings:
-            st.error("Select at least one option underlying.")
-        elif not include_calls and not include_puts:
-            st.error("Enable calls, puts, or both.")
-        elif not allow_long and not allow_short:
-            st.error("Enable long positions, short positions, or both.")
-        elif strike_min_pct >= strike_max_pct:
-            st.error("Minimum strike must be below maximum strike.")
-        else:
-            with st.spinner("Building candidate options and optimizing the scenario payoff..."):
-                try:
-                    market_caps = load_market_caps(tuple(tickers))
-                    spots = load_spots(tuple(tickers))
-                    simulation_inputs = apply_market_caps(company_inputs, market_caps)
-                    prices = load_prices(tuple(tickers), history_period)
-                    corr = build_correlation(correlation_method, prices, simulation_inputs, float(ewma_lambda), int(rolling_lookback))
-                    probability_result = run_probability_engine(
-                        simulation_inputs,
-                        corr,
-                        days_to_target=int(days_to_target),
-                        simulations=int(simulations),
-                        seed=int(seed),
-                    )
-                    current_caps = simulation_inputs.set_index("Ticker")["Current market cap"]
-                    spot_series = spots.set_index("ticker")["spot_price"]
-                    terminal_prices = terminal_stock_prices(probability_result.terminal_market_caps, current_caps, spot_series)
-                    winners = winner_from_ranks(probability_result.ranks)
-                    base_payoff = polymarket_payoff(
-                        winners,
-                        selected_ticker=selected_ticker,
-                        side=polymarket_side,
-                        entry_price=float(entry_price),
-                        quantity=float(polymarket_quantity),
-                    ).to_numpy(dtype=float)
+    if validation_error:
+        st.error(validation_error)
+    else:
+        strike_multipliers = np.arange(
+            strike_min_pct / 100.0,
+            strike_max_pct / 100.0 + strike_step_pct / 200.0,
+            strike_step_pct / 100.0,
+        )
+        iv_lookup = edited_pricing_ivs.set_index("Ticker")["Option pricing IV"].astype(float)
+        candidate_tables = []
+        payoff_matrices = []
+        for ticker in option_underlyings:
+            chain = build_candidate_option_universe(
+                ticker=ticker,
+                spot=float(spot_series.loc[ticker]),
+                volatility=float(iv_lookup.loc[ticker]),
+                time_to_expiry=float(time_to_expiry),
+                risk_free_rate=float(risk_free_rate),
+                strike_multipliers=strike_multipliers,
+                include_calls=bool(include_calls),
+                include_puts=bool(include_puts),
+            )
+            candidate_tables.append(chain)
+            payoff_matrices.append(
+                long_option_payoff_matrix(
+                    terminal_prices[ticker],
+                    chain,
+                    contract_multiplier=float(contract_multiplier),
+                    include_premiums=bool(include_premiums),
+                )
+            )
+        candidates = pd.concat(candidate_tables, ignore_index=True)
+        payoff_matrix = np.concatenate(payoff_matrices, axis=1)
+        st.session_state.phase5_live_candidates = candidates
 
-                    strike_multipliers = np.arange(
-                        strike_min_pct / 100.0,
-                        strike_max_pct / 100.0 + strike_step_pct / 200.0,
-                        strike_step_pct / 100.0,
-                    )
-                    candidate_tables = []
-                    payoff_matrices = []
-                    iv_series = simulation_inputs.set_index("Ticker")["Implied volatility"]
-                    for ticker in option_underlyings:
-                        candidate_table = build_candidate_option_universe(
-                            ticker=ticker,
-                            spot=float(spot_series.loc[ticker]),
-                            volatility=float(iv_series.loc[ticker]),
-                            time_to_expiry=float(time_to_expiry),
-                            risk_free_rate=float(risk_free_rate),
-                            strike_multipliers=strike_multipliers,
-                            include_calls=bool(include_calls),
-                            include_puts=bool(include_puts),
-                        )
-                        candidate_tables.append(candidate_table)
-                        payoff_matrices.append(
-                            long_option_payoff_matrix(
-                                terminal_prices[ticker],
-                                candidate_table,
-                                contract_multiplier=float(contract_multiplier),
-                                include_premiums=bool(include_premiums),
-                            )
-                        )
-                    candidates = pd.concat(candidate_tables, ignore_index=True)
-                    payoff_matrix = np.concatenate(payoff_matrices, axis=1)
-
-                    quantity_min = -float(max_quantity_per_leg) if allow_short else 0.0
-                    quantity_max = float(max_quantity_per_leg) if allow_long else 0.0
-                    optimized = optimize_option_portfolio(
-                        base_payoff,
-                        payoff_matrix,
-                        candidates,
-                        quantity_min=quantity_min,
-                        quantity_max=quantity_max,
-                        quantity_step=float(quantity_step),
-                        max_legs=int(max_legs),
-                        max_total_absolute_quantity=float(max_total_quantity),
-                        objective=objective,
-                        risk_aversion=float(risk_aversion),
-                        tail_weight=float(tail_weight),
-                        optimization_scenarios=int(optimization_scenarios),
-                        seed=int(seed),
-                    )
-
-                    scenario = pd.DataFrame({
-                        "Winner": winners,
-                        "Selected terminal market cap": probability_result.terminal_market_caps[selected_ticker],
-                        "Selected terminal stock price": terminal_prices[selected_ticker],
-                        "Polymarket payoff": base_payoff,
-                        "Option payoff": optimized.optimized_payoffs - base_payoff,
-                        "Total payoff": optimized.optimized_payoffs,
-                    })
-                    profile = selected_payoff_profile_bins(
-                        scenario,
-                        probability_result.terminal_market_caps,
-                        current_caps,
-                        selected_ticker=selected_ticker,
-                        bins=20,
-                    )
-
-                    st.session_state.phase5_optimization = optimized
-                    st.session_state.phase5_candidates = candidates
-                    st.session_state.phase5_base_payoff = base_payoff
-                    st.session_state.phase5_scenario = scenario
-                    st.session_state.phase5_profile = profile
-                    st.session_state.phase5_selected_ticker = selected_ticker
-                    st.session_state.phase5_error = None
-                except Exception as exc:
-                    st.session_state.phase5_error = str(exc)
+    should_optimize = (update_button or auto_optimize) and validation_error is None
+    if should_optimize:
+        with st.spinner("Optimizing option legs on stored Monte Carlo paths..."):
+            try:
+                quantity_min = -float(max_quantity_per_leg) if allow_short else 0.0
+                quantity_max = float(max_quantity_per_leg) if allow_long else 0.0
+                optimized = optimize_option_portfolio(
+                    base_payoff,
+                    payoff_matrix,
+                    candidates,
+                    quantity_min=quantity_min,
+                    quantity_max=quantity_max,
+                    quantity_step=float(quantity_step),
+                    max_legs=int(max_legs),
+                    max_total_absolute_quantity=float(max_total_quantity),
+                    objective=objective,
+                    risk_aversion=float(risk_aversion),
+                    tail_weight=float(tail_weight),
+                    optimization_scenarios=int(optimization_scenarios),
+                    seed=int(run_metadata.get("seed", 42)),
+                )
+                scenario = pd.DataFrame({
+                    "Winner": winners,
+                    "Selected terminal market cap": result.terminal_market_caps[selected_ticker],
+                    "Selected terminal stock price": terminal_prices[selected_ticker],
+                    "Polymarket payoff": base_payoff,
+                    "Option payoff": optimized.optimized_payoffs - base_payoff,
+                    "Total payoff": optimized.optimized_payoffs,
+                })
+                profile = selected_payoff_profile_bins(
+                    scenario,
+                    result.terminal_market_caps,
+                    current_caps,
+                    selected_ticker=selected_ticker,
+                    bins=20,
+                )
+                st.session_state.phase5_optimization = optimized
+                st.session_state.phase5_base_payoff = base_payoff
+                st.session_state.phase5_profile = profile
+                st.session_state.phase5_selected_ticker = selected_ticker
+                st.session_state.phase5_settings = {
+                    "objective": objective,
+                    "selected_ticker": selected_ticker,
+                    "side": polymarket_side,
+                    "underlyings": option_underlyings,
+                }
+                st.session_state.phase5_error = None
+            except Exception as exc:
+                st.session_state.phase5_error = str(exc)
 
     if st.session_state.get("phase5_error"):
         st.error(st.session_state.phase5_error)
 
     optimized = st.session_state.get("phase5_optimization")
     if optimized is None:
-        st.info("Run the optimization to generate a portfolio.")
+        st.info("The option chain is live. Click Update optimized portfolio once, or enable Auto-update optimizer. Monte Carlo will not rerun.")
     else:
-        st.subheader("Baseline versus optimized portfolio")
+        settings = st.session_state.get("phase5_settings") or {}
+        st.subheader("Current optimized portfolio")
+        st.caption(f"Result settings: {settings.get('selected_ticker')} {settings.get('side')} | {settings.get('objective')} | underlyings: {', '.join(settings.get('underlyings', []))}")
         st.dataframe(metrics_comparison(optimized.baseline_metrics, optimized.optimized_metrics), use_container_width=True, hide_index=True)
-        st.caption(f"Optimization iterations: {optimized.iterations}. Search objective score: {optimized.objective_score:,.4f}.")
-
-        st.subheader("Selected option structure")
         if optimized.selected_legs.empty:
-            st.info("The optimizer did not find an improving option leg under the selected objective and constraints.")
+            st.info("No improving option leg was found under these settings and constraints.")
         else:
             st.dataframe(display_optimized_legs(optimized.selected_legs), use_container_width=True, hide_index=True)
+
+with chain_tab:
+    chain = st.session_state.get("phase5_live_candidates")
+    if chain is None:
+        st.info("Select option underlyings on the Portfolio Dashboard.")
+    else:
+        st.subheader("Live theoretical option chain")
+        st.caption("Generated from the current spot, editable fixed IV, maturity, risk-free rate, and strike grid. This table updates without Monte Carlo.")
+        st.dataframe(display_option_chain(chain), use_container_width=True, hide_index=True)
 
 with payoff_tab:
     optimized = st.session_state.get("phase5_optimization")
     profile = st.session_state.get("phase5_profile")
     if optimized is None or profile is None:
-        st.info("Run the optimization first.")
+        st.info("Update the optimized portfolio first.")
     else:
         st.plotly_chart(distribution_figure(st.session_state.phase5_base_payoff, optimized.optimized_payoffs), use_container_width=True)
         selected = st.session_state.phase5_selected_ticker
@@ -320,38 +332,21 @@ with payoff_tab:
         st.plotly_chart(payoff_by_bin_figure(profile, selected), use_container_width=True)
         st.dataframe(display_profile(profile), use_container_width=True, hide_index=True)
 
-with library_tab:
-    candidates = st.session_state.get("phase5_candidates")
-    if candidates is None:
-        st.info("Run the optimization first.")
-    else:
-        display = candidates.copy()
-        display["Strike"] = display["Strike"].map(dollars)
-        display["Strike / spot"] = display["Strike / spot"].map(pct)
-        display["Theoretical premium"] = display["Theoretical premium"].map(dollars)
-        st.dataframe(display, use_container_width=True, hide_index=True)
-
 with methodology_tab:
-    st.subheader("Methodology")
+    st.subheader("Dashboard architecture")
     st.markdown(
         """
-Phase 5 searches a flexible vanilla-option library rather than assuming one fixed hedge template.
+Phase 5 does not run a new market-cap simulation. It consumes the latest available snapshot from Phase 4, Phase 1 session state, or the persisted Phase 1 snapshot on disk.
 
-1. Create call and put candidates for every selected underlying and strike-grid point.
-2. Price each option with the same simplified fixed-IV Black-Scholes model used in Phase 3.
-3. Calculate every candidate's payoff in the Phase 1 Monte Carlo scenarios.
-4. Use signed quantities: positive is long, negative is short.
-5. Greedily add the best improving strike/quantity pair until the maximum number of legs is reached.
-6. Refine quantities for the selected strikes with coordinate search.
-7. Recalculate metrics on the full scenario set.
+Fast loop:
 
-Available objectives:
+1. Reuse stored terminal market caps, ranks, and winners.
+2. Fetch/cache current spot prices.
+3. Generate a theoretical option chain from editable pricing IVs and the strike grid.
+4. Calculate every option's payoff on the stored paths.
+5. Search strikes and quantities under the selected objective.
+6. Update EV, SD, loss probability, expected shortfall, and the weighted payoff profile.
 
-- **Maximum expected payoff:** maximizes mean scenario payoff.
-- **Risk-adjusted payoff:** maximizes `EV - lambda * SD`.
-- **Tail-aware payoff:** maximizes `EV + weight * Expected Shortfall 5%`.
-- **Minimum SD with baseline EV floor:** minimizes SD without accepting expected payoff below the Polymarket-only baseline.
-
-The algorithm can construct long puts, naked short calls, collars, capped collars, or other multi-leg combinations. These are model outputs under simplified premiums and are not trade recommendations. Phase 6 will stress-test their robustness.
+Changing option IV affects theoretical premiums only. It intentionally does not rewrite the probability distribution. To change the underlying probability model, rerun Phase 1 and the saved snapshot will be replaced.
         """
     )
