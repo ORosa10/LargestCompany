@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import streamlit as st
+
+from simulation_store import save_simulation_snapshot
+
 
 APP_CORE_PATH = Path(__file__).with_name("app_core.py")
 source = APP_CORE_PATH.read_text(encoding="utf-8")
@@ -82,3 +86,11 @@ source = source.replace(
 )
 
 exec(compile(source, str(APP_CORE_PATH), "exec"), globals())
+
+if st.session_state.get("last_result") is not None and st.session_state.get("last_simulation_inputs") is not None:
+    save_simulation_snapshot(
+        result=st.session_state.last_result,
+        simulation_inputs=st.session_state.last_simulation_inputs,
+        run_metadata=st.session_state.get("last_run"),
+        source="Phase 1 baseline",
+    )
