@@ -1,4 +1,4 @@
-"""Interactive per-row option editor for Phase 5."""
+"""Interactive per-leg option editor for Phase 5."""
 
 from __future__ import annotations
 
@@ -51,114 +51,90 @@ def optimized_legs_to_interactive_rows(legs: pd.DataFrame, fallback_iv: float) -
     rows = []
     for position, (_, leg) in enumerate(legs.iterrows(), start=1):
         rows.append({
-            "id": position, "active": True, "ticker": str(leg["Ticker"]),
-            "option_type": str(leg["Option type"]), "position": str(leg["Position"]),
-            "quantity": float(leg["Quantity"]), "define_by": "Strike",
+            "id": position,
+            "active": True,
+            "ticker": str(leg["Ticker"]),
+            "option_type": str(leg["Option type"]),
+            "position": str(leg["Position"]),
+            "quantity": float(leg["Quantity"]),
+            "define_by": "Strike",
             "boundary_type": "Win boundary" if str(leg["Option type"]) == "Call" else "Loss boundary",
-            "confidence_pct": 80.0, "strike": float(leg["Strike"]),
+            "confidence_pct": 80.0,
+            "strike": float(leg["Strike"]),
             "pricing_iv": float(leg.get("Model IV", fallback_iv)),
         })
     return rows
 
 
-def _render_editor_table(
-    rows: list[dict],
+def render_interactive_leg_editor(
     *,
     tickers: list[str],
     curves: dict[str, pd.DataFrame],
     default_ticker: str,
+    default_iv: float,
     iv_by_ticker: pd.Series,
-    normalized_spot: float,
-) -> tuple[list[dict], int | None, bool]:
-    widths = [0.5, 1.1, 0.8, 0.85, 0.9, 1.1, 1.25, 1.05, 1.0, 0.85, 0.8]
-    headers = st.columns(widths)
-    labels = ["Use", "Ticker", "Type", "Side", "Quantity", "Define by", "Boundary", "Confidence %", "Strike", "IV", ""]
-    for column, label in zip(headers, labels):
-        column.caption(label)
-
-    rendered_rows = []
-    remove_id = None
-    for row in rows:
-        row_id = int(row["id"])
-        columns = st.columns(widths)
-        active = columns[0].checkbox("Use", value=bool(row["active"]), key=f"leg_active_{row_id}", label_visibility="collapsed")
-        ticker = columns[1].selectbox("Ticker", tickers, index=tickers.index(row["ticker"]) if row["ticker"] in tickers else 0, key=f"leg_ticker_{row_id}", label_visibility="collapsed")
-        option_type = columns[2].selectbox("Type", OPTION_TYPES, index=OPTION_TYPES.index(row["option_type"]), key=f"leg_type_{row_id}", label_visibility="collapsed")
-        position = columns[3].selectbox("Side", POSITIONS, index=POSITIONS.index(row["position"]), key=f"leg_position_{row_id}", label_visibility="collapsed")
-        quantity = columns[4].number_input("Quantity", min_value=0.0, value=float(row["quantity"]), step=0.025, format="%.3f", key=f"leg_quantity_{row_id}", label_visibility="collapsed")
-        define_by = columns[5].selectbox("Define by", DEFINE_MODES, index=DEFINE_MODES.index(row["define_by"]), key=f"leg_mode_{row_id}", label_visibility="collapsed")
-        boundary_type = columns[6].selectbox("Boundary", BOUNDARY_TYPES, index=BOUNDARY_TYPES.index(row["boundary_type"]), key=f"leg_boundary_{row_id}", label_visibility="collapsed")
-        curve = curves[ticker]
-
-        if define_by == "Boundary":
-            confidence_pct = columns[7].number_input("Confidence", min_value=0.1, max_value=99.9, value=float(row["confidence_pct"]), step=1.0, format="%.1f", key=f"leg_confidence_{row_id}", label_visibility="collapsed")
-            strike = strike_at_confidence(curve, confidence_pct / 100.0, boundary_type=boundary_type, normalized_spot=normalized_spot)
-            columns[8].number_input("Strike", value=float(strike), disabled=True, format="%.2f", key=f"leg_strike_locked_{row_id}", label_visibility="collapsed")
-        else:
-            strike = columns[8].number_input("Strike", min_value=0.01, value=float(row["strike"]), step=5.0, format="%.2f", key=f"leg_strike_{row_id}", label_visibility="collapsed")
-            confidence_pct = 100.0 * confidence_at_strike(curve, strike, boundary_type=boundary_type, normalized_spot=normalized_spot)
-            columns[7].number_input("Confidence", value=float(confidence_pct), disabled=True, format="%.1f", key=f"leg_confidence_locked_{row_id}", label_visibility="collapsed")
-
-        previous_ticker = str(row.get("ticker", ticker))
-        initial_iv = float(row.get("pricing_iv", iv_by_ticker.loc[ticker])) if ticker == previous_ticker else float(iv_by_ticker.loc[ticker])
-        pricing_iv = columns[9].number_input("IV", min_value=0.0001, max_value=5.0, value=initial_iv, step=0.01, format="%.2f", key=f"leg_iv_{row_id}", label_visibility="collapsed")
-        if columns[10].button("Remove", key=f"leg_remove_{row_id}"):
-            remove_id = row_id
-
-        rendered_rows.append({"id": row_id, "active": active, "ticker": ticker, "option_type": option_type, "position": position, "quantity": quantity, "define_by": define_by, "boundary_type": boundary_type, "confidence_pct": confidence_pct, "strike": strike, "pricing_iv": pricing_iv})
-
-    add_pressed = st.button("Add option leg")
-    return rendered_rows, remove_id, add_pressed
-
-
-def render_interactive_leg_editor(
-    *, tickers: list[str], curves: dict[str, pd.DataFrame], default_ticker: str,
-    default_iv: float, iv_by_ticker: pd.Series, normalized_spot: float = 100.0,
+    normalized_spot: float = 100.0,
     state_key: str = "phase5_interactive_rows",
 ) -> pd.DataFrame:
-    """Render one wide scrollable table with reciprocal field locking."""
+    """Render responsive full-width option-leg expanders with reciprocal locking."""
     if state_key not in st.session_state:
         st.session_state[state_key] = default_interactive_rows(default_ticker, default_iv)
     rows = st.session_state[state_key]
 
-    st.markdown(
-        """
-        <style>
-        .st-key-phase5_option_leg_scroll {
-            overflow-x: auto;
-            overflow-y: visible;
-            padding: 0.25rem 0 0.75rem 0;
-            scrollbar-width: auto;
-        }
-        .st-key-phase5_option_leg_scroll > div,
-        .st-key-phase5_option_leg_scroll [data-testid="stVerticalBlock"] {
-            min-width: 1750px;
-        }
-        .st-key-phase5_option_leg_scroll::-webkit-scrollbar { height: 12px; }
-        .st-key-phase5_option_leg_scroll::-webkit-scrollbar-thumb {
-            background: #9ca3af;
-            border-radius: 6px;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    rendered_rows = []
+    remove_id = None
+    for row_number, row in enumerate(rows, start=1):
+        row_id = int(row["id"])
+        summary = f"Leg {row_number}: {row['position']} {row['ticker']} {row['option_type']} | {row['define_by']}"
+        with st.expander(summary, expanded=True):
+            identity = st.columns([0.7, 1.4, 1.1, 1.1, 1.1])
+            active = identity[0].checkbox("Use leg", value=bool(row["active"]), key=f"leg_active_{row_id}")
+            ticker = identity[1].selectbox("Ticker", tickers, index=tickers.index(row["ticker"]) if row["ticker"] in tickers else 0, key=f"leg_ticker_{row_id}")
+            option_type = identity[2].selectbox("Option type", OPTION_TYPES, index=OPTION_TYPES.index(row["option_type"]), key=f"leg_type_{row_id}")
+            position = identity[3].selectbox("Position", POSITIONS, index=POSITIONS.index(row["position"]), key=f"leg_position_{row_id}")
+            quantity = identity[4].number_input("Quantity", min_value=0.0, value=float(row["quantity"]), step=0.025, format="%.3f", key=f"leg_quantity_{row_id}")
 
-    with st.container(key="phase5_option_leg_scroll"):
-        rendered_rows, remove_id, add_pressed = _render_editor_table(
-            rows,
-            tickers=tickers,
-            curves=curves,
-            default_ticker=default_ticker,
-            iv_by_ticker=iv_by_ticker,
-            normalized_spot=normalized_spot,
-        )
+            definition = st.columns([1.2, 1.4, 1.2, 1.2, 1.0])
+            define_by = definition[0].selectbox("Define strike by", DEFINE_MODES, index=DEFINE_MODES.index(row["define_by"]), key=f"leg_mode_{row_id}")
+            boundary_type = definition[1].selectbox("Boundary probability", BOUNDARY_TYPES, index=BOUNDARY_TYPES.index(row["boundary_type"]), key=f"leg_boundary_{row_id}")
+            curve = curves[ticker]
+
+            if define_by == "Boundary":
+                confidence_pct = definition[2].number_input("Confidence (%)", min_value=0.1, max_value=99.9, value=float(row["confidence_pct"]), step=1.0, format="%.1f", key=f"leg_confidence_{row_id}")
+                strike = strike_at_confidence(curve, confidence_pct / 100.0, boundary_type=boundary_type, normalized_spot=normalized_spot)
+                definition[3].number_input("Calculated strike", value=float(strike), disabled=True, format="%.2f", key=f"leg_strike_locked_{row_id}")
+            else:
+                strike = definition[3].number_input("Strike", min_value=0.01, value=float(row["strike"]), step=5.0, format="%.2f", key=f"leg_strike_{row_id}")
+                confidence_pct = 100.0 * confidence_at_strike(curve, strike, boundary_type=boundary_type, normalized_spot=normalized_spot)
+                definition[2].number_input("Calculated confidence (%)", value=float(confidence_pct), disabled=True, format="%.1f", key=f"leg_confidence_locked_{row_id}")
+
+            previous_ticker = str(row.get("ticker", ticker))
+            initial_iv = float(row.get("pricing_iv", iv_by_ticker.loc[ticker])) if ticker == previous_ticker else float(iv_by_ticker.loc[ticker])
+            pricing_iv = definition[4].number_input("Pricing IV", min_value=0.0001, max_value=5.0, value=initial_iv, step=0.01, format="%.2f", key=f"leg_iv_{row_id}")
+
+            remove_col, _ = st.columns([1, 6])
+            if remove_col.button("Remove leg", key=f"leg_remove_{row_id}"):
+                remove_id = row_id
+
+        rendered_rows.append({
+            "id": row_id,
+            "active": active,
+            "ticker": ticker,
+            "option_type": option_type,
+            "position": position,
+            "quantity": quantity,
+            "define_by": define_by,
+            "boundary_type": boundary_type,
+            "confidence_pct": confidence_pct,
+            "strike": strike,
+            "pricing_iv": pricing_iv,
+        })
 
     if remove_id is not None:
         st.session_state[state_key] = [row for row in rendered_rows if row["id"] != remove_id]
         st.rerun()
 
-    if add_pressed:
+    if st.button("Add option leg", type="secondary"):
         next_id = max([int(row["id"]) for row in rendered_rows], default=0) + 1
         rendered_rows.append({"id": next_id, "active": True, "ticker": default_ticker, "option_type": "Call", "position": "Long", "quantity": 0.10, "define_by": "Strike", "boundary_type": "Win boundary", "confidence_pct": 80.0, "strike": 100.0, "pricing_iv": float(iv_by_ticker.loc[default_ticker])})
         st.session_state[state_key] = rendered_rows
@@ -168,11 +144,17 @@ def render_interactive_leg_editor(
     editor_rows = []
     for row in rendered_rows:
         editor_rows.append({
-            "Active": row["active"], "Ticker": row["ticker"], "Option type": row["option_type"],
-            "Position": row["position"], "Quantity": row["quantity"],
-            "Strike source": "Manual strike", "Boundary confidence (%)": row["confidence_pct"],
-            "Manual strike": row["strike"], "Pricing IV": row["pricing_iv"],
-            "Definition mode": row["define_by"], "Boundary type": row["boundary_type"],
+            "Active": row["active"],
+            "Ticker": row["ticker"],
+            "Option type": row["option_type"],
+            "Position": row["position"],
+            "Quantity": row["quantity"],
+            "Strike source": "Manual strike",
+            "Boundary confidence (%)": row["confidence_pct"],
+            "Manual strike": row["strike"],
+            "Pricing IV": row["pricing_iv"],
+            "Definition mode": row["define_by"],
+            "Boundary type": row["boundary_type"],
             "Implied confidence (%)": row["confidence_pct"],
         })
     return pd.DataFrame(editor_rows)
