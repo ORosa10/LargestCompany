@@ -13,17 +13,18 @@ OPTION_TYPES = ["Call", "Put"]
 POSITIONS = ["Long", "Short"]
 BOUNDARY_CONFIDENCES = [80, 90, 95, 99]
 
-
 EDITOR_COLUMNS = [
-    "Active",
-    "Ticker",
-    "Option type",
-    "Position",
-    "Quantity",
-    "Strike source",
-    "Boundary confidence (%)",
-    "Manual strike",
-    "Pricing IV",
+    "Active", "Ticker", "Option type", "Position", "Quantity",
+    "Strike source", "Boundary confidence (%)", "Manual strike", "Pricing IV",
+]
+RESOLVED_COLUMNS = [
+    "Instrument", "Ticker", "Option type", "Position", "Quantity", "Strike",
+    "Strike / spot", "Strike source", "Boundary used", "Spot", "Model IV",
+    "Risk-free rate", "Time to expiry", "Theoretical premium",
+]
+ANALYTICS_COLUMNS = [
+    "Instrument", "Expected option payoff", "Option payoff SD", "P(option loss)",
+    "Expected shortfall 5%", "Worst option payoff", "Initial premium cashflow",
 ]
 
 
@@ -31,26 +32,14 @@ def default_manual_portfolio(ticker: str, implied_volatility: float) -> pd.DataF
     return pd.DataFrame(
         [
             {
-                "Active": True,
-                "Ticker": ticker,
-                "Option type": "Put",
-                "Position": "Long",
-                "Quantity": 0.10,
-                "Strike source": "Loss boundary",
-                "Boundary confidence (%)": 80,
-                "Manual strike": 80.0,
-                "Pricing IV": implied_volatility,
+                "Active": True, "Ticker": ticker, "Option type": "Put", "Position": "Long",
+                "Quantity": 0.10, "Strike source": "Loss boundary", "Boundary confidence (%)": 80,
+                "Manual strike": 80.0, "Pricing IV": implied_volatility,
             },
             {
-                "Active": True,
-                "Ticker": ticker,
-                "Option type": "Call",
-                "Position": "Short",
-                "Quantity": 0.10,
-                "Strike source": "Win boundary",
-                "Boundary confidence (%)": 80,
-                "Manual strike": 120.0,
-                "Pricing IV": implied_volatility,
+                "Active": True, "Ticker": ticker, "Option type": "Call", "Position": "Short",
+                "Quantity": 0.10, "Strike source": "Win boundary", "Boundary confidence (%)": 80,
+                "Manual strike": 120.0, "Pricing IV": implied_volatility,
             },
         ],
         columns=EDITOR_COLUMNS,
@@ -77,7 +66,6 @@ def resolve_manual_option_legs(
     normalized_spot: float = 100.0,
 ) -> pd.DataFrame:
     """Resolve manual/boundary strike instructions into priced option legs."""
-
     missing = set(EDITOR_COLUMNS) - set(editor_table.columns)
     if missing:
         raise ValueError(f"Manual portfolio is missing columns: {sorted(missing)}")
@@ -108,7 +96,6 @@ def resolve_manual_option_legs(
 
         if source == "Manual strike":
             strike = float(row["Manual strike"])
-            boundary_ratio = strike / normalized_spot
             boundary_label = "Manual"
         else:
             boundary_ratio = _boundary_ratio(boundaries, ticker, confidence, source)
@@ -125,25 +112,23 @@ def resolve_manual_option_legs(
             risk_free_rate=risk_free_rate,
             option_type=option_type,
         )
-        rows.append(
-            {
-                "Instrument": f"{position} {ticker} {option_type} {strike:.2f}",
-                "Ticker": ticker,
-                "Option type": option_type,
-                "Position": position,
-                "Quantity": quantity,
-                "Strike": strike,
-                "Strike / spot": strike / normalized_spot,
-                "Strike source": source,
-                "Boundary used": boundary_label,
-                "Spot": normalized_spot,
-                "Model IV": pricing_iv,
-                "Risk-free rate": risk_free_rate,
-                "Time to expiry": time_to_expiry,
-                "Theoretical premium": premium,
-            }
-        )
-    return pd.DataFrame(rows)
+        rows.append({
+            "Instrument": f"{position} {ticker} {option_type} {strike:.2f}",
+            "Ticker": ticker,
+            "Option type": option_type,
+            "Position": position,
+            "Quantity": quantity,
+            "Strike": strike,
+            "Strike / spot": strike / normalized_spot,
+            "Strike source": source,
+            "Boundary used": boundary_label,
+            "Spot": normalized_spot,
+            "Model IV": pricing_iv,
+            "Risk-free rate": risk_free_rate,
+            "Time to expiry": time_to_expiry,
+            "Theoretical premium": premium,
+        })
+    return pd.DataFrame(rows, columns=RESOLVED_COLUMNS)
 
 
 def manual_option_payoffs_and_analytics(
@@ -154,7 +139,6 @@ def manual_option_payoffs_and_analytics(
     include_premiums: bool = True,
 ) -> tuple[np.ndarray, pd.DataFrame]:
     """Calculate total option payoff and standalone analytics for every leg."""
-
     total = np.zeros(len(normalized_terminal_prices), dtype=float)
     analytics = []
     for _, leg in legs.iterrows():
@@ -176,15 +160,13 @@ def manual_option_payoffs_and_analytics(
         premium_cashflow = premium * quantity * float(contract_multiplier)
         if str(leg["Position"]) == "Long":
             premium_cashflow *= -1.0
-        analytics.append(
-            {
-                "Instrument": leg["Instrument"],
-                "Expected option payoff": payoff.mean(),
-                "Option payoff SD": payoff.std(ddof=0),
-                "P(option loss)": (payoff < 0).mean(),
-                "Expected shortfall 5%": tail.mean() if len(tail) else np.nan,
-                "Worst option payoff": payoff.min(),
-                "Initial premium cashflow": premium_cashflow,
-            }
-        )
-    return total, pd.DataFrame(analytics)
+        analytics.append({
+            "Instrument": leg["Instrument"],
+            "Expected option payoff": payoff.mean(),
+            "Option payoff SD": payoff.std(ddof=0),
+            "P(option loss)": (payoff < 0).mean(),
+            "Expected shortfall 5%": tail.mean() if len(tail) else np.nan,
+            "Worst option payoff": payoff.min(),
+            "Initial premium cashflow": premium_cashflow,
+        })
+    return total, pd.DataFrame(analytics, columns=ANALYTICS_COLUMNS)
