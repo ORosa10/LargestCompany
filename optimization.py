@@ -138,6 +138,29 @@ def selected_quantities_to_legs(candidates: pd.DataFrame, quantities: np.ndarray
     return selected.reset_index(drop=True)
 
 
+def _duplicates_active_family(
+    candidates: pd.DataFrame,
+    quantities: np.ndarray,
+    candidate_index: int,
+    candidate_quantity: float,
+) -> bool:
+    """Allow vertical spreads but not duplicate same-direction legs in one family."""
+    if abs(candidate_quantity) < 1e-12:
+        return False
+    candidate = candidates.iloc[candidate_index]
+    candidate_sign = np.sign(candidate_quantity)
+    active_indexes = np.flatnonzero(np.abs(quantities) > 1e-12)
+    for active_index in active_indexes:
+        active = candidates.iloc[active_index]
+        if (
+            str(active["Ticker"]) == str(candidate["Ticker"])
+            and str(active["Option type"]) == str(candidate["Option type"])
+            and np.sign(quantities[active_index]) == candidate_sign
+        ):
+            return True
+    return False
+
+
 def optimize_option_portfolio(
     polymarket_payoffs: np.ndarray | pd.Series,
     option_payoff_matrix: np.ndarray,
@@ -187,6 +210,8 @@ def optimize_option_portfolio(
                 if abs(quantity) < 1e-12:
                     continue
                 if np.abs(quantities).sum() + abs(quantity) > max_total_absolute_quantity + 1e-12:
+                    continue
+                if _duplicates_active_family(candidates, quantities, leg_index, quantity):
                     continue
                 trial = current + sample_matrix[:, leg_index] * quantity
                 score = objective_score(
