@@ -9,6 +9,7 @@ from boundaries import calculate_conditional_win_curve
 from interactive_portfolio import default_interactive_rows, optimized_legs_to_interactive_rows, render_interactive_leg_editor
 from manual_portfolio import manual_option_payoffs_and_analytics, resolve_manual_option_legs
 from optimization import OBJECTIVES, build_candidate_option_universe, long_option_payoff_matrix, optimize_option_portfolio, payoff_metrics
+from option_sensitivity import calculate_boundary_quantity_sensitivity, render_boundary_quantity_sensitivity
 from payoff_surface import polymarket_payoff, selected_payoff_profile_bins, terminal_stock_prices, winner_from_ranks
 from phase4_ui import display_profile, dollars, payoff_by_bin_figure, payoff_profile_figure, pct
 from simulation_store import load_simulation_snapshot
@@ -234,6 +235,23 @@ with builder_tab:
         st.dataframe(display_legs(resolved_legs), use_container_width=True, hide_index=True)
         st.subheader("Standalone leg analytics")
         st.dataframe(display_leg_analytics(leg_analytics), use_container_width=True, hide_index=True)
+
+        sensitivity = calculate_boundary_quantity_sensitivity(
+            base_payoff,
+            normalized_terminal_prices[selected_ticker].to_numpy(dtype=float),
+            curves[selected_ticker],
+            polymarket_side=polymarket_side,
+            volatility=default_iv,
+            time_to_expiry=time_to_expiry,
+            risk_free_rate=float(risk_free_rate),
+            include_premiums=bool(include_premiums),
+            contract_multiplier=float(contract_multiplier),
+            normalized_spot=NORMALIZED_SPOT,
+        )
+        render_boundary_quantity_sensitivity(
+            sensitivity,
+            polymarket_side=polymarket_side,
+        )
     except Exception as exc:
         st.error(str(exc))
 
