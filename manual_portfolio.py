@@ -9,6 +9,7 @@ from option_construction import black_scholes_price, option_payoff
 
 
 STRIKE_SOURCES = ["Manual strike", "Win boundary", "Loss boundary"]
+BOUNDARY_TYPES = ["Win boundary", "Loss boundary"]
 OPTION_TYPES = ["Call", "Put"]
 POSITIONS = ["Long", "Short"]
 BOUNDARY_CONFIDENCES = [80, 90, 95, 99]
@@ -16,6 +17,13 @@ BOUNDARY_CONFIDENCES = [80, 90, 95, 99]
 EDITOR_COLUMNS = [
     "Active", "Ticker", "Option type", "Position", "Quantity",
     "Strike source", "Boundary confidence (%)", "Manual strike", "Pricing IV",
+]
+BOUNDARY_EDITOR_COLUMNS = [
+    "Active", "Ticker", "Option type", "Position", "Quantity",
+    "Boundary type", "Boundary confidence (%)", "Pricing IV",
+]
+MANUAL_STRIKE_EDITOR_COLUMNS = [
+    "Active", "Ticker", "Option type", "Position", "Quantity", "Strike", "Pricing IV",
 ]
 RESOLVED_COLUMNS = [
     "Instrument", "Ticker", "Option type", "Position", "Quantity", "Strike",
@@ -28,22 +36,62 @@ ANALYTICS_COLUMNS = [
 ]
 
 
-def default_manual_portfolio(ticker: str, implied_volatility: float) -> pd.DataFrame:
+def default_boundary_portfolio(ticker: str, implied_volatility: float) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "Active": True, "Ticker": ticker, "Option type": "Put", "Position": "Long",
-                "Quantity": 0.10, "Strike source": "Loss boundary", "Boundary confidence (%)": 80,
-                "Manual strike": 80.0, "Pricing IV": implied_volatility,
+                "Quantity": 0.10, "Boundary type": "Loss boundary",
+                "Boundary confidence (%)": 80, "Pricing IV": implied_volatility,
             },
             {
                 "Active": True, "Ticker": ticker, "Option type": "Call", "Position": "Short",
-                "Quantity": 0.10, "Strike source": "Win boundary", "Boundary confidence (%)": 80,
-                "Manual strike": 120.0, "Pricing IV": implied_volatility,
+                "Quantity": 0.10, "Boundary type": "Win boundary",
+                "Boundary confidence (%)": 80, "Pricing IV": implied_volatility,
             },
         ],
-        columns=EDITOR_COLUMNS,
+        columns=BOUNDARY_EDITOR_COLUMNS,
     )
+
+
+def empty_manual_strike_portfolio() -> pd.DataFrame:
+    return pd.DataFrame(columns=MANUAL_STRIKE_EDITOR_COLUMNS)
+
+
+def default_manual_portfolio(ticker: str, implied_volatility: float) -> pd.DataFrame:
+    """Backward-compatible unified default table."""
+    return combine_portfolio_inputs(default_boundary_portfolio(ticker, implied_volatility), empty_manual_strike_portfolio())
+
+
+def combine_portfolio_inputs(boundary_table: pd.DataFrame, manual_strike_table: pd.DataFrame) -> pd.DataFrame:
+    """Combine mutually exclusive boundary and manual-strike inputs."""
+    boundary_rows = pd.DataFrame(columns=EDITOR_COLUMNS)
+    if not boundary_table.empty:
+        boundary_rows = pd.DataFrame({
+            "Active": boundary_table["Active"],
+            "Ticker": boundary_table["Ticker"],
+            "Option type": boundary_table["Option type"],
+            "Position": boundary_table["Position"],
+            "Quantity": boundary_table["Quantity"],
+            "Strike source": boundary_table["Boundary type"],
+            "Boundary confidence (%)": boundary_table["Boundary confidence (%)"],
+            "Manual strike": np.nan,
+            "Pricing IV": boundary_table["Pricing IV"],
+        })
+    manual_rows = pd.DataFrame(columns=EDITOR_COLUMNS)
+    if not manual_strike_table.empty:
+        manual_rows = pd.DataFrame({
+            "Active": manual_strike_table["Active"],
+            "Ticker": manual_strike_table["Ticker"],
+            "Option type": manual_strike_table["Option type"],
+            "Position": manual_strike_table["Position"],
+            "Quantity": manual_strike_table["Quantity"],
+            "Strike source": "Manual strike",
+            "Boundary confidence (%)": 80,
+            "Manual strike": manual_strike_table["Strike"],
+            "Pricing IV": manual_strike_table["Pricing IV"],
+        })
+    return pd.concat([boundary_rows, manual_rows], ignore_index=True)[EDITOR_COLUMNS]
 
 
 def _boundary_ratio(boundaries: pd.DataFrame, ticker: str, confidence: float, source: str) -> float:
