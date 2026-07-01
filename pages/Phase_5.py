@@ -5,18 +5,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from boundaries import calculate_boundaries_for_all_tickers
-from manual_portfolio import (
-    BOUNDARY_CONFIDENCES,
-    BOUNDARY_TYPES,
-    OPTION_TYPES,
-    POSITIONS,
-    combine_portfolio_inputs,
-    default_boundary_portfolio,
-    empty_manual_strike_portfolio,
-    manual_option_payoffs_and_analytics,
-    resolve_manual_option_legs,
-)
+from boundaries import calculate_conditional_win_curve
+from interactive_portfolio import default_interactive_rows, optimized_legs_to_interactive_rows, render_interactive_leg_editor
+from manual_portfolio import manual_option_payoffs_and_analytics, resolve_manual_option_legs
 from optimization import OBJECTIVES, build_candidate_option_universe, long_option_payoff_matrix, optimize_option_portfolio, payoff_metrics
 from payoff_surface import polymarket_payoff, selected_payoff_profile_bins, terminal_stock_prices, winner_from_ranks
 from phase4_ui import display_profile, dollars, payoff_by_bin_figure, payoff_profile_figure, pct
@@ -27,7 +18,7 @@ NORMALIZED_SPOT = 100.0
 
 st.set_page_config(page_title="Phase 5", layout="wide")
 st.title("Phase 5")
-st.caption("Interactive Option Portfolio Dashboard. Reuse stored Monte Carlo paths, edit option legs directly, and monitor EV, SD, and tail risk without rerunning simulations.")
+st.caption("Interactive Option Portfolio Dashboard. Reuse stored Monte Carlo paths and edit strike or conditional boundary in one reciprocal portfolio table.")
 
 
 def available_snapshot() -> dict | None:
@@ -92,23 +83,6 @@ def distribution_figure(baseline: np.ndarray, portfolio: np.ndarray, name: str) 
     return fig
 
 
-def optimized_legs_to_manual_strikes(legs: pd.DataFrame, fallback_iv: float) -> pd.DataFrame:
-    if legs is None or legs.empty:
-        return empty_manual_strike_portfolio()
-    rows = []
-    for _, leg in legs.iterrows():
-        rows.append({
-            "Active": True,
-            "Ticker": str(leg["Ticker"]),
-            "Option type": str(leg["Option type"]),
-            "Position": str(leg["Position"]),
-            "Quantity": float(leg["Quantity"]),
-            "Strike": float(leg["Strike"]),
-            "Pricing IV": float(leg.get("Model IV", fallback_iv)),
-        })
-    return pd.DataFrame(rows)
-
-
 def make_profile(total_payoff: np.ndarray, option_payoff: np.ndarray, base_payoff: np.ndarray, selected_ticker: str) -> pd.DataFrame:
     scenario = pd.DataFrame({
         "Winner": winners,
@@ -121,15 +95,15 @@ def make_profile(total_payoff: np.ndarray, option_payoff: np.ndarray, base_payof
     return selected_payoff_profile_bins(scenario, result.terminal_market_caps, current_caps, selected_ticker=selected_ticker, bins=20)
 
 
-def clear_builder_widget_state() -> None:
-    for key in ["phase5_boundary_editor_widget", "phase5_manual_strike_editor_widget"]:
-        if key in st.session_state:
+def clear_interactive_widget_state() -> None:
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("leg_"):
             del st.session_state[key]
 
 
 snapshot = available_snapshot()
 if snapshot is None:
-    st.error("No Monte Carlo snapshot is available. Run Phase 1 once, then return here. The saved snapshot will survive future Streamlit restarts.")
+    st.error("No Monte Carlo snapshot is available. Run Phase 1 once, then return here.")
     st.stop()
 
 result = snapshot["result"]
@@ -145,23 +119,26 @@ winners = winner_from_ranks(result.ranks)
 input_by_ticker = simulation_inputs.set_index("Ticker")
 
 snapshot_key = (snapshot.get("source"), run_metadata.get("target_date"), run_metadata.get("seed"), len(result.terminal_market_caps), tuple(tickers))
-if st.session_state.get("phase5_boundary_snapshot_key") != snapshot_key:
-    st.session_state.phase5_boundaries = calculate_boundaries_for_all_tickers(
-        result.terminal_market_caps,
-        current_caps,
-        [value / 100.0 for value in BOUNDARY_CONFIDENCES],
-        ranks=result.ranks,
-        n_bins=30,
-    )
-    st.session_state.phase5_boundary_snapshot_key = snapshot_key
-boundaries = st.session_state.phase5_boundaries
+if st.session_state.get("phase5_curve_snapshot_key") != snapshot_key:
+    st.session_state.phase5_conditional_curves = {
+        ticker: calculate_conditional_win_curve(
+            result.terminal_market_caps,
+            ticker,
+            ranks=result.ranks,
+            current_market_cap=float(current_caps.loc[ticker]),
+            n_bins=40,
+        )
+        for ticker in tickers
+    }
+    st.session_state.phase5_curve_snapshot_key = snapshot_key
+curves = st.session_state.phase5_conditional_curves
 
-st.success(f"Using {snapshot.get('source', 'saved simulation')} | target {run_metadata.get('target_date', 'saved horizon')} | {days_to_target} days | {len(result.terminal_market_caps):,} stored paths | normalized option spot = 100")
-st.caption("A strike of 80 means 80% of today's price. Option edits reuse the stored paths and never rerun Monte Carlo.")
+st.success(f"Using {snapshot.get('source', 'saved simulation')} | target {run_metadata.get('target_date', 'saved horizon')} | {days_to_target} days | {len(result.terminal_market_caps):,} stored paths | normalized spot = 100")
+st.caption("A strike of 80 means 80% of today's price. Editing the option table never reruns Monte Carlo.")
 
 with st.sidebar:
     st.header("Common payoff settings")
-    contract_multiplier = st.number_input("Payoff multiplier", min_value=0.01, value=1.0, step=0.25, help="Kept at 1 while option prices are normalized to 100.")
+    contract_multiplier = st.number_input("Payoff multiplier", min_value=0.01, value=1.0, step=0.25, help="Kept at 1 while prices are normalized to 100.")
     include_premiums = st.checkbox("Include theoretical premiums", value=True)
     risk_free_rate = st.number_input("Risk-free rate", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
 
@@ -201,70 +178,48 @@ builder_tab, optimizer_tab, chain_tab, payoff_tab, methodology_tab = st.tabs(["M
 
 with builder_tab:
     st.subheader("Interactive option portfolio")
-    st.write("Boundary confidence and manual strike are alternative strike definitions, so they live in separate tables. Both tables combine into one portfolio.")
+    st.write("For each row choose whether you define the leg by boundary confidence or by strike. The other field locks and is calculated automatically.")
     default_iv = float(input_by_ticker.loc[selected_ticker, "Implied volatility"])
-    if "phase5_boundary_editor" not in st.session_state:
-        st.session_state.phase5_boundary_editor = default_boundary_portfolio(selected_ticker, default_iv)
-    if "phase5_manual_strike_editor" not in st.session_state:
-        st.session_state.phase5_manual_strike_editor = empty_manual_strike_portfolio()
 
     action_left, action_right, _ = st.columns([1, 1, 3])
     if action_left.button("Reset portfolio"):
-        st.session_state.phase5_boundary_editor = default_boundary_portfolio(selected_ticker, default_iv)
-        st.session_state.phase5_manual_strike_editor = empty_manual_strike_portfolio()
-        clear_builder_widget_state()
+        st.session_state.phase5_interactive_rows = default_interactive_rows(selected_ticker, default_iv)
+        clear_interactive_widget_state()
         st.rerun()
     optimized_for_load = st.session_state.get("phase5_optimization")
     if action_right.button("Load optimized portfolio", disabled=optimized_for_load is None):
-        st.session_state.phase5_boundary_editor = default_boundary_portfolio(selected_ticker, default_iv).iloc[0:0]
-        st.session_state.phase5_manual_strike_editor = optimized_legs_to_manual_strikes(optimized_for_load.selected_legs, default_iv)
-        clear_builder_widget_state()
+        st.session_state.phase5_interactive_rows = optimized_legs_to_interactive_rows(optimized_for_load.selected_legs, default_iv)
+        clear_interactive_widget_state()
         st.rerun()
 
-    boundary_input_tab, manual_input_tab = st.tabs(["Boundary-based legs", "Manual-strike legs"])
-    with boundary_input_tab:
-        st.caption("Choose a win/loss boundary and confidence. The normalized strike is derived automatically.")
-        edited_boundaries = st.data_editor(
-            st.session_state.phase5_boundary_editor,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Active": st.column_config.CheckboxColumn(),
-                "Ticker": st.column_config.SelectboxColumn(options=tickers, required=True),
-                "Option type": st.column_config.SelectboxColumn(options=OPTION_TYPES, required=True),
-                "Position": st.column_config.SelectboxColumn(options=POSITIONS, required=True),
-                "Quantity": st.column_config.NumberColumn(min_value=0.0, step=0.025, format="%.3f"),
-                "Boundary type": st.column_config.SelectboxColumn(options=BOUNDARY_TYPES, required=True),
-                "Boundary confidence (%)": st.column_config.SelectboxColumn(options=BOUNDARY_CONFIDENCES, required=True),
-                "Pricing IV": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01, format="%.2f"),
-            },
-            key="phase5_boundary_editor_widget",
-        )
-    with manual_input_tab:
-        st.caption("Enter the normalized strike directly. Spot today is always 100.")
-        edited_manual_strikes = st.data_editor(
-            st.session_state.phase5_manual_strike_editor,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Active": st.column_config.CheckboxColumn(),
-                "Ticker": st.column_config.SelectboxColumn(options=tickers, required=True),
-                "Option type": st.column_config.SelectboxColumn(options=OPTION_TYPES, required=True),
-                "Position": st.column_config.SelectboxColumn(options=POSITIONS, required=True),
-                "Quantity": st.column_config.NumberColumn(min_value=0.0, step=0.025, format="%.3f"),
-                "Strike": st.column_config.NumberColumn(min_value=0.01, step=5.0, format="%.2f"),
-                "Pricing IV": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01, format="%.2f"),
-            },
-            key="phase5_manual_strike_editor_widget",
-        )
-    st.session_state.phase5_boundary_editor = edited_boundaries
-    st.session_state.phase5_manual_strike_editor = edited_manual_strikes
-    combined_inputs = combine_portfolio_inputs(edited_boundaries, edited_manual_strikes)
+    interactive_inputs = render_interactive_leg_editor(
+        tickers=tickers,
+        curves=curves,
+        default_ticker=selected_ticker,
+        default_iv=default_iv,
+        iv_by_ticker=input_by_ticker["Implied volatility"].astype(float),
+        normalized_spot=NORMALIZED_SPOT,
+    )
 
     try:
-        resolved_legs = resolve_manual_option_legs(combined_inputs, boundaries, time_to_expiry=time_to_expiry, risk_free_rate=float(risk_free_rate), normalized_spot=NORMALIZED_SPOT)
+        resolved_legs = resolve_manual_option_legs(
+            interactive_inputs,
+            pd.DataFrame(),
+            time_to_expiry=time_to_expiry,
+            risk_free_rate=float(risk_free_rate),
+            normalized_spot=NORMALIZED_SPOT,
+        )
+        active_metadata = interactive_inputs[interactive_inputs["Active"]].reset_index(drop=True)
+        if not resolved_legs.empty:
+            resolved_legs["Strike source"] = active_metadata["Definition mode"].to_numpy()
+            resolved_legs["Boundary used"] = active_metadata.apply(
+                lambda row: (
+                    f"{row['Implied confidence (%)']:.1f}% {row['Boundary type']}"
+                    if row["Definition mode"] == "Strike"
+                    else f"{row['Boundary confidence (%)']:.1f}% {row['Boundary type']}"
+                ),
+                axis=1,
+            ).to_numpy()
         option_payoff, leg_analytics = manual_option_payoffs_and_analytics(resolved_legs, normalized_terminal_prices, contract_multiplier=float(contract_multiplier), include_premiums=bool(include_premiums))
         total_payoff = base_payoff + option_payoff
         manual_metrics = payoff_metrics(total_payoff)
@@ -275,7 +230,7 @@ with builder_tab:
 
         st.subheader("Polymarket-only versus manual portfolio")
         st.dataframe(metrics_comparison(baseline_metrics, manual_metrics, "Manual portfolio"), use_container_width=True, hide_index=True)
-        st.subheader("Resolved combined portfolio")
+        st.subheader("Resolved portfolio")
         st.dataframe(display_legs(resolved_legs), use_container_width=True, hide_index=True)
         st.subheader("Standalone leg analytics")
         st.dataframe(display_leg_analytics(leg_analytics), use_container_width=True, hide_index=True)
@@ -288,7 +243,6 @@ with optimizer_tab:
     pricing_iv_source = input_by_ticker["Implied volatility"].reindex(option_underlyings)
     pricing_iv_table = pd.DataFrame({"Ticker": option_underlyings, "Option pricing IV": pricing_iv_source.to_numpy(dtype=float)})
     edited_pricing_ivs = st.data_editor(pricing_iv_table, use_container_width=True, hide_index=True, column_config={"Ticker": st.column_config.TextColumn(disabled=True), "Option pricing IV": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01, format="%.2f")})
-    st.caption("Pricing IV changes premiums only. Stored Monte Carlo paths remain unchanged.")
 
     validation_error = None
     if not option_underlyings:
@@ -338,10 +292,9 @@ with optimizer_tab:
     else:
         st.dataframe(metrics_comparison(optimized.baseline_metrics, optimized.optimized_metrics, "Optimized portfolio"), use_container_width=True, hide_index=True)
         st.dataframe(display_legs(optimized.selected_legs), use_container_width=True, hide_index=True)
-        if st.button("Load this result into Manual-strike legs"):
-            st.session_state.phase5_boundary_editor = default_boundary_portfolio(selected_ticker, default_iv).iloc[0:0]
-            st.session_state.phase5_manual_strike_editor = optimized_legs_to_manual_strikes(optimized.selected_legs, default_iv)
-            clear_builder_widget_state()
+        if st.button("Load this result into Manual Portfolio"):
+            st.session_state.phase5_interactive_rows = optimized_legs_to_interactive_rows(optimized.selected_legs, default_iv)
+            clear_interactive_widget_state()
             st.rerun()
 
 with chain_tab:
@@ -350,10 +303,9 @@ with chain_tab:
         st.info("Open the Optimizer tab and select option underlyings.")
     else:
         st.subheader("Normalized theoretical option chain")
-        st.caption("Spot is fixed at 100. Strikes therefore equal percentages of today's price.")
         filter_left, filter_right = st.columns(2)
         chain_tickers = filter_left.multiselect("Filter tickers", sorted(chain["Ticker"].unique()), default=sorted(chain["Ticker"].unique()))
-        chain_types = filter_right.multiselect("Filter option types", OPTION_TYPES, default=OPTION_TYPES)
+        chain_types = filter_right.multiselect("Filter option types", ["Call", "Put"], default=["Call", "Put"])
         st.dataframe(display_option_chain(chain[chain["Ticker"].isin(chain_tickers) & chain["Option type"].isin(chain_types)]), use_container_width=True, hide_index=True)
 
 with payoff_tab:
@@ -377,16 +329,16 @@ with payoff_tab:
         st.dataframe(display_profile(profile), use_container_width=True, hide_index=True)
 
 with methodology_tab:
-    st.subheader("How Phase 5 works")
+    st.subheader("Reciprocal strike-boundary editor")
     st.markdown(
         """
-Phase 5 reuses stored Phase 1/4 scenarios and normalizes every current stock price to `100`.
+Each option row has one `Define by` control:
 
-### Two mutually exclusive strike inputs
+- **Boundary:** confidence is editable; strike is locked and calculated from the Phase 2 conditional curve.
+- **Strike:** strike is editable; confidence is locked and interpolated from the same conditional curve.
 
-- **Boundary-based legs:** select win/loss boundary and 80/90/95/99% confidence; strike is calculated automatically.
-- **Manual-strike legs:** enter the normalized strike directly.
+`Win boundary` displays conditional P(#1). `Loss boundary` displays conditional P(not #1). The empirical curve is made monotone before interpolation to avoid local Monte Carlo bin noise creating contradictory reciprocal values.
 
-The two tables are combined into one portfolio. Every edit immediately updates portfolio EV, SD, loss probability, expected shortfall, and standalone option analytics. The optimizer remains a separate proposal engine, and its result can be loaded into the manual-strike table for further editing.
+All prices remain normalized to 100 and all option edits reuse stored Phase 1/4 scenarios.
         """
     )
