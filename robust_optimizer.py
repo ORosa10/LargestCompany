@@ -1,4 +1,4 @@
-"""Robust payoff-floor optimizer and diagnostics for Phase 5."""
+"""Transparent payoff-floor optimizer and diagnostics for Phase 5."""
 
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ class RobustOptimizationResult:
     selected_legs: pd.DataFrame
     payoffs: np.ndarray
     profile: pd.DataFrame
-    score: float
+    worst_bin_p5: float
+    profile_flatness: float
+    expected_payoff: float
     iterations: int
 
 
@@ -40,8 +42,7 @@ def price_bin_profile(
     frame["Price bin"] = pd.cut(frame["Terminal price"], bins=edges, include_lowest=True)
     rows = []
     total = len(frame)
-    grouped = frame.groupby("Price bin", observed=True)
-    for interval, group in grouped:
+    for interval, group in frame.groupby("Price bin", observed=True):
         bin_values = group["Payoff"].to_numpy(dtype=float)
         lower = float(group["Terminal price"].min()) if not np.isfinite(interval.left) else float(interval.left)
         upper = float(group["Terminal price"].max()) if not np.isfinite(interval.right) else float(interval.right)
@@ -88,21 +89,40 @@ def robust_metrics(payoffs: np.ndarray) -> pd.Series:
     )
 
 
-def _profile_flatness(terminal_prices: np.ndarray, payoffs: np.ndarray, bins: int) -> float:
+def _equal_count_bin_statistics(
+    terminal_prices: np.ndarray,
+    payoffs: np.ndarray,
+    bins: int,
+) -> tuple[float, float]:
+    """Return worst conditional P5 and SD of conditional means."""
     order = np.argsort(terminal_prices)
-    chunks = np.array_split(order, bins)
-    means = np.array([payoffs[index].mean() for index in chunks if len(index)], dtype=float)
-    return float(means.std(ddof=0))
+    chunks = [index for index in np.array_split(order, bins) if len(index)]
+    conditional_p5 = np.array([np.quantile(payoffs[index], 0.05) for index in chunks])
+    conditional_means = np.array([payoffs[index].mean() for index in chunks])
+    return float(conditional_p5.min()), float(conditional_means.std(ddof=0))
 
 
-def _score(terminal_prices: np.ndarray, payoffs: np.ndarray, *, minimum_ev: float, flatness_penalty: float, bins: int) -> float:
-    mean = float(payoffs.mean())
-    if mean < minimum_ev:
-        return -np.inf
-    payoff_p1 = float(np.quantile(payoffs, 0.01))
-    payoff_p5 = float(np.quantile(payoffs, 0.05))
-    flatness = _profile_flatness(terminal_prices, payoffs, bins)
-    return 0.65 * payoff_p5 + 0.35 * payoff_p1 - flatness_penalty * flatness
+def _objective_components(
+    terminal_prices: np.ndarray,
+    payoffs: np.ndarray,
+    *,
+    minimum_ev: float,
+    bins: int,
+) -> tuple[float, float, float]:
+    expected_payoff = float(payoffs.mean())
+    if expected_payoff < minimum_ev:
+        return -np.inf, np.inf, expected_payoff
+    worst_bin_p5, flatness = _equal_count_bin_statistics(terminal_prices, payoffs, bins)
+    return worst_bin_p5, flatness, expected_payoff
+
+
+def _is_better(candidate: tuple[float, float, float], current: tuple[float, float, float]) -> bool:
+    """Lexicographic comparison: maximize floor, then minimize flatness."""
+    candidate_floor, candidate_flatness, _ = candidate
+    current_floor, current_flatness, _ = current
+    if candidate_floor > current_floor + 1e-10:
+        return True
+    return abs(candidate_floor - current_floor) <= 1e-10 and candidate_flatness < current_flatness - 1e-10
 
 
 def _duplicate_family(candidates: pd.DataFrame, quantities: np.ndarray, index: int, quantity: float) -> bool:
@@ -128,7 +148,6 @@ def optimize_payoff_floor(
     max_legs: int,
     max_total_quantity: float,
     minimum_ev: float,
-    flatness_penalty: float,
     profile_bins: int,
     price_bin_width: float,
     optimization_scenarios: int,
@@ -145,7 +164,7 @@ def optimize_payoff_floor(
     quantities = np.zeros(matrix.shape[1], dtype=float)
     active: list[int] = []
     current = sample_base.copy()
-    current_score = _score(sample_prices, current, minimum_ev=minimum_ev, flatness_penalty=flatness_penalty, bins=profile_bins)
+    current_components = _objective_components(sample_prices, current, minimum_ev=minimum_ev, bins=profile_bins)
     iterations = 0
 
     for _ in range(max(int(max_legs), 0)):
@@ -159,24 +178,27 @@ def optimize_payoff_floor(
                 if _duplicate_family(candidates, quantities, leg_index, quantity):
                     continue
                 trial = current + sample_matrix[:, leg_index] * quantity
-                score = _score(sample_prices, trial, minimum_ev=minimum_ev, flatness_penalty=flatness_penalty, bins=profile_bins)
-                if best is None or score > best[0]:
-                    best = (score, leg_index, quantity)
-        if best is None or best[0] <= current_score + 1e-10:
+                components = _objective_components(sample_prices, trial, minimum_ev=minimum_ev, bins=profile_bins)
+                if best is None or _is_better(components, best[0]):
+                    best = (components, leg_index, quantity)
+        if best is None or not _is_better(best[0], current_components):
             break
-        current_score, leg_index, quantity = best
+        current_components, leg_index, quantity = best
         quantities[leg_index] = quantity
         active.append(leg_index)
         current += sample_matrix[:, leg_index] * quantity
         iterations += 1
 
     full_payoff = base + matrix @ quantities
+    full_floor, full_flatness = _equal_count_bin_statistics(prices, full_payoff, profile_bins)
     return RobustOptimizationResult(
         quantities=quantities,
         selected_legs=selected_quantities_to_legs(candidates, quantities),
         payoffs=full_payoff,
         profile=price_bin_profile(prices, full_payoff, bin_width=price_bin_width),
-        score=float(current_score),
+        worst_bin_p5=full_floor,
+        profile_flatness=full_flatness,
+        expected_payoff=float(full_payoff.mean()),
         iterations=iterations,
     )
 
@@ -187,6 +209,16 @@ def robust_metrics_table(base_payoff: np.ndarray, result: RobustOptimizationResu
         metrics = robust_metrics(np.asarray(payoff, dtype=float))
         rows.append({"Portfolio": name, "Expected payoff": f"${metrics['Expected payoff']:,.2f}", "Payoff SD": f"${metrics['Payoff SD']:,.2f}", "VaR 5% payoff": f"${metrics['VaR 5% payoff']:,.2f}", "VaR 1% payoff": f"${metrics['VaR 1% payoff']:,.2f}", "ES 5%": f"${metrics['ES 5%']:,.2f}", "ES 1%": f"${metrics['ES 1%']:,.2f}", "P(loss)": f"{metrics['P(loss)']:.2%}", "Worst payoff": f"${metrics['Worst payoff']:,.2f}"})
     return pd.DataFrame(rows)
+
+
+def objective_audit_table(base_payoff: np.ndarray, terminal_prices: np.ndarray, result: RobustOptimizationResult, bins: int, minimum_ev: float) -> pd.DataFrame:
+    base_floor, base_flatness = _equal_count_bin_statistics(terminal_prices, np.asarray(base_payoff, dtype=float), bins)
+    return pd.DataFrame(
+        [
+            {"Portfolio": "Polymarket only", "EV floor constraint": f"${minimum_ev:,.2f}", "Expected payoff": f"${np.mean(base_payoff):,.2f}", "Worst conditional P5": f"${base_floor:,.2f}", "Profile flatness": f"${base_flatness:,.2f}"},
+            {"Portfolio": "Optimizer 2", "EV floor constraint": f"${minimum_ev:,.2f}", "Expected payoff": f"${result.expected_payoff:,.2f}", "Worst conditional P5": f"${result.worst_bin_p5:,.2f}", "Profile flatness": f"${result.profile_flatness:,.2f}"},
+        ]
+    )
 
 
 def aligned_profile_figure(base_profile: pd.DataFrame, optimized_profile: pd.DataFrame) -> go.Figure:
@@ -203,7 +235,7 @@ def aligned_profile_figure(base_profile: pd.DataFrame, optimized_profile: pd.Dat
     figure.update_yaxes(title_text="Payoff", row=1, col=1)
     figure.update_yaxes(title_text="Probability", tickformat=".1%", row=2, col=1)
     figure.update_xaxes(title_text="Terminal stock price / current price", tickangle=-45, row=2, col=1)
-    figure.update_layout(title="Payoff and scenario probability aligned by 5% terminal-price bins", height=760, barmode="overlay", legend=dict(orientation="h", yanchor="bottom", y=1.02), margin=dict(l=50, r=30, t=100, b=100))
+    figure.update_layout(title="Payoff and scenario probability aligned by terminal-price bin", height=760, barmode="overlay", legend=dict(orientation="h", yanchor="bottom", y=1.02), margin=dict(l=50, r=30, t=100, b=100))
     return figure
 
 
@@ -222,21 +254,20 @@ def render_robust_optimizer(
     optimization_scenarios: int,
     seed: int,
 ) -> None:
-    st.subheader("Optimizer 2: payoff floor and flatness")
-    st.caption("Raises the 1%/5% payoff floor and penalizes hills in expected payoff across terminal-price bins. The probability bars directly below use the same bins.")
+    st.subheader("Optimizer 2: conditional payoff floor")
+    st.markdown("**Objective (lexicographic):** (1) require `Expected payoff >= minimum EV`; (2) maximize the worst conditional P5 across equal-count terminal-price bins; (3) if tied, minimize SD of conditional mean payoffs across those bins.")
     if candidates is None or option_payoff_matrix is None:
         st.info("Configure a valid candidate universe in the classic Optimizer controls first.")
         return
-    controls = st.columns(4)
+    controls = st.columns(3)
     minimum_ev = controls[0].number_input("Minimum expected payoff", value=float(max(default_minimum_ev, 0.0)), step=1.0)
-    flatness_penalty = controls[1].number_input("Profile flatness penalty", min_value=0.0, value=0.35, step=0.05)
-    profile_bins = controls[2].number_input("Optimization profile bins", min_value=10, max_value=50, value=20, step=5)
-    price_bin_width = controls[3].number_input("Displayed price-bin width (%)", min_value=2.5, max_value=20.0, value=5.0, step=2.5)
+    profile_bins = controls[1].number_input("Optimization bins (equal scenario count)", min_value=10, max_value=50, value=20, step=5, help="More bins detect finer local problems but add Monte Carlo noise.")
+    price_bin_width = controls[2].number_input("Displayed price-bin width (%)", min_value=2.5, max_value=20.0, value=5.0, step=2.5, help="Display only; does not change the optimization objective.")
 
     if st.button("Update Optimizer 2", type="primary"):
-        with st.spinner("Searching for a flatter payoff profile on stored scenarios..."):
+        with st.spinner("Maximizing the worst conditional P5 on stored scenarios..."):
             try:
-                result = optimize_payoff_floor(base_payoff, option_payoff_matrix, candidates, terminal_prices, quantity_min=quantity_min, quantity_max=quantity_max, quantity_step=quantity_step, max_legs=max_legs, max_total_quantity=max_total_quantity, minimum_ev=float(minimum_ev), flatness_penalty=float(flatness_penalty), profile_bins=int(profile_bins), price_bin_width=float(price_bin_width), optimization_scenarios=optimization_scenarios, seed=seed)
+                result = optimize_payoff_floor(base_payoff, option_payoff_matrix, candidates, terminal_prices, quantity_min=quantity_min, quantity_max=quantity_max, quantity_step=quantity_step, max_legs=max_legs, max_total_quantity=max_total_quantity, minimum_ev=float(minimum_ev), profile_bins=int(profile_bins), price_bin_width=float(price_bin_width), optimization_scenarios=optimization_scenarios, seed=seed)
                 st.session_state.phase5_robust_optimization = result
                 st.session_state.phase5_robust_error = None
             except Exception as exc:
@@ -245,10 +276,13 @@ def render_robust_optimizer(
         st.error(st.session_state.phase5_robust_error)
     result = st.session_state.get("phase5_robust_optimization")
     if result is None:
-        st.info("Run Optimizer 2 to create the robust comparison.")
+        st.info("Run Optimizer 2 to create the conditional-floor comparison.")
         return
 
     base_profile = price_bin_profile(np.asarray(terminal_prices, dtype=float), np.asarray(base_payoff, dtype=float), bin_width=float(price_bin_width))
+    st.subheader("Objective audit")
+    st.dataframe(objective_audit_table(base_payoff, np.asarray(terminal_prices, dtype=float), result, int(profile_bins), float(minimum_ev)), use_container_width=True, hide_index=True)
+    st.subheader("Global payoff metrics")
     st.dataframe(robust_metrics_table(base_payoff, result), use_container_width=True, hide_index=True)
     st.subheader("Selected option legs")
     st.dataframe(result.selected_legs, use_container_width=True, hide_index=True)
