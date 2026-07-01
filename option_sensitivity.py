@@ -11,8 +11,8 @@ from interactive_portfolio import strike_at_confidence
 from option_construction import black_scholes_price, option_payoff
 
 
-DEFAULT_CONFIDENCES = [50, 60, 70, 80, 90, 95, 99]
-DEFAULT_QUANTITIES = [0.0, 0.25, 0.50, 0.75, 1.0, 1.50, 2.0]
+DEFAULT_CONFIDENCES = list(range(40, 100, 5)) + [99]
+DEFAULT_QUANTITIES = [round(value, 2) for value in np.arange(0.0, 2.01, 0.10)]
 
 
 def _unit_leg_payoff(
@@ -117,6 +117,8 @@ def calculate_boundary_quantity_sensitivity(
                 ("Put only", put_payoff),
             ):
                 total = np.asarray(base_payoff, dtype=float) + float(quantity) * option_component
+                expected_payoff = float(total.mean())
+                payoff_sd = float(total.std(ddof=0))
                 rows.append(
                     {
                         "Structure": structure,
@@ -124,8 +126,9 @@ def calculate_boundary_quantity_sensitivity(
                         "Contracts per leg": float(quantity),
                         "Call strike": float(call_strike),
                         "Put strike": float(put_strike),
-                        "Expected payoff": float(total.mean()),
-                        "Payoff SD": float(total.std(ddof=0)),
+                        "Expected payoff": expected_payoff,
+                        "Payoff SD": payoff_sd,
+                        "EV / SD": expected_payoff / payoff_sd if payoff_sd > 0 else np.nan,
                         "Probability of loss": float((total < 0).mean()),
                     }
                 )
@@ -145,7 +148,12 @@ def sensitivity_heatmap(
         values=metric,
     ).sort_index(ascending=False)
     values = pivot.to_numpy(dtype=float)
-    text = np.vectorize(lambda value: f"${value:,.2f}")(values)
+    if metric == "EV / SD":
+        text = np.vectorize(lambda value: f"{value:.2f}")(values)
+        color_scale = "RdYlGn"
+    else:
+        text = np.vectorize(lambda value: f"${value:,.1f}")(values)
+        color_scale = "RdYlGn" if metric == "Expected payoff" else "RdYlGn_r"
     fig = go.Figure(
         go.Heatmap(
             z=values,
@@ -153,8 +161,8 @@ def sensitivity_heatmap(
             y=[f"{value:.2f}" for value in pivot.index],
             text=text,
             texttemplate="%{text}",
-            colorscale="RdYlGn" if metric == "Expected payoff" else "RdYlGn_r",
-            colorbar=dict(title=metric),
+            colorscale=color_scale,
+            colorbar=dict(title=metric, thickness=10),
             hovertemplate=(
                 "Boundary confidence: %{x}<br>Contracts per leg: %{y}<br>"
                 + metric
@@ -163,11 +171,12 @@ def sensitivity_heatmap(
         )
     )
     fig.update_layout(
-        title=f"{structure}: {metric}",
+        title=metric,
         xaxis_title="Boundary confidence",
         yaxis_title="Contracts per leg",
-        height=470,
-        margin=dict(l=30, r=30, t=70, b=40),
+        height=690,
+        margin=dict(l=20, r=20, t=60, b=40),
+        font=dict(size=11),
     )
     return fig
 
@@ -177,42 +186,40 @@ def render_boundary_quantity_sensitivity(
     *,
     polymarket_side: str,
 ) -> None:
-    """Render three structure tabs with EV and SD heatmaps."""
+    """Render structure tabs with EV, SD, and simple efficiency heatmaps."""
     st.subheader("Boundary confidence x option quantity sensitivity")
     st.caption(
         "Each cell reuses the stored Monte Carlo scenarios. Quantity applies to each active leg. "
+        "EV / SD is a simple payoff-efficiency ratio, not a Sharpe ratio. "
         "For YES the hedge is short call / long put; for NO it is long call / short put."
     )
-    structure_tabs = st.tabs(["Call + Put", "Call only", "Put only"])
-    for structure, tab in zip(["Call + Put", "Call only", "Put only"], structure_tabs):
+    structures = ["Call + Put", "Call only", "Put only"]
+    structure_tabs = st.tabs(structures)
+    for structure, tab in zip(structures, structure_tabs):
         with tab:
-            left, right = st.columns(2)
-            with left:
-                st.plotly_chart(
-                    sensitivity_heatmap(
-                        sensitivity,
-                        structure=structure,
-                        metric="Expected payoff",
-                    ),
-                    use_container_width=True,
-                    key=f"phase5_sensitivity_ev_{polymarket_side}_{structure}",
-                )
-            with right:
-                st.plotly_chart(
-                    sensitivity_heatmap(
-                        sensitivity,
-                        structure=structure,
-                        metric="Payoff SD",
-                    ),
-                    use_container_width=True,
-                    key=f"phase5_sensitivity_sd_{polymarket_side}_{structure}",
-                )
+            columns = st.columns(3)
+            for column, metric, key_suffix in zip(
+                columns,
+                ["Expected payoff", "Payoff SD", "EV / SD"],
+                ["ev", "sd", "efficiency"],
+            ):
+                with column:
+                    st.plotly_chart(
+                        sensitivity_heatmap(
+                            sensitivity,
+                            structure=structure,
+                            metric=metric,
+                        ),
+                        use_container_width=True,
+                        key=f"phase5_sensitivity_{key_suffix}_{polymarket_side}_{structure}",
+                    )
 
             detail = sensitivity[sensitivity["Structure"] == structure].copy()
             detail["Expected payoff"] = detail["Expected payoff"].map(lambda x: f"${x:,.2f}")
             detail["Payoff SD"] = detail["Payoff SD"].map(lambda x: f"${x:,.2f}")
+            detail["EV / SD"] = detail["EV / SD"].map(lambda x: f"{x:.3f}")
             detail["Probability of loss"] = detail["Probability of loss"].map(lambda x: f"{x:.2%}")
             detail["Call strike"] = detail["Call strike"].map(lambda x: f"${x:,.2f}")
             detail["Put strike"] = detail["Put strike"].map(lambda x: f"${x:,.2f}")
-            with st.expander("Show sensitivity values"):
+            with st.expander("Show sensitivity values and strikes"):
                 st.dataframe(detail, use_container_width=True, hide_index=True)
