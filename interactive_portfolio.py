@@ -20,28 +20,14 @@ def monotone_probability_curve(curve: pd.DataFrame) -> tuple[np.ndarray, np.ndar
     return ratios, np.clip(win_probabilities, 0.0, 1.0)
 
 
-def confidence_at_strike(
-    curve: pd.DataFrame,
-    strike: float,
-    *,
-    boundary_type: str,
-    normalized_spot: float = 100.0,
-) -> float:
-    """Interpolate conditional win/loss confidence implied by a strike."""
+def confidence_at_strike(curve: pd.DataFrame, strike: float, *, boundary_type: str, normalized_spot: float = 100.0) -> float:
     ratios, win_probabilities = monotone_probability_curve(curve)
     ratio = float(strike) / float(normalized_spot)
     win_probability = float(np.interp(ratio, ratios, win_probabilities, left=win_probabilities[0], right=win_probabilities[-1]))
     return win_probability if boundary_type == "Win boundary" else 1.0 - win_probability
 
 
-def strike_at_confidence(
-    curve: pd.DataFrame,
-    confidence: float,
-    *,
-    boundary_type: str,
-    normalized_spot: float = 100.0,
-) -> float:
-    """Find the normalized strike associated with a conditional confidence."""
+def strike_at_confidence(curve: pd.DataFrame, confidence: float, *, boundary_type: str, normalized_spot: float = 100.0) -> float:
     ordered = curve.sort_values("market_cap_to_current").copy()
     ordered["monotone_win_probability"] = np.maximum.accumulate(ordered["win_probability"].to_numpy(dtype=float))
     if boundary_type == "Win boundary":
@@ -56,74 +42,39 @@ def strike_at_confidence(
 
 def default_interactive_rows(ticker: str, pricing_iv: float) -> list[dict]:
     return [
-        {
-            "id": 1,
-            "active": True,
-            "ticker": ticker,
-            "option_type": "Put",
-            "position": "Long",
-            "quantity": 0.10,
-            "define_by": "Boundary",
-            "boundary_type": "Loss boundary",
-            "confidence_pct": 80.0,
-            "strike": 80.0,
-            "pricing_iv": pricing_iv,
-        },
-        {
-            "id": 2,
-            "active": True,
-            "ticker": ticker,
-            "option_type": "Call",
-            "position": "Short",
-            "quantity": 0.10,
-            "define_by": "Boundary",
-            "boundary_type": "Win boundary",
-            "confidence_pct": 80.0,
-            "strike": 120.0,
-            "pricing_iv": pricing_iv,
-        },
+        {"id": 1, "active": True, "ticker": ticker, "option_type": "Put", "position": "Long", "quantity": 0.10, "define_by": "Boundary", "boundary_type": "Loss boundary", "confidence_pct": 80.0, "strike": 80.0, "pricing_iv": pricing_iv},
+        {"id": 2, "active": True, "ticker": ticker, "option_type": "Call", "position": "Short", "quantity": 0.10, "define_by": "Boundary", "boundary_type": "Win boundary", "confidence_pct": 80.0, "strike": 120.0, "pricing_iv": pricing_iv},
     ]
 
 
 def optimized_legs_to_interactive_rows(legs: pd.DataFrame, fallback_iv: float) -> list[dict]:
     rows = []
     for position, (_, leg) in enumerate(legs.iterrows(), start=1):
-        rows.append(
-            {
-                "id": position,
-                "active": True,
-                "ticker": str(leg["Ticker"]),
-                "option_type": str(leg["Option type"]),
-                "position": str(leg["Position"]),
-                "quantity": float(leg["Quantity"]),
-                "define_by": "Strike",
-                "boundary_type": "Win boundary" if str(leg["Option type"]) == "Call" else "Loss boundary",
-                "confidence_pct": 80.0,
-                "strike": float(leg["Strike"]),
-                "pricing_iv": float(leg.get("Model IV", fallback_iv)),
-            }
-        )
+        rows.append({
+            "id": position, "active": True, "ticker": str(leg["Ticker"]),
+            "option_type": str(leg["Option type"]), "position": str(leg["Position"]),
+            "quantity": float(leg["Quantity"]), "define_by": "Strike",
+            "boundary_type": "Win boundary" if str(leg["Option type"]) == "Call" else "Loss boundary",
+            "confidence_pct": 80.0, "strike": float(leg["Strike"]),
+            "pricing_iv": float(leg.get("Model IV", fallback_iv)),
+        })
     return rows
 
 
 def render_interactive_leg_editor(
-    *,
-    tickers: list[str],
-    curves: dict[str, pd.DataFrame],
-    default_ticker: str,
-    default_iv: float,
-    iv_by_ticker: pd.Series,
-    normalized_spot: float = 100.0,
+    *, tickers: list[str], curves: dict[str, pd.DataFrame], default_ticker: str,
+    default_iv: float, iv_by_ticker: pd.Series, normalized_spot: float = 100.0,
     state_key: str = "phase5_interactive_rows",
 ) -> pd.DataFrame:
-    """Render a table-like editor with conditional per-cell locking."""
+    """Render one table where strike and confidence lock reciprocally."""
     if state_key not in st.session_state:
         st.session_state[state_key] = default_interactive_rows(default_ticker, default_iv)
     rows = st.session_state[state_key]
 
-    widths = [0.55, 1.0, 0.75, 0.75, 0.8, 0.9, 1.0, 0.95, 0.8, 0.55]
+    widths = [0.45, 0.85, 0.65, 0.7, 0.7, 0.85, 0.95, 0.8, 0.75, 0.65, 0.55]
     headers = st.columns(widths)
-    for column, label in zip(headers, ["Use", "Ticker", "Type", "Side", "Qty", "Define by", "Boundary", "Confidence", "Strike", ""]):
+    labels = ["Use", "Ticker", "Type", "Side", "Qty", "Define by", "Boundary", "Confidence %", "Strike", "IV", ""]
+    for column, label in zip(headers, labels):
         column.caption(label)
 
     rendered_rows = []
@@ -149,24 +100,13 @@ def render_interactive_leg_editor(
             confidence_pct = 100.0 * confidence_at_strike(curve, strike, boundary_type=boundary_type, normalized_spot=normalized_spot)
             columns[7].number_input("Confidence", value=float(confidence_pct), disabled=True, format="%.1f", key=f"leg_confidence_locked_{row_id}", label_visibility="collapsed")
 
-        if columns[9].button("Remove", key=f"leg_remove_{row_id}"):
+        previous_ticker = str(row.get("ticker", ticker))
+        initial_iv = float(row.get("pricing_iv", iv_by_ticker.loc[ticker])) if ticker == previous_ticker else float(iv_by_ticker.loc[ticker])
+        pricing_iv = columns[9].number_input("IV", min_value=0.0001, max_value=5.0, value=initial_iv, step=0.01, format="%.2f", key=f"leg_iv_{row_id}", label_visibility="collapsed")
+        if columns[10].button("Remove", key=f"leg_remove_{row_id}"):
             remove_id = row_id
-        pricing_iv = float(row.get("pricing_iv", iv_by_ticker.loc[ticker]))
-        rendered_rows.append(
-            {
-                "id": row_id,
-                "active": active,
-                "ticker": ticker,
-                "option_type": option_type,
-                "position": position,
-                "quantity": quantity,
-                "define_by": define_by,
-                "boundary_type": boundary_type,
-                "confidence_pct": confidence_pct,
-                "strike": strike,
-                "pricing_iv": pricing_iv,
-            }
-        )
+
+        rendered_rows.append({"id": row_id, "active": active, "ticker": ticker, "option_type": option_type, "position": position, "quantity": quantity, "define_by": define_by, "boundary_type": boundary_type, "confidence_pct": confidence_pct, "strike": strike, "pricing_iv": pricing_iv})
 
     if remove_id is not None:
         st.session_state[state_key] = [row for row in rendered_rows if row["id"] != remove_id]
@@ -174,38 +114,19 @@ def render_interactive_leg_editor(
 
     if st.button("Add option leg"):
         next_id = max([int(row["id"]) for row in rendered_rows], default=0) + 1
-        rendered_rows.append(
-            {
-                "id": next_id,
-                "active": True,
-                "ticker": default_ticker,
-                "option_type": "Call",
-                "position": "Long",
-                "quantity": 0.10,
-                "define_by": "Strike",
-                "boundary_type": "Win boundary",
-                "confidence_pct": 80.0,
-                "strike": 100.0,
-                "pricing_iv": float(iv_by_ticker.loc[default_ticker]),
-            }
-        )
+        rendered_rows.append({"id": next_id, "active": True, "ticker": default_ticker, "option_type": "Call", "position": "Long", "quantity": 0.10, "define_by": "Strike", "boundary_type": "Win boundary", "confidence_pct": 80.0, "strike": 100.0, "pricing_iv": float(iv_by_ticker.loc[default_ticker])})
         st.session_state[state_key] = rendered_rows
         st.rerun()
 
     st.session_state[state_key] = rendered_rows
     editor_rows = []
     for row in rendered_rows:
-        editor_rows.append(
-            {
-                "Active": row["active"],
-                "Ticker": row["ticker"],
-                "Option type": row["option_type"],
-                "Position": row["position"],
-                "Quantity": row["quantity"],
-                "Strike source": row["boundary_type"] if row["define_by"] == "Boundary" else "Manual strike",
-                "Boundary confidence (%)": row["confidence_pct"],
-                "Manual strike": row["strike"],
-                "Pricing IV": row["pricing_iv"],
-            }
-        )
+        editor_rows.append({
+            "Active": row["active"], "Ticker": row["ticker"], "Option type": row["option_type"],
+            "Position": row["position"], "Quantity": row["quantity"],
+            "Strike source": "Manual strike", "Boundary confidence (%)": row["confidence_pct"],
+            "Manual strike": row["strike"], "Pricing IV": row["pricing_iv"],
+            "Definition mode": row["define_by"], "Boundary type": row["boundary_type"],
+            "Implied confidence (%)": row["confidence_pct"],
+        })
     return pd.DataFrame(editor_rows)
