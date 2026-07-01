@@ -335,7 +335,7 @@ def render_interactive_leg_editor(
                 "option_type": "Call",
                 "position": "Long",
                 "quantity": 0.10,
-                "define_by": "Strike",
+                "define_by": "Boundary",
                 "boundary_type": "Win boundary",
                 "confidence_pct": 80.0,
                 "strike": 100.0,
