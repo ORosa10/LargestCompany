@@ -12,6 +12,7 @@ from optimization import OBJECTIVES, build_candidate_option_universe, long_optio
 from option_sensitivity import calculate_boundary_quantity_sensitivity, render_boundary_quantity_sensitivity
 from payoff_surface import polymarket_payoff, selected_payoff_profile_bins, terminal_stock_prices, winner_from_ranks
 from phase4_ui import display_profile, dollars, payoff_by_bin_figure, payoff_profile_figure, pct
+from robust_optimizer import render_robust_optimizer
 from simulation_store import load_simulation_snapshot
 
 NORMALIZED_SPOT = 100.0
@@ -140,7 +141,6 @@ with st.sidebar:
     contract_multiplier = st.number_input("Payoff multiplier", min_value=0.01, value=1.0, step=0.25, help="Kept at 1 while prices are normalized to 100.")
     include_premiums = st.checkbox("Include theoretical premiums", value=True)
     risk_free_rate = st.number_input("Risk-free rate", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
-
     st.header("Optimizer candidate universe")
     st.caption("Strike bounds are estimated from stored terminal-price scenarios, not entered manually.")
     strike_grid_points = st.number_input("Data-driven strike grid points", min_value=7, max_value=61, value=25, step=2)
@@ -150,7 +150,6 @@ with st.sidebar:
     include_puts = st.checkbox("Include puts", value=True)
     allow_long = st.checkbox("Allow long positions", value=True)
     allow_short = st.checkbox("Allow short positions", value=True)
-
     st.header("Portfolio search")
     objective = st.selectbox("Objective", OBJECTIVES, index=1)
     max_legs = st.number_input("Maximum optimizer legs", min_value=0, max_value=10, value=4, step=1)
@@ -174,7 +173,7 @@ polymarket_quantity = st.number_input("Polymarket shares", min_value=0.0, value=
 base_payoff = polymarket_payoff(winners, selected_ticker=selected_ticker, side=polymarket_side, entry_price=float(entry_price), quantity=float(polymarket_quantity)).to_numpy(dtype=float)
 baseline_metrics = payoff_metrics(base_payoff)
 
-builder_tab, optimizer_tab, chain_tab, payoff_tab, methodology_tab = st.tabs(["Manual Portfolio", "Optimizer", "Option Chain", "Payoff Distribution", "Methodology"])
+builder_tab, optimizer_tab, optimizer2_tab, chain_tab, payoff_tab, methodology_tab = st.tabs(["Manual Portfolio", "Optimizer", "Optimizer 2", "Option Chain", "Payoff Distribution", "Methodology"])
 
 with builder_tab:
     st.subheader("Interactive option portfolio")
@@ -190,7 +189,6 @@ with builder_tab:
         st.session_state.phase5_interactive_rows = optimized_legs_to_interactive_rows(optimized_for_load.selected_legs, default_iv)
         clear_interactive_widget_state()
         st.rerun()
-
     interactive_inputs = render_interactive_leg_editor(tickers=tickers, curves=curves, default_ticker=selected_ticker, default_iv=default_iv, iv_by_ticker=input_by_ticker["Implied volatility"].astype(float), normalized_spot=NORMALIZED_SPOT)
     try:
         resolved_legs = resolve_manual_option_legs(interactive_inputs, pd.DataFrame(), time_to_expiry=time_to_expiry, risk_free_rate=float(risk_free_rate), normalized_spot=NORMALIZED_SPOT)
@@ -223,7 +221,6 @@ with optimizer_tab:
     pricing_iv_source = input_by_ticker["Implied volatility"].reindex(option_underlyings)
     pricing_iv_table = pd.DataFrame({"Ticker": option_underlyings, "Option pricing IV": pricing_iv_source.to_numpy(dtype=float)})
     edited_pricing_ivs = st.data_editor(pricing_iv_table, use_container_width=True, hide_index=True, column_config={"Ticker": st.column_config.TextColumn(disabled=True), "Option pricing IV": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01, format="%.2f")})
-
     validation_error = None
     if not option_underlyings:
         validation_error = "Select at least one option underlying."
@@ -233,7 +230,6 @@ with optimizer_tab:
         validation_error = "Enable long positions, short positions, or both."
     elif lower_strike_quantile >= upper_strike_quantile:
         validation_error = "Lower strike quantile must be below upper strike quantile."
-
     candidates = payoff_matrix = None
     if validation_error:
         st.error(validation_error)
@@ -252,7 +248,6 @@ with optimizer_tab:
         candidates = pd.concat(candidate_tables, ignore_index=True)
         payoff_matrix = np.concatenate(payoff_matrices, axis=1)
         st.session_state.phase5_live_candidates = candidates
-
     auto_optimize = st.checkbox("Auto-update optimizer", value=False)
     update_optimizer = st.button("Update optimized portfolio", type="primary")
     if (auto_optimize or update_optimizer) and validation_error is None:
@@ -279,6 +274,22 @@ with optimizer_tab:
             st.session_state.phase5_interactive_rows = optimized_legs_to_interactive_rows(optimized.selected_legs, default_iv)
             clear_interactive_widget_state()
             st.rerun()
+
+with optimizer2_tab:
+    render_robust_optimizer(
+        base_payoff=base_payoff,
+        option_payoff_matrix=payoff_matrix,
+        candidates=candidates,
+        terminal_prices=normalized_terminal_prices[selected_ticker].to_numpy(dtype=float),
+        quantity_min=-float(max_quantity_per_leg) if allow_short else 0.0,
+        quantity_max=float(max_quantity_per_leg) if allow_long else 0.0,
+        quantity_step=float(quantity_step),
+        max_legs=int(max_legs),
+        max_total_quantity=float(max_total_quantity),
+        default_minimum_ev=float(baseline_metrics["Expected payoff"]),
+        optimization_scenarios=int(optimization_scenarios),
+        seed=int(run_metadata.get("seed", 42)),
+    )
 
 with chain_tab:
     chain = st.session_state.get("phase5_live_candidates")
@@ -319,7 +330,7 @@ Each option row has one `Define by` control:
 - **Boundary:** confidence is editable; strike is locked and calculated from the Phase 2 conditional curve.
 - **Strike:** strike is editable; confidence is locked and interpolated from the same conditional curve.
 
-The optimizer builds its strike range from the selected lower and upper quantiles of stored terminal-price scenarios. It optimizes quantity on the configured grid. It permits one long and one short leg per ticker/option type, so vertical spreads remain possible without filling the portfolio with nearly identical same-direction strikes.
+The classic optimizer searches expected payoff, SD, or expected shortfall objectives. Optimizer 2 is separate: it raises the 1% and 5% payoff floors while penalizing variation in expected payoff across terminal-price bins, subject to a minimum expected-payoff constraint.
 
-`EV / SD` is a simple payoff-efficiency diagnostic, not a Sharpe ratio. All prices remain normalized to 100 and all option edits reuse stored Phase 1/4 scenarios.
+The strike range is data-driven from stored terminal-price scenarios. `EV / SD` is a simple payoff-efficiency diagnostic, not a Sharpe ratio. All calculations reuse stored Phase 1/4 scenarios.
     """)
