@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from event_universe import JULY_2026_EVENT_PRICES, apply_event_prices
 from implied_forwards import apply_implied_forwards, estimate_implied_forwards
 from iv_surface_model import (
     SURFACE_EXPIRY,
@@ -13,6 +14,7 @@ from iv_surface_model import (
     default_surface_nodes,
     run_surface_probability_engine,
 )
+from phase1_ui_patches import apply_phase1_ui_patches
 from simulation_store import save_simulation_snapshot
 
 
@@ -153,6 +155,7 @@ source = source.replace(
     '    st.code("MC_T = MC_0 * (F_0T / S_0) * X_T")\n    st.write("For NVDA, AAPL, and GOOGL, X_T is sampled from the risk-neutral marginal CDF implied by the calibrated 2026-07-31 IV smile. Other tickers use the ATM lognormal fallback. A Gaussian copula applies the selected correlation matrix across marginals.")\n    st.write("F_0T / S_0 is estimated from liquid call-put pairs around ATM and introduces option-implied dividend and financing carry without forecasting stock returns.")',
 )
 
+source = apply_phase1_ui_patches(source)
 exec(compile(source, str(APP_CORE_PATH), "exec"), globals())
 
 if st.session_state.get("last_result") is not None and st.session_state.get("last_simulation_inputs") is not None:
