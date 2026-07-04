@@ -6,19 +6,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from boundaries import (
-    calculate_boundaries_for_all_tickers,
-    calculate_conditional_win_curve,
-    find_probability_boundaries,
+from boundaries import find_probability_boundaries
+from phase2_artifacts import (
+    DEFAULT_CONFIDENCE_LEVELS,
+    boundaries_from_curves,
+    calculate_all_conditional_curves,
 )
-from simulation_store import load_simulation_snapshot
+from simulation_store import load_simulation_snapshot, save_phase_artifact
 
 
 st.set_page_config(page_title="Phase 2", layout="wide")
 st.title("Phase 2: Conditional Probability Boundaries")
-st.caption("Phase 2 analyzes the exact Monte Carlo paths saved by Phase 1. It does not reload market data, change IV, rebuild correlations, or run another simulation.")
-
-CONFIDENCE_LEVELS = [0.80, 0.90, 0.95, 0.99]
+st.caption("Phase 2 analyzes the exact Monte Carlo paths saved by Phase 1. Confidence levels are display markers on the complete conditional curves, not restrictions on later phases.")
 
 
 def pct(value: float) -> str:
@@ -120,40 +119,22 @@ def display_distribution_table(table: pd.DataFrame) -> pd.DataFrame:
     return display[["Terminal cap / current bin", "Scenario probability", "Conditional win probability", "Contribution to total P(#1)", "Average rank", "Scenario count"]]
 
 
-def conditional_probability_figure(
-    curve: pd.DataFrame,
-    boundaries: pd.DataFrame,
-    confidence_levels: list[float],
-    selected_ticker: str,
-) -> go.Figure:
+def conditional_probability_figure(curve: pd.DataFrame, boundaries: pd.DataFrame, confidence_levels: list[float], selected_ticker: str) -> go.Figure:
     fig = px.line(
         curve,
         x="market_cap_to_current",
         y="win_probability",
         markers=True,
         title=f"{selected_ticker}: P(win | terminal market cap level)",
-        labels={
-            "market_cap_to_current": "Terminal market cap / current market cap",
-            "win_probability": "Conditional probability of finishing #1",
-        },
+        labels={"market_cap_to_current": "Terminal market cap / current market cap", "win_probability": "Conditional probability of finishing #1"},
     )
     for confidence in confidence_levels:
         fig.add_hline(y=confidence, line_dash="dot", annotation_text=f"{confidence:.0%}", annotation_position="right")
     for _, row in boundaries.iterrows():
         if pd.notna(row["Upper win boundary / current"]):
-            fig.add_vline(
-                x=float(row["Upper win boundary / current"]),
-                line_dash="dash",
-                annotation_text=f"win {row['Confidence level']:.0%}",
-                annotation_position="top",
-            )
+            fig.add_vline(x=float(row["Upper win boundary / current"]), line_dash="dash", annotation_text=f"win {row['Confidence level']:.0%}", annotation_position="top")
         if pd.notna(row["Lower loss boundary / current"]):
-            fig.add_vline(
-                x=float(row["Lower loss boundary / current"]),
-                line_dash="dash",
-                annotation_text=f"loss {row['Confidence level']:.0%}",
-                annotation_position="bottom",
-            )
+            fig.add_vline(x=float(row["Lower loss boundary / current"]), line_dash="dash", annotation_text=f"loss {row['Confidence level']:.0%}", annotation_position="bottom")
     fig.update_yaxes(tickformat=".0%", range=[0, 1])
     fig.update_xaxes(tickformat=".0%")
     return fig
@@ -176,14 +157,7 @@ def probability_weighted_figure(distribution: pd.DataFrame, selected_ticker: str
 
 
 def rank_figure(curve: pd.DataFrame, selected_ticker: str) -> go.Figure:
-    fig = px.line(
-        curve,
-        x="market_cap_to_current",
-        y="average_rank",
-        markers=True,
-        title=f"{selected_ticker}: average final rank by terminal market-cap bin",
-        labels={"market_cap_to_current": "Terminal market cap / current market cap", "average_rank": "Average final rank"},
-    )
+    fig = px.line(curve, x="market_cap_to_current", y="average_rank", markers=True, title=f"{selected_ticker}: average final rank by terminal market-cap bin")
     fig.update_xaxes(tickformat=".0%")
     fig.update_yaxes(autorange="reversed")
     return fig
@@ -202,64 +176,46 @@ tickers = simulation_inputs["Ticker"].astype(str).tolist()
 current_caps = simulation_inputs.set_index("Ticker")["Current market cap"].astype(float)
 
 with st.sidebar:
-    st.header("Phase 2 controls")
+    st.header("Phase 2 display controls")
     selected_ticker = st.selectbox("Selected ticker", tickers, index=tickers.index("NVDA") if "NVDA" in tickers else 0)
     selected_confidence_levels = st.multiselect(
-        "Boundary confidence levels",
-        CONFIDENCE_LEVELS,
-        default=CONFIDENCE_LEVELS,
+        "Boundary markers",
+        DEFAULT_CONFIDENCE_LEVELS,
+        default=DEFAULT_CONFIDENCE_LEVELS,
         format_func=lambda value: f"{value:.0%}",
+        help="These levels only control the visible boundary table and chart markers. Later phases retain the complete curve.",
     )
     n_bins = st.slider("Conditional-curve quantile bins", min_value=10, max_value=100, value=30, step=5)
-    distribution_bin_width = st.selectbox(
-        "Probability-distribution bin width",
-        [0.05, 0.10, 0.20],
-        index=1,
-        format_func=lambda value: f"{value:.0%} points",
-    )
+    distribution_bin_width = st.selectbox("Probability-distribution bin width", [0.05, 0.10, 0.20], index=1, format_func=lambda value: f"{value:.0%} points")
 
 if not selected_confidence_levels:
-    st.warning("Select at least one confidence level.")
+    st.warning("Select at least one marker level.")
     st.stop()
 
 st.success(
-    f"Using saved Phase 1 snapshot | target {run.get('target_date', 'n/a')} | "
-    f"{run.get('days_to_target', 'n/a')} days | {run.get('simulations', len(result.terminal_market_caps)):,} paths | "
-    f"seed {run.get('seed', 'n/a')}"
+    f"Using saved Phase 1 snapshot | target {run.get('target_date', 'n/a')} | {run.get('days_to_target', 'n/a')} days | "
+    f"{run.get('simulations', len(result.terminal_market_caps)):,} paths | seed {run.get('seed', 'n/a')}"
 )
-st.caption(f"Locked Phase 1 model: {source}. Change market data, IV surface, correlation, date, or seed in Phase 1 and rerun it there.")
+st.caption(f"Locked Phase 1 model: {source}. Phase 2 stores complete conditional curves; displayed confidence levels are illustrative queries only.")
 
+all_curves = calculate_all_conditional_curves(result, current_caps, n_bins=int(n_bins))
 confidence_levels = [float(value) for value in selected_confidence_levels]
+all_boundaries = boundaries_from_curves(all_curves, current_caps, confidence_levels)
+curve = all_curves[selected_ticker]
 current_cap = float(current_caps.loc[selected_ticker])
+boundaries = find_probability_boundaries(curve, confidence_levels, current_market_cap=current_cap, ticker=selected_ticker)
+distribution = calculate_probability_weighted_bins(result.terminal_market_caps, result.ranks, selected_ticker, current_cap, float(distribution_bin_width))
 selected_row = selected_result_row(result.results, selected_ticker)
-curve = calculate_conditional_win_curve(
-    result.terminal_market_caps,
-    selected_ticker,
-    ranks=result.ranks,
-    current_market_cap=current_cap,
-    n_bins=int(n_bins),
-)
-boundaries = find_probability_boundaries(
-    curve,
-    confidence_levels,
-    current_market_cap=current_cap,
-    ticker=selected_ticker,
-)
-distribution = calculate_probability_weighted_bins(
-    result.terminal_market_caps,
-    result.ranks,
-    selected_ticker,
-    current_cap,
-    float(distribution_bin_width),
-)
-all_boundaries = calculate_boundaries_for_all_tickers(
-    result.terminal_market_caps,
-    current_caps,
-    confidence_levels,
-    ranks=result.ranks,
-    n_bins=int(n_bins),
-)
 
+phase2_payload = {
+    "curves": all_curves,
+    "n_bins": int(n_bins),
+    "run_metadata": run,
+    "source": source,
+    "simulation_tickers": tickers,
+}
+save_phase_artifact("phase2", phase2_payload)
+st.session_state.boundary_curves = all_curves
 st.session_state.boundary_inputs_used = simulation_inputs
 st.session_state.boundary_result = result
 st.session_state.boundary_all_boundaries = all_boundaries
@@ -271,23 +227,15 @@ summary_cols[1].metric("Unconditional P(#1)", pct(float(selected_row["Model prob
 summary_cols[2].metric("Current market cap", dollars_trillions(current_cap))
 summary_cols[3].metric("Conditional bins", f"{int(n_bins)}")
 
-st.subheader("Boundary table")
+st.subheader("Illustrative boundary markers")
 st.dataframe(display_boundary_table(boundaries), use_container_width=True, hide_index=True)
 
-st.subheader("Conditional probability chart")
-st.plotly_chart(
-    conditional_probability_figure(curve, boundaries, confidence_levels, selected_ticker),
-    use_container_width=True,
-    key="phase2_conditional_probability",
-)
+st.subheader("Complete conditional probability curve")
+st.plotly_chart(conditional_probability_figure(curve, boundaries, confidence_levels, selected_ticker), use_container_width=True, key="phase2_conditional_probability")
 
 st.subheader("Probability-weighted scenario distribution")
 st.write("Blue bars show how likely each terminal market-cap zone is. The line shows conditional win probability in that zone. Green bars show each zone's contribution to total P(#1).")
-st.plotly_chart(
-    probability_weighted_figure(distribution, selected_ticker),
-    use_container_width=True,
-    key="phase2_weighted_distribution",
-)
+st.plotly_chart(probability_weighted_figure(distribution, selected_ticker), use_container_width=True, key="phase2_weighted_distribution")
 with st.expander("Probability-weighted bin table"):
     st.dataframe(display_distribution_table(distribution), use_container_width=True, hide_index=True)
 
@@ -296,10 +244,8 @@ st.plotly_chart(rank_figure(curve, selected_ticker), use_container_width=True, k
 
 with st.expander("Conditional-curve scenario table"):
     st.dataframe(display_curve_table(curve), use_container_width=True, hide_index=True)
-
-with st.expander("All-ticker boundary summary"):
+with st.expander("All-ticker illustrative boundary summary"):
     st.dataframe(display_boundary_table(all_boundaries), use_container_width=True, hide_index=True)
-
 with st.expander("Locked Phase 1 inputs used"):
     display_inputs = simulation_inputs.copy()
     display_inputs["Current market cap"] = display_inputs["Current market cap"].map(dollars_trillions)
