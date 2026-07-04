@@ -109,8 +109,8 @@ with returns_tab:
         with right:
             qq = qq_data(series)
             chart = px.scatter(qq, x="Normal quantile", y="Historical standardized return", title=f"QQ plot vs normal: {detail_ticker}")
-            low = min(qq.min())
-            high = max(qq.max())
+            low = float(min(qq["Normal quantile"].min(), qq["Historical standardized return"].min()))
+            high = float(max(qq["Normal quantile"].max(), qq["Historical standardized return"].max()))
             chart.add_trace(go.Scatter(x=[low, high], y=[low, high], mode="lines", name="Normal line", line={"dash": "dash", "color": "gray"}))
             st.plotly_chart(chart, use_container_width=True, key="phase0_return_qq")
 
