@@ -118,12 +118,12 @@ with st.sidebar:
     include_short_puts = st.checkbox("Include competitor short puts", value=mode == "single_competitor")
     risk_free_rate = st.number_input("Risk-free rate for theoretical premiums", 0.0, 0.20, 0.04, 0.005, format="%.3f")
 
+probabilities = result.results.set_index("Ticker")["Model probability"].astype(float)
 relevant_competitors = [ticker for ticker in relevant_tickers if ticker != selected_ticker]
 all_competitors = [ticker for ticker in tickers if ticker != selected_ticker]
 competitor_ticker = None
 if mode == "single_competitor":
     choices = relevant_competitors or all_competitors
-    probabilities = result.results.set_index("Ticker")["Model probability"].astype(float)
     default_competitor = max(choices, key=lambda ticker: float(probabilities.get(ticker, 0.0)))
     competitor_ticker = st.selectbox("Relevant competitor", choices, index=choices.index(default_competitor))
 
@@ -140,33 +140,57 @@ else:
 boundaries = boundaries_from_curves(curves, current_caps, [float(confidence)])
 spots = load_spots(tuple(tickers))
 spot_series = spots.set_index("ticker")["spot_price"].astype(float)
-structure = construct_candidate_option_structure(
-    boundaries,
-    construction_results,
-    current_caps,
-    spot_series,
-    selected_ticker=selected_ticker,
-    competitor_ticker=competitor_ticker,
-    confidence_level=float(confidence),
-    construction_mode=engine_mode,
-    include_competitor_short_puts=bool(include_short_puts),
-)
-
 use_surface = str(run.get("target_date", "")) == SURFACE_EXPIRY and "surface" in str(source).lower()
 forward_ratios = inputs.set_index("Ticker")["Forward / spot"].astype(float) if "Forward / spot" in inputs.columns else None
-valued = attach_market_consistent_premiums(
-    structure,
-    inputs.set_index("Ticker")["Implied volatility"].astype(float),
-    forward_ratios=forward_ratios,
-    time_to_expiry=max(int(run.get("days_to_target", 1)), 1) / 365.0,
-    risk_free_rate=float(risk_free_rate),
-    use_surface=use_surface,
-) if not structure.empty else structure.copy()
+fallback_ivs = inputs.set_index("Ticker")["Implied volatility"].astype(float)
+time_to_expiry = max(int(run.get("days_to_target", 1)), 1) / 365.0
+
+
+def strongest_competitor(candidate: str) -> str | None:
+    choices = [ticker for ticker in relevant_tickers if ticker != candidate]
+    if not choices:
+        choices = [ticker for ticker in tickers if ticker != candidate]
+    return max(choices, key=lambda ticker: float(probabilities.get(ticker, 0.0))) if choices else None
+
+
+def build_structure(candidate: str, competitor: str | None = None) -> pd.DataFrame:
+    raw = construct_candidate_option_structure(
+        boundaries,
+        construction_results,
+        current_caps,
+        spot_series,
+        selected_ticker=candidate,
+        competitor_ticker=competitor,
+        confidence_level=float(confidence),
+        construction_mode=engine_mode,
+        include_competitor_short_puts=bool(include_short_puts),
+    )
+    if raw.empty:
+        return raw.copy()
+    return attach_market_consistent_premiums(
+        raw,
+        fallback_ivs,
+        forward_ratios=forward_ratios,
+        time_to_expiry=time_to_expiry,
+        risk_free_rate=float(risk_free_rate),
+        use_surface=use_surface,
+    )
+
+
+selected_competitor = competitor_ticker if mode == "single_competitor" else None
+valued = build_structure(selected_ticker, selected_competitor)
+structures_by_ticker: dict[str, pd.DataFrame] = {}
+for candidate in relevant_tickers:
+    candidate_competitor = None
+    if mode == "single_competitor":
+        candidate_competitor = selected_competitor if candidate == selected_ticker else strongest_competitor(candidate)
+    structures_by_ticker[candidate] = valued.copy() if candidate == selected_ticker else build_structure(candidate, candidate_competitor)
 
 save_phase_artifact(
     "phase3",
     {
         "structure": valued,
+        "structures_by_ticker": structures_by_ticker,
         "selected_ticker": selected_ticker,
         "confidence_level": float(confidence),
         "construction_mode": mode,
@@ -235,7 +259,7 @@ with methodology_tab:
 
 - Every Phase 1 ticker remains in the joint simulation, correlation matrix, rankings, and winner probabilities.
 - Relevant Phase 1 outcomes are the tickers with a positive Polymarket price in the saved Phase 1 input.
-- The default universe hedge constructs options only for those relevant outcomes.
+- Phase 3 saves an equivalent candidate structure for every relevant outcome so downstream phases can switch the Polymarket ticker without rerunning Monte Carlo.
 - Complete simulation-universe construction is retained as a diagnostic for residual competitor risk.
 
 Boundary conversion:
