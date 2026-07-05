@@ -1,15 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
-
 import pandas as pd
 import streamlit as st
 
-from boundaries import calculate_boundaries_for_all_tickers
-from correlations import ewma_correlation, fetch_adjusted_close, rolling_correlation, smooth_vol_adjusted_correlation
-from market_data import apply_market_caps, fetch_market_caps, fetch_spot_prices
-from model import default_company_inputs, run_probability_engine
-from option_construction import attach_theoretical_premiums, construct_candidate_option_structure
 from payoff_surface import calculate_scenario_payoffs, payoff_summary, selected_payoff_profile_bins
 from phase4_ui import (
     HEDGE_TEMPLATES,
@@ -27,65 +20,12 @@ from phase4_ui import (
     payoff_profile_figure,
     pct,
 )
+from simulation_store import load_phase_artifact, load_simulation_snapshot, save_phase_artifact
 
 
 st.set_page_config(page_title="Phase 4", layout="wide")
-st.title("Phase 4")
-st.caption("Payoff Profile Engine. Phase 4 evaluates Polymarket and candidate option payoffs across Monte Carlo scenarios. It does not optimize strikes or quantities.")
-
-CORRELATION_METHODS = ["EWMA historical correlation", "Vol-adjusted smooth correlation", "Rolling historical correlation"]
-CONFIDENCE_LEVELS = [0.80, 0.90, 0.95, 0.99]
-CONSTRUCTION_MODE_LABELS = {
-    "Selected-only hedge": "selected_only",
-    "Selected + single competitor diagnostic": "single_competitor",
-    "Selected + full universe competitors": "full_universe",
-}
-
-
-@st.cache_data(show_spinner=False, ttl=15 * 60)
-def load_yahoo_market_caps(tickers: tuple[str, ...]) -> pd.DataFrame:
-    return fetch_market_caps(list(tickers))
-
-
-@st.cache_data(show_spinner=False, ttl=15 * 60)
-def load_spot_prices(tickers: tuple[str, ...]) -> pd.DataFrame:
-    return fetch_spot_prices(list(tickers))
-
-
-@st.cache_data(show_spinner=False, ttl=60 * 60)
-def load_adjusted_close(tickers: tuple[str, ...], period: str) -> pd.DataFrame:
-    return fetch_adjusted_close(list(tickers), period=period)
-
-
-def years(days: int) -> float:
-    return max(int(days), 1) / 365.0
-
-
-def build_correlation_matrix(
-    method: str,
-    prices: pd.DataFrame,
-    simulation_inputs: pd.DataFrame,
-    ewma_lambda: float,
-    rolling_lookback: int,
-    smooth_low_quantile: float,
-    smooth_high_quantile: float,
-) -> pd.DataFrame:
-    if method == "EWMA historical correlation":
-        return ewma_correlation(prices, ewma_lambda)
-    if method == "Rolling historical correlation":
-        return rolling_correlation(prices, rolling_lookback)
-    if method == "Vol-adjusted smooth correlation":
-        current_ivs = simulation_inputs.set_index("Ticker")["Implied volatility"].astype(float)
-        corr, _ = smooth_vol_adjusted_correlation(
-            prices,
-            current_ivs,
-            vol_window=63,
-            low_quantile=smooth_low_quantile,
-            high_quantile=smooth_high_quantile,
-            min_observations=30,
-        )
-        return corr
-    raise ValueError(f"Unknown correlation method: {method}")
+st.title("Phase 4: Payoff Profile")
+st.caption("Phase 4 evaluates the saved Phase 3 option structure on the exact saved Phase 1 Monte Carlo scenarios. It does not rerun the probability model or reconstruct boundaries.")
 
 
 def calculate_payoffs(
@@ -115,286 +55,216 @@ def calculate_payoffs(
     )
 
 
+def matching_run_metadata(left: dict, right: dict) -> bool:
+    keys = ["target_date", "days_to_target", "simulations", "seed"]
+    return all(left.get(key) == right.get(key) for key in keys)
+
+
+snapshot = load_simulation_snapshot()
+phase3_artifact = load_phase_artifact("phase3")
+if snapshot is None:
+    st.error("No saved Phase 1 simulation was found. Run Phase 1 first.")
+    st.stop()
+if phase3_artifact is None or phase3_artifact.get("structure") is None:
+    st.error("No saved Phase 3 option structure was found. Open Phase 3 after the latest Phase 2 run.")
+    st.stop()
+
+result = snapshot["result"]
+simulation_inputs = snapshot["simulation_inputs"].copy()
+phase1_run = snapshot.get("run_metadata") or {}
+phase3_run = phase3_artifact.get("run_metadata") or {}
+if not matching_run_metadata(phase1_run, phase3_run):
+    st.error("The saved Phase 3 structure belongs to a different Phase 1 run. Open Phase 2 and Phase 3 once, then return here.")
+    st.stop()
+
+selected_ticker = str(phase3_artifact["selected_ticker"])
+base_option_legs = phase3_artifact["structure"].copy()
+current_caps = simulation_inputs.set_index("Ticker")["Current market cap"].astype(float)
+selected_yes_price = float(
+    simulation_inputs.loc[simulation_inputs["Ticker"] == selected_ticker, "Polymarket YES price"].iloc[0]
+)
+if base_option_legs.empty:
+    st.error("The saved Phase 3 boundary query did not produce any valid option legs. Choose a reachable boundary in Phase 3 first.")
+    st.stop()
+spot_series = base_option_legs.drop_duplicates("Ticker").set_index("Ticker")["Spot"].astype(float)
+
 with st.sidebar:
     st.header("Phase 4 controls")
-    target_date = st.date_input(
-        "Target date / maturity",
-        value=date.today() + timedelta(days=365),
-        min_value=date.today() + timedelta(days=1),
+    st.caption(
+        f"Locked upstream run: {phase1_run.get('target_date', 'n/a')} | "
+        f"{phase1_run.get('simulations', len(result.terminal_market_caps)):,} paths | {selected_ticker}"
     )
-    days_to_target = max((target_date - date.today()).days, 1)
-    st.caption(f"Horizon: {days_to_target} days ({days_to_target / 365:.2f} years)")
-
-    simulations = st.number_input("Monte Carlo simulations", min_value=2_000, max_value=1_000_000, value=100_000, step=10_000)
-    seed = st.number_input("Random seed", min_value=0, value=42, step=1)
-    boundary_bins = st.slider("Phase 2 market-cap quantile bins", min_value=10, max_value=100, value=30, step=5)
-    profile_bins = st.slider("Payoff profile bins", min_value=5, max_value=40, value=20, step=1)
-    confidence_level = st.selectbox("Boundary confidence level", CONFIDENCE_LEVELS, index=3, format_func=lambda value: f"{value:.0%}")
+    profile_bins = st.slider("Payoff profile bins", min_value=5, max_value=50, value=20, step=1)
 
     st.header("Polymarket position")
     polymarket_side = st.selectbox("Side", ["YES", "NO"], index=0)
     polymarket_quantity = st.number_input("Polymarket shares", min_value=0.0, value=100.0, step=10.0)
-
-    st.header("Option construction")
-    construction_mode_label = st.selectbox("Option construction mode", list(CONSTRUCTION_MODE_LABELS), index=0)
-    construction_mode = CONSTRUCTION_MODE_LABELS[construction_mode_label]
-    include_competitor_short_puts = st.checkbox("Include competitor short puts", value=construction_mode == "single_competitor")
-    hedge_template = st.selectbox(
-        "Payoff hedge template",
-        HEDGE_TEMPLATES,
-        index=0,
-        help="A neutral payoff filter over the Phase 3 candidate legs. Phase 5 will allow fully flexible multi-leg structures.",
+    default_entry = selected_yes_price if polymarket_side == "YES" else 1.0 - selected_yes_price
+    polymarket_entry_price = st.number_input(
+        f"Polymarket {polymarket_side} entry price",
+        min_value=0.0,
+        max_value=1.0,
+        value=float(default_entry),
+        step=0.001,
+        format="%.3f",
+        key=f"phase4_entry_{selected_ticker}_{polymarket_side}",
     )
-    risk_free_rate = st.number_input("Risk-free rate", min_value=0.0, max_value=0.20, value=0.04, step=0.005, format="%.3f")
+
+    st.header("Option payoff preview")
+    hedge_template = st.selectbox("Payoff hedge template", HEDGE_TEMPLATES, index=0)
     contract_multiplier = st.number_input(
-        "Shares per option contract (multiplier)",
+        "Shares per option contract",
         min_value=1.0,
         value=100.0,
         step=1.0,
-        help="Usually 100 for listed US equity options. This is not the number of contracts.",
+        help="Usually 100 for listed US equity options.",
     )
     default_option_quantity = st.number_input(
-        "Default contracts per valid option leg",
+        "Default contracts per valid leg",
         min_value=0.0,
         value=0.01,
         step=0.01,
         format="%.2f",
-        help="Preview quantity only. Phase 5 will search quantities systematically.",
     )
     include_option_premiums = st.checkbox("Include theoretical option premiums", value=True)
-    st.caption("Templates do not judge whether a leg is good or bad. They only select which constructed legs enter the current payoff preview.")
 
-    st.header("Correlation")
-    correlation_method = st.selectbox("Correlation method", CORRELATION_METHODS, index=0)
-    price_history_period = st.selectbox("Yahoo price history", ["1y", "3y", "5y", "10y"], index=2)
-    ewma_lambda = st.selectbox("EWMA lambda", [0.94, 0.97], index=1)
-    rolling_lookback = st.selectbox("Rolling lookback days", [63, 126, 252, 504, 756], index=2)
-    smooth_low_quantile = st.selectbox("Smooth low-vol bucket", [0.30, 0.40, 0.50], index=1, format_func=lambda value: f"{value:.0%}")
-    smooth_high_quantile = st.selectbox("Smooth high-vol bucket", [0.50, 0.60, 0.70], index=1, format_func=lambda value: f"{value:.0%}")
-
-    run_button = st.button("Build payoff profile", type="primary", use_container_width=True)
-
+st.success(
+    f"Using Phase 1 scenarios and Phase 3 structure | boundary query "
+    f"{phase3_artifact.get('confidence_level', float('nan')):.0%} | "
+    f"pricing mode {'surface smile' if phase3_artifact.get('use_surface_pricing') else 'ATM fallback'}"
+)
+st.caption("Date, market caps, marginal model, IV surface, correlations, random seed, and ranks are locked upstream. Change them in Phase 1 and then refresh Phases 2 and 3.")
 
 summary_tab, profile_tab, calculator_tab, scenarios_tab, methodology_tab = st.tabs(
     ["Payoff Summary", "Payoff Profile", "Manual Calculator", "Scenario Table", "Methodology"]
 )
 
 with summary_tab:
-    st.subheader("Inputs")
-    if "phase4_company_inputs" not in st.session_state:
-        st.session_state.phase4_company_inputs = default_company_inputs()
+    option_legs = base_option_legs.copy()
+    if "Quantity" not in option_legs.columns:
+        option_legs["Quantity"] = float(default_option_quantity)
+    state_key = "phase4_option_legs"
+    state_signature = (
+        phase1_run.get("target_date"),
+        phase1_run.get("seed"),
+        selected_ticker,
+        phase3_artifact.get("confidence_level"),
+        phase3_artifact.get("construction_mode"),
+    )
+    if st.session_state.get("phase4_structure_signature") != state_signature:
+        st.session_state[state_key] = option_legs
+        st.session_state.phase4_structure_signature = state_signature
+    option_legs = st.session_state[state_key].copy()
 
-    stored_inputs = st.session_state.phase4_company_inputs.copy()
-    manual_inputs = stored_inputs[["Ticker", "Implied volatility", "Polymarket YES price"]]
-    edited_manual_inputs = st.data_editor(
-        manual_inputs,
-        num_rows="dynamic",
+    st.subheader("Candidate option legs and quantities")
+    st.caption("Strikes, IVs, carry, and premiums come from Phase 3. Only quantities are editable here.")
+    editable_view = editable_option_legs_view(option_legs)
+    edited_view = st.data_editor(
+        editable_view,
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Ticker": st.column_config.TextColumn(required=True),
-            "Implied volatility": st.column_config.NumberColumn("Manual IV", min_value=0.0001, max_value=5.0, step=0.01),
-            "Polymarket YES price": st.column_config.NumberColumn("Manual Polymarket YES", min_value=0.0, max_value=1.0, step=0.01),
+            "Quantity": st.column_config.NumberColumn("Quantity", step=0.01, format="%.2f"),
+            "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
+            "Spot": st.column_config.NumberColumn("Spot", format="$%.2f"),
+            "Theoretical premium": st.column_config.NumberColumn("Theoretical premium", format="$%.2f"),
         },
+        disabled=[column for column in editable_view.columns if column != "Quantity"],
     )
-    fallback_caps = stored_inputs.set_index("Ticker")["Current market cap"].to_dict()
-    company_inputs = edited_manual_inputs.copy()
-    company_inputs["Current market cap"] = company_inputs["Ticker"].map(fallback_caps).fillna(1_000_000_000_000.0)
-    company_inputs = company_inputs[["Ticker", "Current market cap", "Implied volatility", "Polymarket YES price"]]
-    st.session_state.phase4_company_inputs = company_inputs
+    edited_legs = merge_edited_quantities(option_legs, edited_view)
+    active_legs = apply_hedge_template(edited_legs, hedge_template)
+    st.session_state[state_key] = edited_legs
+    st.session_state.phase4_active_option_legs = active_legs
 
-    tickers = [ticker for ticker in company_inputs["Ticker"].astype(str).str.strip().tolist() if ticker]
-    selected_ticker = st.selectbox("Selected Polymarket ticker", tickers, index=0)
-    competitor_ticker = None
-    if construction_mode == "single_competitor":
-        competitor_ticker = st.selectbox("Single competitor for diagnostic option legs", [ticker for ticker in tickers if ticker != selected_ticker], index=0)
-
-    selected_yes_price = float(company_inputs.loc[company_inputs["Ticker"] == selected_ticker, "Polymarket YES price"].iloc[0])
-    default_entry = selected_yes_price if polymarket_side == "YES" else 1.0 - selected_yes_price
-    polymarket_entry_price = st.number_input(
-        f"Polymarket {polymarket_side} entry price",
-        min_value=0.0,
-        max_value=1.0,
-        value=default_entry,
-        step=0.01,
-        format="%.2f",
-        key=f"phase4_entry_{selected_ticker}_{polymarket_side}",
-        help="YES defaults to the manual YES price. NO defaults to 1 minus the manual YES price.",
-    )
-    st.caption(
-        f"Manual YES price: {selected_yes_price:.2%}. Default {polymarket_side} entry: {default_entry:.2%}. "
-        "YES and NO expected values are sign-opposites only when their entry prices sum to 100%."
-    )
-
-    if run_button:
-        with st.spinner("Running scenarios, constructing candidate legs, and calculating payoff profiles..."):
-            try:
-                market_caps = load_yahoo_market_caps(tuple(tickers))
-                spots = load_spot_prices(tuple(tickers))
-                simulation_inputs = apply_market_caps(company_inputs, market_caps)
-                prices = load_adjusted_close(tuple(tickers), price_history_period)
-                corr = build_correlation_matrix(
-                    correlation_method,
-                    prices,
-                    simulation_inputs,
-                    float(ewma_lambda),
-                    int(rolling_lookback),
-                    float(smooth_low_quantile),
-                    float(smooth_high_quantile),
-                )
-                result = run_probability_engine(
-                    simulation_inputs,
-                    corr,
-                    days_to_target=int(days_to_target),
-                    simulations=int(simulations),
-                    seed=int(seed),
-                )
-                current_caps = simulation_inputs.set_index("Ticker")["Current market cap"]
-                boundaries = calculate_boundaries_for_all_tickers(
-                    result.terminal_market_caps,
-                    current_caps,
-                    [float(confidence_level)],
-                    ranks=result.ranks,
-                    n_bins=int(boundary_bins),
-                )
-                spot_series = spots.set_index("ticker")["spot_price"]
-                structure = construct_candidate_option_structure(
-                    boundaries,
-                    result.results,
-                    current_caps,
-                    spot_series,
-                    selected_ticker=selected_ticker,
-                    competitor_ticker=competitor_ticker,
-                    confidence_level=float(confidence_level),
-                    construction_mode=construction_mode,
-                    include_competitor_short_puts=bool(include_competitor_short_puts),
-                )
-                valued_structure = attach_theoretical_premiums(
-                    structure,
-                    simulation_inputs.set_index("Ticker")["Implied volatility"],
-                    time_to_expiry=years(int(days_to_target)),
-                    risk_free_rate=float(risk_free_rate),
-                )
-                valued_structure["Quantity"] = 0.0
-                valued_structure.loc[valued_structure["Strike"].notna(), "Quantity"] = float(default_option_quantity)
-
-                st.session_state.phase4_inputs_used = simulation_inputs
-                st.session_state.phase4_result = result
-                st.session_state.phase4_spots = spots
-                st.session_state.phase4_boundaries = boundaries
-                st.session_state.phase4_option_legs = valued_structure
-                st.session_state.phase4_selected_ticker = selected_ticker
-                st.session_state.phase4_error = None
-            except Exception as exc:
-                st.session_state.phase4_error = str(exc)
-
-    if st.session_state.get("phase4_error"):
-        st.error(st.session_state.phase4_error)
-
-    option_legs = st.session_state.get("phase4_option_legs")
-    result = st.session_state.get("phase4_result")
-    simulation_inputs = st.session_state.get("phase4_inputs_used")
-    spots = st.session_state.get("phase4_spots")
-
-    if option_legs is None or result is None or simulation_inputs is None or spots is None:
-        st.info("Build the payoff profile to generate scenario-level payoff outputs.")
-    else:
-        st.subheader("Candidate option legs and quantities")
-        st.caption("Edit quantities freely. The selected payoff template only sets non-selected legs to zero in this preview.")
-        editable_view = editable_option_legs_view(option_legs)
-        edited_view = st.data_editor(
-            editable_view,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Quantity": st.column_config.NumberColumn("Quantity", step=0.01, format="%.2f"),
-                "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
-                "Spot": st.column_config.NumberColumn("Spot", format="$%.2f"),
-                "Theoretical premium": st.column_config.NumberColumn("Theoretical premium", format="$%.2f"),
-            },
-            disabled=[column for column in editable_view.columns if column != "Quantity"],
+    try:
+        scenario = calculate_payoffs(
+            result,
+            current_caps,
+            spot_series,
+            active_legs,
+            selected_ticker,
+            polymarket_side,
+            float(polymarket_entry_price),
+            float(polymarket_quantity),
+            float(contract_multiplier),
+            bool(include_option_premiums),
         )
-        edited_legs = merge_edited_quantities(option_legs, edited_view)
-        active_legs = apply_hedge_template(edited_legs, hedge_template)
-        st.session_state.phase4_option_legs = edited_legs
-        st.session_state.phase4_active_option_legs = active_legs
+        zero_legs = edited_legs.copy()
+        zero_legs["Quantity"] = 0.0
+        baseline_scenario = calculate_payoffs(
+            result,
+            current_caps,
+            spot_series,
+            zero_legs,
+            selected_ticker,
+            polymarket_side,
+            float(polymarket_entry_price),
+            float(polymarket_quantity),
+            float(contract_multiplier),
+            bool(include_option_premiums),
+        )
+        profile = selected_payoff_profile_bins(
+            scenario,
+            result.terminal_market_caps,
+            current_caps,
+            selected_ticker=selected_ticker,
+            bins=int(profile_bins),
+        )
+        st.session_state.phase4_scenario_payoffs = scenario
+        st.session_state.phase4_baseline_scenario = baseline_scenario
+        st.session_state.phase4_profile = profile
+        st.session_state.phase4_selected_ticker = selected_ticker
 
-        selected = st.session_state.phase4_selected_ticker
-        current_caps = simulation_inputs.set_index("Ticker")["Current market cap"]
-        spot_series = spots.set_index("ticker")["spot_price"]
+        summary = payoff_summary(scenario)
+        cols = st.columns(6)
+        cols[0].metric("Expected payoff", dollars(float(summary["Expected payoff"])))
+        cols[1].metric("Payoff SD", dollars(float(summary["Payoff standard deviation"])))
+        cols[2].metric("Median payoff", dollars(float(summary["Median payoff"])))
+        cols[3].metric("P(loss)", pct(float(summary["Probability of loss"])))
+        cols[4].metric("Expected shortfall 5%", dollars(float(summary["Expected shortfall 5%"])))
+        cols[5].metric("Worst payoff", dollars(float(summary["Worst payoff"])))
 
-        try:
-            scenario = calculate_payoffs(
-                result,
-                current_caps,
-                spot_series,
-                active_legs,
-                selected,
-                polymarket_side,
-                float(polymarket_entry_price),
-                float(polymarket_quantity),
-                float(contract_multiplier),
-                bool(include_option_premiums),
-            )
-            zero_legs = edited_legs.copy()
-            zero_legs["Quantity"] = 0.0
-            baseline_scenario = calculate_payoffs(
-                result,
-                current_caps,
-                spot_series,
-                zero_legs,
-                selected,
-                polymarket_side,
-                float(polymarket_entry_price),
-                float(polymarket_quantity),
-                float(contract_multiplier),
-                bool(include_option_premiums),
-            )
-            profile = selected_payoff_profile_bins(
-                scenario,
-                result.terminal_market_caps,
-                current_caps,
-                selected_ticker=selected,
-                bins=int(profile_bins),
-            )
-            st.session_state.phase4_scenario_payoffs = scenario
-            st.session_state.phase4_baseline_scenario = baseline_scenario
-            st.session_state.phase4_profile = profile
+        st.subheader("Baseline comparison")
+        st.caption("Same Phase 1 scenarios and Polymarket position. Only the saved Phase 3 option legs differ.")
+        st.dataframe(comparison_table(baseline_scenario, scenario, hedge_template), use_container_width=True, hide_index=True)
 
-            summary = payoff_summary(scenario)
-            cols = st.columns(6)
-            cols[0].metric("Expected payoff", dollars(float(summary["Expected payoff"])))
-            cols[1].metric("Payoff SD", dollars(float(summary["Payoff standard deviation"])))
-            cols[2].metric("Median payoff", dollars(float(summary["Median payoff"])))
-            cols[3].metric("P(loss)", pct(float(summary["Probability of loss"])))
-            cols[4].metric("Expected shortfall 5%", dollars(float(summary["Expected shortfall 5%"])))
-            cols[5].metric("Worst payoff", dollars(float(summary["Worst payoff"])))
+        st.subheader("Risk metrics")
+        st.dataframe(display_risk_summary(summary), use_container_width=True, hide_index=True)
 
-            st.subheader("Baseline comparison")
-            st.caption("Same Monte Carlo scenarios and Polymarket position. Only the option legs differ.")
-            st.dataframe(comparison_table(baseline_scenario, scenario, hedge_template), use_container_width=True, hide_index=True)
+        st.subheader("Payoff components")
+        components = scenario[["Polymarket payoff", "Option payoff", "Total payoff"]].mean().to_frame("Expected payoff").reset_index().rename(columns={"index": "Component"})
+        components["Expected payoff"] = components["Expected payoff"].map(dollars)
+        st.dataframe(components, use_container_width=True, hide_index=True)
 
-            st.subheader("Risk metrics")
-            st.dataframe(display_risk_summary(summary), use_container_width=True, hide_index=True)
+        save_phase_artifact(
+            "phase4",
+            {
+                "active_option_legs": active_legs,
+                "scenario_payoffs": scenario,
+                "baseline_scenario": baseline_scenario,
+                "profile": profile,
+                "selected_ticker": selected_ticker,
+                "polymarket_side": polymarket_side,
+                "polymarket_entry_price": float(polymarket_entry_price),
+                "polymarket_quantity": float(polymarket_quantity),
+                "contract_multiplier": float(contract_multiplier),
+                "include_option_premiums": bool(include_option_premiums),
+                "run_metadata": phase1_run,
+            },
+        )
+    except Exception as exc:
+        st.error(str(exc))
 
-            st.subheader("Payoff components")
-            components = scenario[["Polymarket payoff", "Option payoff", "Total payoff"]].mean().to_frame("Expected payoff").reset_index().rename(columns={"index": "Component"})
-            components["Expected payoff"] = components["Expected payoff"].map(dollars)
-            st.dataframe(components, use_container_width=True, hide_index=True)
-        except Exception as exc:
-            st.error(str(exc))
-
-        with st.expander(f"Active option legs: {hedge_template}"):
-            st.dataframe(display_option_legs(active_legs), use_container_width=True, hide_index=True)
+    with st.expander(f"Active option legs: {hedge_template}"):
+        st.dataframe(display_option_legs(active_legs), use_container_width=True, hide_index=True)
 
 with profile_tab:
     profile = st.session_state.get("phase4_profile")
     if profile is None:
-        st.info("Build the payoff profile first.")
+        st.info("Open Payoff Summary first.")
     else:
-        selected = st.session_state.phase4_selected_ticker
-        st.plotly_chart(payoff_profile_figure(profile, selected), use_container_width=True)
-        st.plotly_chart(payoff_by_bin_figure(profile, selected), use_container_width=True)
+        st.plotly_chart(payoff_profile_figure(profile, selected_ticker), use_container_width=True)
+        st.plotly_chart(payoff_by_bin_figure(profile, selected_ticker), use_container_width=True)
         st.subheader("Probability-weighted payoff bins")
         st.write("Scenario probability times average payoff gives each bin's contribution to global expected payoff.")
         st.dataframe(display_profile(profile), use_container_width=True, hide_index=True)
@@ -411,34 +281,24 @@ with calculator_tab:
 with scenarios_tab:
     scenario = st.session_state.get("phase4_scenario_payoffs")
     if scenario is None:
-        st.info("Build the payoff profile first.")
+        st.info("Open Payoff Summary first.")
     else:
         st.subheader("Scenario-level payoff sample")
         st.dataframe(display_scenarios(scenario.head(500)), use_container_width=True, hide_index=True)
-        st.caption("Showing the first 500 simulated scenarios only.")
+        st.caption("Showing the first 500 saved Phase 1 scenarios only.")
 
 with methodology_tab:
     st.subheader("Methodology")
     st.markdown(
         """
-Phase 4 is a payoff evaluation engine. It does not decide which hedge is optimal.
+Phase 4 is a payoff evaluation engine. It does not alter the probability model and it does not decide which hedge is optimal.
 
-Workflow:
+Locked workflow:
 
-- Run the Phase 1 Monte Carlo scenarios.
-- Recalculate Phase 2 boundaries for the selected confidence level.
-- Construct Phase 3 candidate option legs.
-- Apply a neutral preview template: Polymarket only, protective put, short call, collar, or all constructed legs.
-- Calculate Polymarket, option, and total payoff in every scenario.
-- Compare the selected template with the exact same Polymarket-only scenarios.
-- Report expected payoff, standard deviation, loss probability, expected shortfall, and worst payoff.
-
-The templates are convenience filters, not recommendations. Naked short calls remain available. Phase 5 will allow flexible multi-leg structures, strike selection below 80% boundaries, and systematic quantity optimization.
-
-Polymarket YES versus NO:
-
-- YES and NO are exact payoff opposites only when their entry prices are complementary.
-- The app defaults NO entry to `1 - manual YES price`.
+- Phase 1 supplies terminal market-cap scenarios and ranks.
+- Phase 2 supplies complete conditional probability curves.
+- Phase 3 queries those curves, converts boundaries to strikes, and prices each leg from strike-specific smile IV plus Phase 1 carry.
+- Phase 4 changes only the Polymarket position, option quantities, and payoff display.
 
 Expected payoff bridge:
 
@@ -449,9 +309,9 @@ Global expected payoff = sum(bin scenario probability * average payoff in bin)
 Payoff standard deviation:
 
 ```text
-Payoff SD = sqrt(sum(probability_scenario * (payoff_scenario - expected payoff)^2))
+Payoff SD = sqrt(mean((scenario payoff - expected payoff)^2))
 ```
 
-A deterministic option premium shifts expected payoff but does not by itself reduce standard deviation. Scenario-dependent intrinsic value determines whether an option leg reduces or increases payoff dispersion.
+A deterministic premium shifts expected payoff. Scenario-dependent option intrinsic value determines whether dispersion and tail loss rise or fall.
         """
     )
