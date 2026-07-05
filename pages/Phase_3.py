@@ -4,8 +4,10 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from iv_surface_model import SURFACE_EXPIRY
 from market_data import fetch_spot_prices
-from option_construction import attach_theoretical_premiums, construct_candidate_option_structure, payoff_grid_for_leg
+from option_construction import construct_candidate_option_structure, payoff_grid_for_leg
+from option_valuation import attach_market_consistent_premiums
 from phase2_artifacts import boundaries_from_curves
 from simulation_store import load_phase_artifact, load_simulation_snapshot, save_phase_artifact
 
@@ -65,9 +67,11 @@ def display_structure(table: pd.DataFrame) -> pd.DataFrame:
     display["Boundary market cap"] = display["Boundary market cap"].map(dollars_trillions)
     display["Boundary / current cap"] = display["Boundary / current cap"].map(pct)
     display["Spot"] = display["Spot"].map(dollars)
-    for column in ["Model IV", "Risk-free rate"]:
+    for column in ["Model IV", "Risk-free rate", "Implied dividend yield"]:
         if column in display.columns:
             display[column] = display[column].map(pct)
+    if "Forward / spot" in display.columns:
+        display["Forward / spot"] = display["Forward / spot"].map(lambda value: "" if pd.isna(value) else f"{value:.5f}")
     if "Time to expiry" in display.columns:
         display["Time to expiry"] = display["Time to expiry"].map(lambda value: "" if pd.isna(value) else f"{value:.2f}y")
     if "Theoretical premium" in display.columns:
@@ -154,11 +158,22 @@ structure = construct_candidate_option_structure(
     construction_mode=construction_mode,
     include_competitor_short_puts=bool(include_competitor_short_puts),
 )
-valued_structure = attach_theoretical_premiums(
+use_surface_pricing = (
+    str(run.get("target_date", "")) == SURFACE_EXPIRY
+    and "surface" in str(source).lower()
+)
+forward_ratios = (
+    simulation_inputs.set_index("Ticker")["Forward / spot"].astype(float)
+    if "Forward / spot" in simulation_inputs.columns
+    else None
+)
+valued_structure = attach_market_consistent_premiums(
     structure,
     simulation_inputs.set_index("Ticker")["Implied volatility"].astype(float),
+    forward_ratios=forward_ratios,
     time_to_expiry=years(int(run.get("days_to_target", 1))),
     risk_free_rate=float(risk_free_rate),
+    use_surface=use_surface_pricing,
 ) if not structure.empty else structure.copy()
 
 st.session_state.phase3_structure = valued_structure
@@ -173,6 +188,7 @@ save_phase_artifact(
         "confidence_level": float(confidence_level),
         "construction_mode": construction_mode,
         "risk_free_rate": float(risk_free_rate),
+        "use_surface_pricing": bool(use_surface_pricing),
         "run_metadata": run,
         "source": source,
     },
@@ -198,6 +214,10 @@ with construction_tab:
         st.caption(f"Premium mix: {credit_count} credit leg(s), {debit_count} debit leg(s). Quantities are not optimized in Phase 3.")
         st.subheader("Suggested option structure")
         st.dataframe(display_structure(valued_structure), use_container_width=True, hide_index=True)
+        if use_surface_pricing:
+            st.caption(f"Pricing IV is interpolated separately for every strike from the calibrated {SURFACE_EXPIRY} smile. Carry comes from the saved Phase 1 forward ratio.")
+        else:
+            st.warning(f"The saved Phase 1 run does not match the calibrated {SURFACE_EXPIRY} surface. Option premiums therefore use the saved ticker ATM IV fallback; they are not surface-priced.")
 
     with st.expander("Current spot prices used for strike conversion"):
         st.dataframe(display_spots(spots), use_container_width=True, hide_index=True)
@@ -220,5 +240,6 @@ with payoff_tab:
 with methodology_tab:
     st.write("Phase 3 consumes complete Phase 2 curves and converts any queried probability level to option strikes:")
     st.code("strike = current stock price * boundary market cap / current market cap")
+    st.write("Each option leg is then valued at its own strike-specific smile IV. Phase 1 Forward / spot is converted to an implied continuous dividend yield so option pricing and the simulated risk-neutral marginal share the same carry.")
     st.write("Current stock spot is new information needed for strike conversion. Phase 3 does not change Phase 1 market caps, IV surfaces, correlations, dates, paths, or ranks.")
-    st.write("Phase 4 will consume this saved structure and combine it with the same Phase 1 scenario payoffs.")
+    st.write("Phase 4 should consume this saved structure and combine it with the same Phase 1 scenario payoffs.")
