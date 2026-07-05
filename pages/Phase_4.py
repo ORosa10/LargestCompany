@@ -25,7 +25,7 @@ from simulation_store import load_phase_artifact, load_simulation_snapshot, save
 
 st.set_page_config(page_title="Phase 4", layout="wide")
 st.title("Phase 4: Payoff Profile")
-st.caption("Phase 4 evaluates the saved Phase 3 option structure on the exact saved Phase 1 Monte Carlo scenarios. It does not rerun the probability model or reconstruct boundaries.")
+st.caption("Phase 4 evaluates the saved Phase 3 option structures on the exact saved Phase 1 Monte Carlo scenarios. It does not rerun the probability model or reconstruct boundaries.")
 
 
 def calculate_payoffs(
@@ -40,8 +40,23 @@ def calculate_payoffs(
     contract_multiplier: float,
     include_option_premiums: bool,
 ) -> pd.DataFrame:
+    active = option_legs.copy()
+    if "Quantity" in active.columns:
+        active = active[active["Quantity"].astype(float) != 0.0]
+    required_tickers = [selected_ticker]
+    if not active.empty and "Ticker" in active.columns:
+        required_tickers.extend(active["Ticker"].astype(str).tolist())
+    required_tickers = list(dict.fromkeys(required_tickers))
+
+    missing_caps = [ticker for ticker in required_tickers if ticker not in result.terminal_market_caps.columns]
+    missing_spots = [ticker for ticker in required_tickers if ticker not in spot_series.index]
+    if missing_caps:
+        raise ValueError("Missing terminal market-cap scenarios for " + ", ".join(missing_caps) + ".")
+    if missing_spots:
+        raise ValueError("Missing current spot price for " + ", ".join(missing_spots) + ". Open Phase 3 once to refresh market spots.")
+
     return calculate_scenario_payoffs(
-        result.terminal_market_caps,
+        result.terminal_market_caps[required_tickers],
         result.ranks,
         current_caps,
         spot_series,
@@ -74,34 +89,57 @@ simulation_inputs = snapshot["simulation_inputs"].copy()
 phase1_run = snapshot.get("run_metadata") or {}
 phase3_run = phase3_artifact.get("run_metadata") or {}
 if not matching_run_metadata(phase1_run, phase3_run):
-    st.error("The saved Phase 3 structure belongs to a different Phase 1 run. Open Phase 2 and Phase 3 once, then return here.")
+    st.error("The saved Phase 3 structures belong to a different Phase 1 run. Open Phase 2 and Phase 3 once, then return here.")
     st.stop()
 
-selected_ticker = str(phase3_artifact["selected_ticker"])
-base_option_legs = phase3_artifact["structure"].copy()
+legacy_ticker = str(phase3_artifact["selected_ticker"])
+structures_by_ticker = phase3_artifact.get("structures_by_ticker")
+if not isinstance(structures_by_ticker, dict) or not structures_by_ticker:
+    structures_by_ticker = {legacy_ticker: phase3_artifact["structure"].copy()}
+
+relevant_from_phase1 = simulation_inputs.loc[
+    simulation_inputs["Polymarket YES price"].astype(float) > 0,
+    "Ticker",
+].astype(str).tolist()
+available_tickers = [ticker for ticker in relevant_from_phase1 if ticker in structures_by_ticker]
+if not available_tickers:
+    available_tickers = list(structures_by_ticker)
+
+with st.sidebar:
+    st.header("Locked event")
+    default_ticker = legacy_ticker if legacy_ticker in available_tickers else available_tickers[0]
+    selected_ticker = st.selectbox(
+        "Selected Polymarket ticker",
+        available_tickers,
+        index=available_tickers.index(default_ticker),
+        help="Relevant outcomes come from the saved Phase 1 Polymarket list. Phase 4 switches between the corresponding Phase 3 structures.",
+    )
+
+base_option_legs = structures_by_ticker[selected_ticker].copy()
 current_caps = simulation_inputs.set_index("Ticker")["Current market cap"].astype(float)
-selected_yes_price = float(
-    simulation_inputs.loc[simulation_inputs["Ticker"] == selected_ticker, "Polymarket YES price"].iloc[0]
-)
+selected_rows = simulation_inputs.loc[simulation_inputs["Ticker"].astype(str) == selected_ticker]
+if selected_rows.empty:
+    st.error(f"{selected_ticker} is missing from the saved Phase 1 inputs.")
+    st.stop()
+selected_yes_price = float(selected_rows["Polymarket YES price"].iloc[0])
 if base_option_legs.empty:
-    st.error("The saved Phase 3 boundary query did not produce any valid option legs. Choose a reachable boundary in Phase 3 first.")
+    st.error(f"The saved Phase 3 boundary query did not produce valid option legs for {selected_ticker}. Choose a reachable boundary in Phase 3 first.")
     st.stop()
 spot_series = base_option_legs.drop_duplicates("Ticker").set_index("Ticker")["Spot"].astype(float)
 
 with st.sidebar:
-    st.header("Phase 4 controls")
     st.caption(
-        f"Locked upstream run: {phase1_run.get('target_date', 'n/a')} | "
-        f"{phase1_run.get('simulations', len(result.terminal_market_caps)):,} paths | {selected_ticker}"
+        f"Phase 1 run: {phase1_run.get('target_date', 'n/a')} | "
+        f"{phase1_run.get('simulations', len(result.terminal_market_caps)):,} paths"
     )
     profile_bins = st.slider("Payoff profile bins", min_value=5, max_value=50, value=20, step=1)
 
-    st.header("Polymarket position")
-    polymarket_side = st.selectbox("Side", ["YES", "NO"], index=0)
-    polymarket_quantity = st.number_input("Polymarket shares", min_value=0.0, value=100.0, step=10.0)
+    st.header(f"{selected_ticker} Polymarket position")
+    polymarket_side = st.selectbox(f"{selected_ticker} side", ["YES", "NO"], index=0)
+    polymarket_quantity = st.number_input(f"{selected_ticker} shares", min_value=0.0, value=100.0, step=10.0)
     default_entry = selected_yes_price if polymarket_side == "YES" else 1.0 - selected_yes_price
     polymarket_entry_price = st.number_input(
-        f"Polymarket {polymarket_side} entry price",
+        f"{selected_ticker} {polymarket_side} entry price",
         min_value=0.0,
         max_value=1.0,
         value=float(default_entry),
@@ -129,8 +167,8 @@ with st.sidebar:
     include_option_premiums = st.checkbox("Include theoretical option premiums", value=True)
 
 st.success(
-    f"Using Phase 1 scenarios and Phase 3 structure | boundary query "
-    f"{phase3_artifact.get('confidence_level', float('nan')):.0%} | "
+    f"Locked position: {polymarket_side} {selected_ticker} at {polymarket_entry_price:.3f} | "
+    f"Phase 3 boundary query {phase3_artifact.get('confidence_level', float('nan')):.0%} | "
     f"pricing mode {'surface smile' if phase3_artifact.get('use_surface_pricing') else 'ATM fallback'}"
 )
 st.caption("Date, market caps, marginal model, IV surface, correlations, random seed, and ranks are locked upstream. Change them in Phase 1 and then refresh Phases 2 and 3.")
@@ -156,12 +194,12 @@ with summary_tab:
         st.session_state.phase4_structure_signature = state_signature
     option_legs = st.session_state[state_key].copy()
 
-    st.subheader("Candidate option legs and quantities")
-    st.caption("Strikes, IVs, carry, and premiums come from Phase 3. Only quantities are editable here.")
+    st.subheader(f"{selected_ticker} candidate option legs and quantities")
+    st.caption("Strikes, IVs, carry, and premiums come from the matching Phase 3 structure. Only quantities are editable here.")
     editable_view = editable_option_legs_view(option_legs)
     edited_view = st.data_editor(
         editable_view,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Quantity": st.column_config.NumberColumn("Quantity", step=0.01, format="%.2f"),
@@ -225,16 +263,16 @@ with summary_tab:
         cols[5].metric("Worst payoff", dollars(float(summary["Worst payoff"])))
 
         st.subheader("Baseline comparison")
-        st.caption("Same Phase 1 scenarios and Polymarket position. Only the saved Phase 3 option legs differ.")
-        st.dataframe(comparison_table(baseline_scenario, scenario, hedge_template), use_container_width=True, hide_index=True)
+        st.caption(f"Same Phase 1 scenarios and {selected_ticker} Polymarket position. Only the saved Phase 3 option legs differ.")
+        st.dataframe(comparison_table(baseline_scenario, scenario, hedge_template), width="stretch", hide_index=True)
 
         st.subheader("Risk metrics")
-        st.dataframe(display_risk_summary(summary), use_container_width=True, hide_index=True)
+        st.dataframe(display_risk_summary(summary), width="stretch", hide_index=True)
 
         st.subheader("Payoff components")
         components = scenario[["Polymarket payoff", "Option payoff", "Total payoff"]].mean().to_frame("Expected payoff").reset_index().rename(columns={"index": "Component"})
         components["Expected payoff"] = components["Expected payoff"].map(dollars)
-        st.dataframe(components, use_container_width=True, hide_index=True)
+        st.dataframe(components, width="stretch", hide_index=True)
 
         save_phase_artifact(
             "phase4",
@@ -255,19 +293,19 @@ with summary_tab:
     except Exception as exc:
         st.error(str(exc))
 
-    with st.expander(f"Active option legs: {hedge_template}"):
-        st.dataframe(display_option_legs(active_legs), use_container_width=True, hide_index=True)
+    with st.expander(f"Active {selected_ticker} option legs: {hedge_template}"):
+        st.dataframe(display_option_legs(active_legs), width="stretch", hide_index=True)
 
 with profile_tab:
     profile = st.session_state.get("phase4_profile")
-    if profile is None:
+    if profile is None or st.session_state.get("phase4_selected_ticker") != selected_ticker:
         st.info("Open Payoff Summary first.")
     else:
-        st.plotly_chart(payoff_profile_figure(profile, selected_ticker), use_container_width=True)
-        st.plotly_chart(payoff_by_bin_figure(profile, selected_ticker), use_container_width=True)
+        st.plotly_chart(payoff_profile_figure(profile, selected_ticker), width="stretch")
+        st.plotly_chart(payoff_by_bin_figure(profile, selected_ticker), width="stretch")
         st.subheader("Probability-weighted payoff bins")
         st.write("Scenario probability times average payoff gives each bin's contribution to global expected payoff.")
-        st.dataframe(display_profile(profile), use_container_width=True, hide_index=True)
+        st.dataframe(display_profile(profile), width="stretch", hide_index=True)
 
 with calculator_tab:
     manual_option_calculator(
@@ -280,11 +318,11 @@ with calculator_tab:
 
 with scenarios_tab:
     scenario = st.session_state.get("phase4_scenario_payoffs")
-    if scenario is None:
+    if scenario is None or st.session_state.get("phase4_selected_ticker") != selected_ticker:
         st.info("Open Payoff Summary first.")
     else:
         st.subheader("Scenario-level payoff sample")
-        st.dataframe(display_scenarios(scenario.head(500)), use_container_width=True, hide_index=True)
+        st.dataframe(display_scenarios(scenario.head(500)), width="stretch", hide_index=True)
         st.caption("Showing the first 500 saved Phase 1 scenarios only.")
 
 with methodology_tab:
@@ -295,10 +333,11 @@ Phase 4 is a payoff evaluation engine. It does not alter the probability model a
 
 Locked workflow:
 
-- Phase 1 supplies terminal market-cap scenarios and ranks.
+- Phase 1 supplies terminal market-cap scenarios, ranks, and the relevant Polymarket outcomes.
 - Phase 2 supplies complete conditional probability curves.
-- Phase 3 queries those curves, converts boundaries to strikes, and prices each leg from strike-specific smile IV plus Phase 1 carry.
-- Phase 4 changes only the Polymarket position, option quantities, and payoff display.
+- Phase 3 builds and saves a matching option structure for every relevant outcome.
+- Phase 4 selects one saved outcome and changes only its Polymarket position, option quantities, and payoff display.
+- Full Phase 1 ranks are retained when deciding the winner. Only tickers with active option legs require stock spot prices for payoff conversion.
 
 Expected payoff bridge:
 
@@ -312,6 +351,6 @@ Payoff standard deviation:
 Payoff SD = sqrt(mean((scenario payoff - expected payoff)^2))
 ```
 
-A deterministic premium shifts expected payoff. Scenario-dependent option intrinsic value determines whether dispersion and tail loss rise or fall.
+A deterministic premium shifts expected payoff. Scenario-dependent option intrinsic value determines whether dispersion and tail loss rise or falls.
         """
     )
