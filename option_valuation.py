@@ -98,8 +98,8 @@ def black_scholes_price_with_carry(
     raise ValueError("option_type must be Call or Put.")
 
 
-def attach_market_consistent_premiums(
-    structure: pd.DataFrame,
+def reprice_option_legs(
+    legs: pd.DataFrame,
     fallback_ivs: pd.Series | dict[str, float],
     *,
     forward_ratios: pd.Series | dict[str, float] | None,
@@ -108,13 +108,13 @@ def attach_market_consistent_premiums(
     use_surface: bool,
     surface_nodes: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Attach strike-specific IVs and Phase 1-consistent carry to option legs."""
+    """Reprice any option-leg table while preserving its existing columns."""
 
-    if structure.empty:
-        return structure.copy()
+    if legs.empty:
+        return legs.copy()
     iv_fallback = pd.Series(fallback_ivs, dtype=float)
     forwards = pd.Series(forward_ratios, dtype=float) if forward_ratios is not None else pd.Series(dtype=float)
-    valued = structure.copy()
+    valued = legs.copy()
     premiums: list[float] = []
     model_ivs: list[float] = []
     iv_sources: list[str] = []
@@ -160,7 +160,7 @@ def attach_market_consistent_premiums(
         forward_values.append(forward_ratio)
         dividend_yields.append(dividend_yield)
         premiums.append(premium)
-        premium_directions.append("Credit" if str(leg["Position"]).lower() == "short" else "Debit")
+        premium_directions.append("Credit" if str(leg.get("Position", "Long")).lower() == "short" else "Debit")
 
     valued["Model IV"] = model_ivs
     valued["IV source"] = iv_sources
@@ -170,4 +170,30 @@ def attach_market_consistent_premiums(
     valued["Time to expiry"] = float(time_to_expiry)
     valued["Theoretical premium"] = premiums
     valued["Premium direction"] = premium_directions
+    return valued
+
+
+def attach_market_consistent_premiums(
+    structure: pd.DataFrame,
+    fallback_ivs: pd.Series | dict[str, float],
+    *,
+    forward_ratios: pd.Series | dict[str, float] | None,
+    time_to_expiry: float,
+    risk_free_rate: float,
+    use_surface: bool,
+    surface_nodes: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Attach strike-specific IVs and Phase 1-consistent carry to Phase 3 legs."""
+
+    valued = reprice_option_legs(
+        structure,
+        fallback_ivs,
+        forward_ratios=forward_ratios,
+        time_to_expiry=time_to_expiry,
+        risk_free_rate=risk_free_rate,
+        use_surface=use_surface,
+        surface_nodes=surface_nodes,
+    )
+    if valued.empty:
+        return valued
     return valued[VALUED_OPTION_COLUMNS + EXTRA_VALUATION_COLUMNS]
