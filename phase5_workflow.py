@@ -17,12 +17,13 @@ from manual_portfolio import manual_option_payoffs_and_analytics, resolve_manual
 from optimization import build_candidate_option_universe, long_option_payoff_matrix, payoff_metrics
 from option_valuation import reprice_option_legs
 from payoff_surface import polymarket_payoff, selected_payoff_profile_bins, terminal_stock_prices, winner_from_ranks
-from phase4_ui import display_profile, dollars, payoff_by_bin_figure, payoff_profile_figure, pct
-from robust_optimizer import render_robust_optimizer
+from phase4_ui import display_profile, dollars, pct
+from robust_optimizer import aligned_profile_figure, price_bin_profile, render_robust_optimizer
 from simulation_store import load_phase_artifact, load_simulation_snapshot
 
 NORMALIZED_SPOT = 100.0
 OPTION_CONTRACT_MULTIPLIER = 100.0
+DEFAULT_MANUAL_CONTRACTS = 0.01
 
 
 def matching_metadata(left: dict, right: dict) -> bool:
@@ -75,10 +76,36 @@ def distribution_figure(baseline, portfolio, name) -> go.Figure:
     return fig
 
 
+def manual_diagnostic_figure(base, total, terminal_prices) -> go.Figure:
+    base_profile = price_bin_profile(terminal_prices, base, bin_width=5.0)
+    portfolio_profile = price_bin_profile(terminal_prices, total, bin_width=5.0)
+    fig = aligned_profile_figure(base_profile, portfolio_profile)
+    fig.add_trace(
+        go.Scatter(
+            x=portfolio_profile["Price bin"],
+            y=portfolio_profile["Expected payoff"] - portfolio_profile["Payoff SD"],
+            name="Manual mean minus SD",
+            mode="lines+markers",
+            line=dict(color="#7c3aed", dash="dash"),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.update_layout(title="Manual portfolio payoff, stress lines, and scenario probability")
+    return fig
+
+
 def clear_leg_state() -> None:
     for key in list(st.session_state):
         if str(key).startswith("leg_"):
             del st.session_state[key]
+
+
+def default_manual_rows(ticker: str, pricing_iv: float) -> list[dict]:
+    rows = default_interactive_rows(ticker, pricing_iv)
+    for row in rows:
+        row["quantity"] = DEFAULT_MANUAL_CONTRACTS
+    return rows
 
 
 def phase4_rows(phase4: dict | None, fallback_iv: float) -> list[dict] | None:
@@ -164,35 +191,17 @@ def render() -> None:
         st.header("Hedge universe")
         threshold = st.number_input("Minimum Phase 1 P(#1)", 0.0, 1.0, 0.10, 0.01, format="%.2f")
         st.header("Candidate chain")
-        grid_points = st.number_input(
-            "Strike grid points", 7, 61, 25, 2,
-            help="Number of candidate strikes generated between the lower and upper terminal-price quantiles for every eligible ticker.",
-        )
-        lower_q = st.number_input(
-            "Lower terminal-price quantile", 0.001, 0.25, 0.01, 0.005, format="%.3f",
-            help="Lowest simulated terminal-price quantile used to start the candidate strike grid. 0.010 means the 1st percentile.",
-        )
-        upper_q = st.number_input(
-            "Upper terminal-price quantile", 0.75, 0.999, 0.99, 0.005, format="%.3f",
-            help="Highest simulated terminal-price quantile used to end the candidate strike grid. 0.990 means the 99th percentile.",
-        )
-        quantity_step = st.number_input(
-            "Quantity step", 0.001, value=0.025, step=0.005, format="%.3f",
-            help="Optimizer search increment in option contracts. One contract represents 100 shares.",
-        )
-        max_quantity = st.number_input(
-            "Maximum absolute quantity per leg", 0.0, value=0.50, step=0.025, format="%.3f",
-            help="Maximum long or short option contracts per leg. One contract represents 100 shares.",
-        )
+        grid_points = st.number_input("Strike grid points", 7, 61, 25, 2, help="Number of candidate strikes generated between the lower and upper terminal-price quantiles for every eligible ticker.")
+        lower_q = st.number_input("Lower terminal-price quantile", 0.001, 0.25, 0.01, 0.005, format="%.3f", help="Lowest simulated terminal-price quantile used to start the candidate strike grid. 0.010 means the 1st percentile.")
+        upper_q = st.number_input("Upper terminal-price quantile", 0.75, 0.999, 0.99, 0.005, format="%.3f", help="Highest simulated terminal-price quantile used to end the candidate strike grid. 0.990 means the 99th percentile.")
+        quantity_step = st.number_input("Quantity step", 0.001, value=0.025, step=0.005, format="%.3f", help="Optimizer search increment in option contracts. One contract represents 100 shares.")
+        max_quantity = st.number_input("Maximum absolute quantity per leg", 0.0, value=0.50, step=0.025, format="%.3f", help="Maximum long or short option contracts per leg. One contract represents 100 shares.")
         max_total = st.number_input("Maximum total absolute quantity", 0.0, value=0.50, step=0.05)
         max_legs = st.number_input("Maximum active legs", 1, 5, 4, 1)
         optimization_paths = st.number_input("Stored paths used in search", min_value=min(500, len(result.terminal_market_caps)), max_value=len(result.terminal_market_caps), value=min(20_000, len(result.terminal_market_caps)), step=min(500, len(result.terminal_market_caps)))
 
-    st.success(
-        f"Frozen close snapshot | target {run.get('target_date', 'n/a')} | {len(result.terminal_market_caps):,} paths | "
-        f"Phase 2 curves loaded | pricing: {'strike-specific surface' if use_surface else 'Phase 1 ATM fallback'}"
-    )
-    st.caption("Prices are normalized to 100. One option contract represents 100 shares. No Yahoo request occurs on this page.")
+    st.success(f"Frozen close snapshot | target {run.get('target_date', 'n/a')} | {len(result.terminal_market_caps):,} paths | Phase 2 curves loaded | pricing: {'strike-specific surface' if use_surface else 'Phase 1 ATM fallback'}")
+    st.caption("Prices are normalized to 100. One option contract represents 100 shares. For a one-share-equivalent diagnostic hedge, use 0.01 contracts. No Yahoo request occurs on this page.")
 
     eligible = [ticker for ticker in tickers if float(probabilities.loc[ticker]) >= float(threshold)]
     if selected not in eligible:
@@ -208,16 +217,8 @@ def render() -> None:
         terminal = normalized_prices[ticker].to_numpy(float)
         lo, hi = np.quantile(terminal, [float(lower_q), float(upper_q)])
         multipliers = np.unique(np.append(np.linspace(lo / 100.0, hi / 100.0, int(grid_points)), 1.0))
-        chain = build_candidate_option_universe(
-            ticker=ticker, spot=100.0, volatility=float(fallback_ivs.loc[ticker]),
-            time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate,
-            strike_multipliers=multipliers, include_calls=True, include_puts=True,
-        )
-        chain = reprice_option_legs(
-            chain, fallback_ivs, forward_ratios=forward_ratios,
-            time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate,
-            use_surface=use_surface,
-        )
+        chain = build_candidate_option_universe(ticker=ticker, spot=100.0, volatility=float(fallback_ivs.loc[ticker]), time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, strike_multipliers=multipliers, include_calls=True, include_puts=True)
+        chain = reprice_option_legs(chain, fallback_ivs, forward_ratios=forward_ratios, time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, use_surface=use_surface)
         labels = []
         for _, leg in chain.iterrows():
             boundary_type = "Win boundary" if leg["Option type"] == "Call" else "Loss boundary"
@@ -225,29 +226,22 @@ def render() -> None:
             labels.append(f"{confidence:.1%} {boundary_type.lower()}")
         chain["Boundary used"] = labels
         candidate_tables.append(chain)
-        matrices.append(long_option_payoff_matrix(
-            normalized_prices[ticker], chain,
-            contract_multiplier=OPTION_CONTRACT_MULTIPLIER,
-            include_premiums=True,
-        ))
+        matrices.append(long_option_payoff_matrix(normalized_prices[ticker], chain, contract_multiplier=OPTION_CONTRACT_MULTIPLIER, include_premiums=True))
     candidates = pd.concat(candidate_tables, ignore_index=True)
     option_matrix = np.concatenate(matrices, axis=1)
     optimizer_candidates = candidates.copy()
-    optimizer_candidates["Theoretical premium"] = (
-        optimizer_candidates["Theoretical premium"].astype(float)
-        * OPTION_CONTRACT_MULTIPLIER
-    )
+    optimizer_candidates["Theoretical premium"] = optimizer_candidates["Theoretical premium"].astype(float) * OPTION_CONTRACT_MULTIPLIER
     optimizer_candidates["Premium unit"] = "per contract"
 
-    manual_tab, optimizer_tab, chain_tab, methodology_tab = st.tabs(
-        ["Manual Portfolio", "Optimizer 2", "Option Chain", "Methodology"]
-    )
+    manual_tab, optimizer_tab, chain_tab, methodology_tab = st.tabs(["Manual Portfolio", "Optimizer 2", "Option Chain", "Methodology"])
 
     with manual_tab:
         default_iv = float(fallback_ivs.loc[selected])
+        if "phase5_interactive_rows" not in st.session_state:
+            st.session_state.phase5_interactive_rows = default_manual_rows(selected, default_iv)
         a, b, _ = st.columns([1, 1, 3])
         if a.button("Reset portfolio"):
-            st.session_state.phase5_interactive_rows = default_interactive_rows(selected, default_iv)
+            st.session_state.phase5_interactive_rows = default_manual_rows(selected, default_iv)
             clear_leg_state()
             st.rerun()
         upstream_rows = phase4_rows(phase4, default_iv)
@@ -255,40 +249,23 @@ def render() -> None:
             st.session_state.phase5_interactive_rows = upstream_rows
             clear_leg_state()
             st.rerun()
-        manual_inputs = render_interactive_leg_editor(
-            tickers=eligible, curves=curves, default_ticker=selected,
-            default_iv=default_iv, iv_by_ticker=fallback_ivs,
-            normalized_spot=100.0, auto_surface_tickers=surface_tickers,
-        )
+        st.info("Contract sizing: 1.00 = 100 shares; 0.01 = one-share-equivalent option exposure.")
+        manual_inputs = render_interactive_leg_editor(tickers=eligible, curves=curves, default_ticker=selected, default_iv=default_iv, iv_by_ticker=fallback_ivs, normalized_spot=100.0, auto_surface_tickers=surface_tickers)
         try:
-            legs = resolve_manual_option_legs(
-                manual_inputs, pd.DataFrame(), time_to_expiry=time_to_expiry,
-                risk_free_rate=risk_free_rate, normalized_spot=100.0,
-            )
+            legs = resolve_manual_option_legs(manual_inputs, pd.DataFrame(), time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, normalized_spot=100.0)
             metadata = manual_inputs[manual_inputs["Active"]].reset_index(drop=True)
             if not legs.empty:
                 legs["Strike source"] = metadata["Definition mode"].to_numpy()
-                legs["Boundary used"] = metadata.apply(
-                    lambda row: f"{row['Implied confidence (%)']:.1f}% {row['Boundary type']}" if row["Definition mode"] == "Strike" else f"{row['Boundary confidence (%)']:.1f}% {row['Boundary type']}", axis=1,
-                ).to_numpy()
-                legs = reprice_option_legs(
-                    legs, fallback_ivs, forward_ratios=forward_ratios,
-                    time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate,
-                    use_surface=use_surface,
-                )
-            option_payoff, analytics = manual_option_payoffs_and_analytics(
-                legs, normalized_prices,
-                contract_multiplier=OPTION_CONTRACT_MULTIPLIER,
-                include_premiums=True,
-            )
+                legs["Boundary used"] = metadata.apply(lambda row: f"{row['Implied confidence (%)']:.1f}% {row['Boundary type']}" if row["Definition mode"] == "Strike" else f"{row['Boundary confidence (%)']:.1f}% {row['Boundary type']}", axis=1).to_numpy()
+                legs = reprice_option_legs(legs, fallback_ivs, forward_ratios=forward_ratios, time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, use_surface=use_surface)
+            option_payoff, analytics = manual_option_payoffs_and_analytics(legs, normalized_prices, contract_multiplier=OPTION_CONTRACT_MULTIPLIER, include_premiums=True)
             total = base + option_payoff
             manual_metrics = payoff_metrics(total)
             profile = make_profile(result, current_caps, normalized_prices, winners, selected, total, option_payoff, base)
             st.dataframe(metrics_comparison(baseline_metrics, manual_metrics, "Manual portfolio"), width="stretch", hide_index=True)
             st.subheader("Live payoff profile")
-            st.caption("This updates with every manual leg. Green bins have a positive average payoff; red bins have a negative average payoff.")
-            st.plotly_chart(payoff_by_bin_figure(profile, selected), width="stretch", key="phase5_manual_payoff_by_bin")
-            st.plotly_chart(payoff_profile_figure(profile, selected), width="stretch", key="phase5_manual_weighted_profile")
+            st.caption("Mean, mean minus SD, P5, P1, and scenario probability update with every manual leg.")
+            st.plotly_chart(manual_diagnostic_figure(base, total, normalized_prices[selected].to_numpy(float)), width="stretch", key="phase5_manual_diagnostic_v2")
             with st.expander("Payoff distribution and detailed bin table"):
                 st.plotly_chart(distribution_figure(base, total, "Manual portfolio"), width="stretch", key="phase5_manual_distribution")
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
@@ -300,16 +277,7 @@ def render() -> None:
             st.error(str(exc))
 
     with optimizer_tab:
-        render_robust_optimizer(
-            base_payoff=base, option_payoff_matrix=option_matrix,
-            candidates=optimizer_candidates,
-            terminal_prices=normalized_prices[selected].to_numpy(float),
-            quantity_min=-float(max_quantity), quantity_max=float(max_quantity),
-            quantity_step=float(quantity_step), max_legs=int(max_legs),
-            max_total_quantity=float(max_total),
-            default_minimum_ev=float(baseline_metrics["Expected payoff"]),
-            optimization_scenarios=int(optimization_paths), seed=int(run.get("seed", 42)),
-        )
+        render_robust_optimizer(base_payoff=base, option_payoff_matrix=option_matrix, candidates=optimizer_candidates, terminal_prices=normalized_prices[selected].to_numpy(float), quantity_min=-float(max_quantity), quantity_max=float(max_quantity), quantity_step=float(quantity_step), max_legs=int(max_legs), max_total_quantity=float(max_total), default_minimum_ev=float(baseline_metrics["Expected payoff"]), optimization_scenarios=int(optimization_paths), seed=int(run.get("seed", 42)))
 
     with chain_tab:
         st.subheader("Locked normalized candidate chain")
@@ -325,6 +293,6 @@ Phase 5 is downstream-only:
 - Phase 3 supplies the locked risk-free rate and decides whether the calibrated surface matches the target expiry.
 - Phase 4 can seed the manual portfolio, but Phase 5 may change quantities and strikes.
 - Candidate premiums use strike-specific surface IV when available. Distribution IV and pricing IV remain separate.
-- One option contract represents 100 shares in both Manual Portfolio and Optimizer 2.
+- One option contract represents 100 shares in both Manual Portfolio and Optimizer 2. A quantity of 0.01 is one-share-equivalent exposure.
 - Optimizer 2 deducts execution cost, enforces EV and ES5 floors, and caps active option legs at five.
         """)
