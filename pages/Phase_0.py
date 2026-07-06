@@ -11,13 +11,18 @@ import streamlit as st
 from correlations import fetch_adjusted_close
 from iv_surface_model import SURFACE_AS_OF, SURFACE_EXPIRY, default_surface_nodes
 from model import default_company_inputs
+from simulation_store import load_phase_artifact, save_phase_artifact
 
 
 st.set_page_config(page_title="Phase 0 - Input Diagnostics", layout="wide")
 st.title("Phase 0: Input Diagnostics")
-st.caption("Prepare and audit the historical return sample and the option-implied volatility surfaces before running Phase 1.")
+st.caption("Choose the market-data snapshot, then audit historical returns and option-implied volatility surfaces before Phase 1.")
 
 NORMAL = NormalDist()
+MODE_LABELS = {
+    "Use last saved market snapshot": "saved",
+    "Refresh live market data on next Phase 1 run": "refresh",
+}
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
@@ -44,22 +49,20 @@ def return_summary(returns: pd.DataFrame) -> pd.DataFrame:
         skew = float(series.skew())
         kurtosis = float(series.kurtosis())
         jb = len(series) / 6.0 * (skew**2 + 0.25 * kurtosis**2)
-        rows.append(
-            {
-                "Ticker": ticker,
-                "Observations": len(series),
-                "Annualized realized vol": daily_std * np.sqrt(252),
-                "Skewness": skew,
-                "Excess kurtosis": kurtosis,
-                "JB p-value": float(np.exp(-0.5 * jb)),
-                "Empirical >3 sigma": float((centered.abs() > 3 * daily_std).mean()),
-                "P1": float(series.quantile(0.01)),
-                "P5": float(series.quantile(0.05)),
-                "P50": float(series.quantile(0.50)),
-                "P95": float(series.quantile(0.95)),
-                "P99": float(series.quantile(0.99)),
-            }
-        )
+        rows.append({
+            "Ticker": ticker,
+            "Observations": len(series),
+            "Annualized realized vol": daily_std * np.sqrt(252),
+            "Skewness": skew,
+            "Excess kurtosis": kurtosis,
+            "JB p-value": float(np.exp(-0.5 * jb)),
+            "Empirical >3 sigma": float((centered.abs() > 3 * daily_std).mean()),
+            "P1": float(series.quantile(0.01)),
+            "P5": float(series.quantile(0.05)),
+            "P50": float(series.quantile(0.50)),
+            "P95": float(series.quantile(0.95)),
+            "P99": float(series.quantile(0.99)),
+        })
     return pd.DataFrame(rows)
 
 
@@ -70,6 +73,27 @@ def qq_data(series: pd.Series) -> pd.DataFrame:
     standardized = (clean - clean.mean()) / clean.std(ddof=1)
     return pd.DataFrame({"Normal quantile": theoretical, "Historical standardized return": standardized})
 
+
+st.subheader("Market data policy")
+current_policy = load_phase_artifact("data_policy") or {"mode": "refresh"}
+current_mode = str(current_policy.get("mode", "refresh"))
+labels = list(MODE_LABELS)
+default_label = next((label for label, mode in MODE_LABELS.items() if mode == current_mode), labels[0])
+selected_label = st.radio(
+    "What should the next Phase 1 run do?",
+    labels,
+    index=labels.index(default_label),
+    horizontal=True,
+)
+selected_mode = MODE_LABELS[selected_label]
+if selected_mode != current_mode:
+    st.cache_data.clear()
+save_phase_artifact("data_policy", {"mode": selected_mode, "label": selected_label})
+if selected_mode == "saved":
+    st.info("Phase 1 will reuse the last valid saved market caps, spots, and implied forwards. It will not intentionally refresh Yahoo market data.")
+else:
+    st.warning("The next Phase 1 run will request fresh Yahoo market caps, spots, price history, and option-chain forwards. Each successful result becomes the new saved snapshot.")
+st.caption("If Yahoo option-chain pairs are unavailable, Phase 1 uses the last valid implied forward for that ticker. Without any saved forward it uses a transparent flat-carry fallback instead of stopping.")
 
 returns_tab, surface_tab = st.tabs(["Return Diagnostics", "IV Surface Calibration"])
 
@@ -95,57 +119,44 @@ with returns_tab:
             display[column] = display[column].map(pct)
         for column in ["Skewness", "Excess kurtosis"]:
             display[column] = display[column].map(lambda value: f"{value:.2f}")
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.dataframe(display, width="stretch", hide_index=True)
 
         detail_ticker = st.selectbox("Ticker detail", summary["Ticker"].tolist(), key="phase0_return_detail")
         series = returns[detail_ticker].dropna()
         left, right = st.columns(2)
         with left:
-            st.plotly_chart(
-                px.histogram(series, nbins=80, title=f"Daily log-return distribution: {detail_ticker}"),
-                use_container_width=True,
-                key="phase0_return_hist",
-            )
+            st.plotly_chart(px.histogram(series, nbins=80, title=f"Daily log-return distribution: {detail_ticker}"), width="stretch", key="phase0_return_hist")
         with right:
             qq = qq_data(series)
             chart = px.scatter(qq, x="Normal quantile", y="Historical standardized return", title=f"QQ plot vs normal: {detail_ticker}")
             low = float(min(qq["Normal quantile"].min(), qq["Historical standardized return"].min()))
             high = float(max(qq["Normal quantile"].max(), qq["Historical standardized return"].max()))
             chart.add_trace(go.Scatter(x=[low, high], y=[low, high], mode="lines", name="Normal line", line={"dash": "dash", "color": "gray"}))
-            st.plotly_chart(chart, use_container_width=True, key="phase0_return_qq")
+            st.plotly_chart(chart, width="stretch", key="phase0_return_qq")
 
 with surface_tab:
     st.caption(f"Manual calibration snapshot: {SURFACE_AS_OF}; option expiry: {SURFACE_EXPIRY}.")
     nodes = default_surface_nodes()
     selected_surface_tickers = st.multiselect(
-        "Surface tickers",
-        nodes["Ticker"].drop_duplicates().tolist(),
-        default=nodes["Ticker"].drop_duplicates().tolist(),
-        key="phase0_surface_tickers",
+        "Surface tickers", nodes["Ticker"].drop_duplicates().tolist(),
+        default=nodes["Ticker"].drop_duplicates().tolist(), key="phase0_surface_tickers",
     )
     filtered = nodes[nodes["Ticker"].isin(selected_surface_tickers)].copy()
     if filtered.empty:
         st.info("Select at least one surface ticker.")
     else:
         chart = px.line(
-            filtered,
-            x="Strike",
-            y="IV",
-            color="Ticker",
-            symbol="Wing",
-            markers=True,
-            facet_col="Ticker",
-            facet_col_wrap=1,
+            filtered, x="Strike", y="IV", color="Ticker", symbol="Wing",
+            markers=True, facet_col="Ticker", facet_col_wrap=1,
             title="Calibrated implied-volatility smiles",
         )
         chart.update_yaxes(tickformat=".0%")
         chart.update_layout(height=300 * len(selected_surface_tickers), showlegend=True)
-        st.plotly_chart(chart, use_container_width=True, key="phase0_surface_chart")
+        st.plotly_chart(chart, width="stretch", key="phase0_surface_chart")
 
         display_nodes = filtered.copy()
         display_nodes["Observed spot"] = display_nodes["Observed spot"].map(lambda value: f"${value:,.2f}")
         display_nodes["Moneyness"] = display_nodes["Moneyness"].map(pct)
         display_nodes["IV"] = display_nodes["IV"].map(pct)
-        st.dataframe(display_nodes, use_container_width=True, hide_index=True)
-
-        st.info("Phase 0 calibrates and audits inputs. Phase 1 consumes these surfaces and runs the joint ranking simulation once.")
+        st.dataframe(display_nodes, width="stretch", hide_index=True)
+        st.info("Phase 0 stores the refresh policy and audits inputs. Phase 1 consumes the selected snapshot and runs the joint ranking simulation once.")
