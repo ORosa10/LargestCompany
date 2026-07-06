@@ -12,6 +12,7 @@ from interactive_portfolio import (
     optimized_legs_to_interactive_rows,
     render_interactive_leg_editor,
 )
+from iv_surface_model import default_surface_nodes
 from manual_portfolio import manual_option_payoffs_and_analytics, resolve_manual_option_legs
 from optimization import build_candidate_option_universe, long_option_payoff_matrix, payoff_metrics
 from option_valuation import reprice_option_legs
@@ -145,6 +146,7 @@ def render() -> None:
     use_surface = bool(phase3.get("use_surface_pricing", False))
     fallback_ivs = input_by_ticker["Implied volatility"].astype(float)
     forward_ratios = input_by_ticker["Forward / spot"].astype(float) if "Forward / spot" in input_by_ticker.columns else None
+    surface_tickers = set(default_surface_nodes()["Ticker"].astype(str)) if use_surface else set()
 
     default_selected = str((phase4 or {}).get("selected_ticker", phase3.get("selected_ticker", relevant[0])))
     if default_selected not in relevant:
@@ -161,11 +163,26 @@ def render() -> None:
         st.header("Hedge universe")
         threshold = st.number_input("Minimum Phase 1 P(#1)", 0.0, 1.0, 0.10, 0.01, format="%.2f")
         st.header("Candidate chain")
-        grid_points = st.number_input("Strike grid points", 7, 61, 25, 2)
-        lower_q = st.number_input("Lower terminal-price quantile", 0.001, 0.25, 0.01, 0.005, format="%.3f")
-        upper_q = st.number_input("Upper terminal-price quantile", 0.75, 0.999, 0.99, 0.005, format="%.3f")
-        quantity_step = st.number_input("Quantity step", 0.001, value=0.025, step=0.005, format="%.3f")
-        max_quantity = st.number_input("Maximum absolute quantity per leg", 0.0, value=0.50, step=0.025, format="%.3f")
+        grid_points = st.number_input(
+            "Strike grid points", 7, 61, 25, 2,
+            help="Number of candidate strikes generated between the lower and upper terminal-price quantiles for every eligible ticker.",
+        )
+        lower_q = st.number_input(
+            "Lower terminal-price quantile", 0.001, 0.25, 0.01, 0.005, format="%.3f",
+            help="Lowest simulated terminal-price quantile used to start the candidate strike grid. 0.010 means the 1st percentile.",
+        )
+        upper_q = st.number_input(
+            "Upper terminal-price quantile", 0.75, 0.999, 0.99, 0.005, format="%.3f",
+            help="Highest simulated terminal-price quantile used to end the candidate strike grid. 0.990 means the 99th percentile.",
+        )
+        quantity_step = st.number_input(
+            "Quantity step", 0.001, value=0.025, step=0.005, format="%.3f",
+            help="Optimizer search increment for contracts per candidate leg.",
+        )
+        max_quantity = st.number_input(
+            "Maximum absolute quantity per leg", 0.0, value=0.50, step=0.025, format="%.3f",
+            help="Maximum long or short contract quantity allowed for one option leg.",
+        )
         max_total = st.number_input("Maximum total absolute quantity", 0.0, value=0.50, step=0.05)
         max_legs = st.number_input("Maximum active legs", 1, 5, 4, 1)
         optimization_paths = st.number_input("Stored paths used in search", min_value=min(500, len(result.terminal_market_caps)), max_value=len(result.terminal_market_caps), value=min(20_000, len(result.terminal_market_caps)), step=min(500, len(result.terminal_market_caps)))
@@ -211,8 +228,8 @@ def render() -> None:
     candidates = pd.concat(candidate_tables, ignore_index=True)
     option_matrix = np.concatenate(matrices, axis=1)
 
-    manual_tab, optimizer_tab, chain_tab, payoff_tab, methodology_tab = st.tabs(
-        ["Manual Portfolio", "Optimizer 2", "Option Chain", "Payoff Diagnostics", "Methodology"]
+    manual_tab, optimizer_tab, chain_tab, methodology_tab = st.tabs(
+        ["Manual Portfolio", "Optimizer 2", "Option Chain", "Methodology"]
     )
 
     with manual_tab:
@@ -230,7 +247,7 @@ def render() -> None:
         manual_inputs = render_interactive_leg_editor(
             tickers=eligible, curves=curves, default_ticker=selected,
             default_iv=default_iv, iv_by_ticker=fallback_ivs,
-            normalized_spot=100.0,
+            normalized_spot=100.0, auto_surface_tickers=surface_tickers,
         )
         try:
             legs = resolve_manual_option_legs(
@@ -254,9 +271,14 @@ def render() -> None:
             total = base + option_payoff
             manual_metrics = payoff_metrics(total)
             profile = make_profile(result, current_caps, normalized_prices, winners, selected, total, option_payoff, base)
-            st.session_state.phase5_manual_total = total
-            st.session_state.phase5_manual_profile = profile
             st.dataframe(metrics_comparison(baseline_metrics, manual_metrics, "Manual portfolio"), width="stretch", hide_index=True)
+            st.subheader("Live payoff profile")
+            st.caption("This updates with every manual leg. Green bins have a positive average payoff; red bins have a negative average payoff.")
+            st.plotly_chart(payoff_by_bin_figure(profile, selected), width="stretch", key="phase5_manual_payoff_by_bin")
+            st.plotly_chart(payoff_profile_figure(profile, selected), width="stretch", key="phase5_manual_weighted_profile")
+            with st.expander("Payoff distribution and detailed bin table"):
+                st.plotly_chart(distribution_figure(base, total, "Manual portfolio"), width="stretch", key="phase5_manual_distribution")
+                st.dataframe(display_profile(profile), width="stretch", hide_index=True)
             st.subheader("Resolved portfolio")
             st.dataframe(display_legs(legs), width="stretch", hide_index=True)
             st.subheader("Standalone leg analytics")
@@ -279,17 +301,6 @@ def render() -> None:
         st.subheader("Locked normalized candidate chain")
         filters = st.multiselect("Tickers", eligible, default=eligible)
         st.dataframe(display_legs(candidates[candidates["Ticker"].isin(filters)]), width="stretch", hide_index=True)
-
-    with payoff_tab:
-        manual_total = st.session_state.get("phase5_manual_total")
-        if manual_total is None:
-            st.info("Build the Manual Portfolio first.")
-        else:
-            profile = st.session_state.phase5_manual_profile
-            st.plotly_chart(distribution_figure(base, manual_total, "Manual portfolio"), width="stretch")
-            st.plotly_chart(payoff_profile_figure(profile, selected), width="stretch")
-            st.plotly_chart(payoff_by_bin_figure(profile, selected), width="stretch")
-            st.dataframe(display_profile(profile), width="stretch", hide_index=True)
 
     with methodology_tab:
         st.markdown("""
