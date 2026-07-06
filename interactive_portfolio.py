@@ -133,6 +133,7 @@ def _render_leg_card(
     curves: dict[str, pd.DataFrame],
     iv_by_ticker: pd.Series,
     normalized_spot: float,
+    auto_surface_tickers: set[str],
 ) -> tuple[dict, bool]:
     """Render one narrow card with controls stacked vertically."""
     row_id = int(row["id"])
@@ -245,16 +246,26 @@ def _render_leg_card(
         if ticker == previous_ticker
         else float(iv_by_ticker.loc[ticker])
     )
-    pricing_iv = st.number_input(
-        "Pricing IV",
-        min_value=0.0001,
-        max_value=5.0,
-        value=initial_iv,
-        step=0.01,
-        format="%.2f",
-        key=f"leg_iv_{row_id}",
-        help="Annualized decimal: 0.42 means 42%.",
-    )
+    if ticker in auto_surface_tickers:
+        st.text_input(
+            "Pricing IV",
+            value="Auto from calibrated surface",
+            disabled=True,
+            key=f"leg_iv_auto_{row_id}",
+            help="The strike-specific IV is interpolated after the strike is resolved. The exact value appears in Resolved portfolio.",
+        )
+        pricing_iv = initial_iv
+    else:
+        pricing_iv = st.number_input(
+            "Pricing IV fallback",
+            min_value=0.0001,
+            max_value=5.0,
+            value=initial_iv,
+            step=0.01,
+            format="%.2f",
+            key=f"leg_iv_{row_id}",
+            help="Used only when no calibrated surface is available. Annualized decimal: 0.42 means 42%.",
+        )
 
     st.caption(
         f"{position} {quantity:.3f} x {ticker} {option_type} @ {strike:.2f} | "
@@ -291,6 +302,7 @@ def render_interactive_leg_editor(
     iv_by_ticker: pd.Series,
     normalized_spot: float = 100.0,
     state_key: str = "phase5_interactive_rows",
+    auto_surface_tickers: set[str] | None = None,
 ) -> pd.DataFrame:
     """Render up to four vertical option cards per row."""
     if state_key not in st.session_state:
@@ -298,6 +310,7 @@ def render_interactive_leg_editor(
             default_ticker, default_iv
         )
     rows = st.session_state[state_key]
+    surface_tickers = set() if auto_surface_tickers is None else set(auto_surface_tickers)
 
     rendered_rows = []
     remove_id = None
@@ -314,6 +327,7 @@ def render_interactive_leg_editor(
                         curves=curves,
                         iv_by_ticker=iv_by_ticker,
                         normalized_spot=normalized_spot,
+                        auto_surface_tickers=surface_tickers,
                     )
                     rendered_rows.append(rendered)
                     if remove:
