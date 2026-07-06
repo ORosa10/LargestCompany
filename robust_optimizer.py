@@ -205,16 +205,35 @@ def render_robust_optimizer(*, base_payoff, option_payoff_matrix, candidates, te
         st.info("Configure a valid candidate universe in the classic Optimizer controls first.")
         return
     baseline = robust_metrics(base_payoff)
+    baseline_ev = float(baseline["Expected payoff"])
+    baseline_es5 = float(baseline["ES 5%"])
+    ev_slack = max(1.0, 0.05 * abs(baseline_ev))
+    es5_slack = max(1.0, 0.05 * abs(baseline_es5))
+    default_ev_floor = baseline_ev - ev_slack
+    default_es5_floor = baseline_es5 - es5_slack
+
     row1 = st.columns(5)
     metric = row1[0].selectbox("Primary floor metric", FLOOR_METRICS)
-    minimum_ev = row1[1].number_input("Minimum expected payoff", value=float(max(default_minimum_ev, 0)), step=1.0)
-    minimum_es5 = row1[2].number_input("Minimum ES 5%", value=float(baseline["ES 5%"]), step=1.0)
+    minimum_ev = row1[1].number_input(
+        "Minimum expected payoff", value=float(default_ev_floor), step=1.0,
+        key="optimizer2_minimum_ev_v2",
+        help="Defaults slightly below the Polymarket-only EV so the optimizer can exchange a small amount of EV for a flatter payoff profile.",
+    )
+    minimum_es5 = row1[2].number_input(
+        "Minimum ES 5%", value=float(default_es5_floor), step=1.0,
+        key="optimizer2_minimum_es5_v2",
+        help="Defaults slightly below the Polymarket-only ES 5% to leave room for a feasible hedge.",
+    )
     bins = row1[3].number_input("Optimization bins", 10, 50, 20, 5)
     width = row1[4].number_input("Displayed bin width (%)", 2.5, 20.0, 5.0, 2.5)
     row2 = st.columns(3)
     tc_rate = row2[0].number_input("Execution cost (% of option premium)", 0.0, 20.0, 1.0, .25) / 100
     optimizer_legs = row2[1].number_input("Maximum active option legs", 1, 5, min(max(int(max_legs), 1), 5), 1)
     row2[2].metric("Hard leg cap", "5")
+    st.caption(
+        f"Polymarket-only reference: EV ${baseline_ev:,.2f}, ES 5% ${baseline_es5:,.2f}. "
+        "The default floors allow a small controlled trade-off instead of forcing an exact no-trade solution."
+    )
 
     if st.button("Update Optimizer 2", type="primary"):
         try:
@@ -230,6 +249,11 @@ def render_robust_optimizer(*, base_payoff, option_payoff_matrix, candidates, te
         return
     base_profile = price_bin_profile(terminal_prices, base_payoff, bin_width=float(width))
     st.caption(f"{result.objective_metric}; {len(result.selected_legs)} active legs; ${result.transaction_cost:,.2f} execution cost; {result.iterations} accepted search steps.")
+    if result.selected_legs.empty:
+        st.warning(
+            "No candidate leg improved the conditional objective while satisfying both floors. "
+            "This is a valid no-trade result. To test a wider trade-off, lower Minimum expected payoff or Minimum ES 5%, increase Maximum total absolute quantity, or reduce Quantity step."
+        )
     st.subheader("Objective audit")
     st.dataframe(audit_table(base_payoff, np.asarray(terminal_prices), result, int(bins), float(minimum_ev), float(minimum_es5)), use_container_width=True, hide_index=True)
     st.subheader("Global payoff metrics")
