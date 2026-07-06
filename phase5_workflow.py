@@ -22,6 +22,7 @@ from robust_optimizer import render_robust_optimizer
 from simulation_store import load_phase_artifact, load_simulation_snapshot
 
 NORMALIZED_SPOT = 100.0
+OPTION_CONTRACT_MULTIPLIER = 100.0
 
 
 def matching_metadata(left: dict, right: dict) -> bool:
@@ -177,11 +178,11 @@ def render() -> None:
         )
         quantity_step = st.number_input(
             "Quantity step", 0.001, value=0.025, step=0.005, format="%.3f",
-            help="Optimizer search increment for contracts per candidate leg.",
+            help="Optimizer search increment in option contracts. One contract represents 100 shares.",
         )
         max_quantity = st.number_input(
             "Maximum absolute quantity per leg", 0.0, value=0.50, step=0.025, format="%.3f",
-            help="Maximum long or short contract quantity allowed for one option leg.",
+            help="Maximum long or short option contracts per leg. One contract represents 100 shares.",
         )
         max_total = st.number_input("Maximum total absolute quantity", 0.0, value=0.50, step=0.05)
         max_legs = st.number_input("Maximum active legs", 1, 5, 4, 1)
@@ -191,7 +192,7 @@ def render() -> None:
         f"Frozen close snapshot | target {run.get('target_date', 'n/a')} | {len(result.terminal_market_caps):,} paths | "
         f"Phase 2 curves loaded | pricing: {'strike-specific surface' if use_surface else 'Phase 1 ATM fallback'}"
     )
-    st.caption("Prices are normalized to 100. No Yahoo request occurs on this page.")
+    st.caption("Prices are normalized to 100. One option contract represents 100 shares. No Yahoo request occurs on this page.")
 
     eligible = [ticker for ticker in tickers if float(probabilities.loc[ticker]) >= float(threshold)]
     if selected not in eligible:
@@ -224,9 +225,19 @@ def render() -> None:
             labels.append(f"{confidence:.1%} {boundary_type.lower()}")
         chain["Boundary used"] = labels
         candidate_tables.append(chain)
-        matrices.append(long_option_payoff_matrix(normalized_prices[ticker], chain, contract_multiplier=1.0, include_premiums=True))
+        matrices.append(long_option_payoff_matrix(
+            normalized_prices[ticker], chain,
+            contract_multiplier=OPTION_CONTRACT_MULTIPLIER,
+            include_premiums=True,
+        ))
     candidates = pd.concat(candidate_tables, ignore_index=True)
     option_matrix = np.concatenate(matrices, axis=1)
+    optimizer_candidates = candidates.copy()
+    optimizer_candidates["Theoretical premium"] = (
+        optimizer_candidates["Theoretical premium"].astype(float)
+        * OPTION_CONTRACT_MULTIPLIER
+    )
+    optimizer_candidates["Premium unit"] = "per contract"
 
     manual_tab, optimizer_tab, chain_tab, methodology_tab = st.tabs(
         ["Manual Portfolio", "Optimizer 2", "Option Chain", "Methodology"]
@@ -266,7 +277,9 @@ def render() -> None:
                     use_surface=use_surface,
                 )
             option_payoff, analytics = manual_option_payoffs_and_analytics(
-                legs, normalized_prices, contract_multiplier=1.0, include_premiums=True,
+                legs, normalized_prices,
+                contract_multiplier=OPTION_CONTRACT_MULTIPLIER,
+                include_premiums=True,
             )
             total = base + option_payoff
             manual_metrics = payoff_metrics(total)
@@ -288,7 +301,8 @@ def render() -> None:
 
     with optimizer_tab:
         render_robust_optimizer(
-            base_payoff=base, option_payoff_matrix=option_matrix, candidates=candidates,
+            base_payoff=base, option_payoff_matrix=option_matrix,
+            candidates=optimizer_candidates,
             terminal_prices=normalized_prices[selected].to_numpy(float),
             quantity_min=-float(max_quantity), quantity_max=float(max_quantity),
             quantity_step=float(quantity_step), max_legs=int(max_legs),
@@ -311,5 +325,6 @@ Phase 5 is downstream-only:
 - Phase 3 supplies the locked risk-free rate and decides whether the calibrated surface matches the target expiry.
 - Phase 4 can seed the manual portfolio, but Phase 5 may change quantities and strikes.
 - Candidate premiums use strike-specific surface IV when available. Distribution IV and pricing IV remain separate.
+- One option contract represents 100 shares in both Manual Portfolio and Optimizer 2.
 - Optimizer 2 deducts execution cost, enforces EV and ES5 floors, and caps active option legs at five.
         """)
