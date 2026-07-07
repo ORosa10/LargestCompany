@@ -80,18 +80,33 @@ def manual_diagnostic_figure(base, total, terminal_prices) -> go.Figure:
     base_profile = price_bin_profile(terminal_prices, base, bin_width=5.0)
     portfolio_profile = price_bin_profile(terminal_prices, total, bin_width=5.0)
     fig = aligned_profile_figure(base_profile, portfolio_profile)
+
+    rename_map = {
+        "Optimizer 2 mean": "Manual portfolio mean",
+        "Optimizer 2 P5": "Manual portfolio P5",
+        "Optimizer 2 P1": "Manual portfolio P1",
+    }
+    for trace in fig.data:
+        if trace.name in rename_map:
+            trace.name = rename_map[trace.name]
+
     fig.add_trace(
         go.Scatter(
             x=portfolio_profile["Price bin"],
             y=portfolio_profile["Expected payoff"] - portfolio_profile["Payoff SD"],
-            name="Manual mean minus SD",
+            name="Manual mean - SD",
             mode="lines+markers",
             line=dict(color="#7c3aed", dash="dash"),
         ),
         row=1,
         col=1,
     )
-    fig.update_layout(title="Manual portfolio payoff, stress lines, and scenario probability")
+    fig.update_layout(
+        title=dict(text="Manual portfolio payoff, stress lines, and scenario probability", y=0.98),
+        height=820,
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0),
+        margin=dict(t=150, r=40, b=90, l=80),
+    )
     return fig
 
 
