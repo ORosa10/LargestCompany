@@ -22,8 +22,8 @@ from robust_optimizer import aligned_profile_figure, price_bin_profile, render_r
 from simulation_store import load_phase_artifact, load_simulation_snapshot
 
 NORMALIZED_SPOT = 100.0
-OPTION_CONTRACT_MULTIPLIER = 100.0
-DEFAULT_MANUAL_CONTRACTS = 0.01
+OPTION_QUANTITY_MULTIPLIER = 1.0
+DEFAULT_MANUAL_QUANTITY = 1.0
 
 
 def matching_metadata(left: dict, right: dict) -> bool:
@@ -104,7 +104,7 @@ def clear_leg_state() -> None:
 def default_manual_rows(ticker: str, pricing_iv: float) -> list[dict]:
     rows = default_interactive_rows(ticker, pricing_iv)
     for row in rows:
-        row["quantity"] = DEFAULT_MANUAL_CONTRACTS
+        row["quantity"] = DEFAULT_MANUAL_QUANTITY
     return rows
 
 
@@ -194,14 +194,14 @@ def render() -> None:
         grid_points = st.number_input("Strike grid points", 7, 61, 25, 2, help="Number of candidate strikes generated between the lower and upper terminal-price quantiles for every eligible ticker.")
         lower_q = st.number_input("Lower terminal-price quantile", 0.001, 0.25, 0.01, 0.005, format="%.3f", help="Lowest simulated terminal-price quantile used to start the candidate strike grid. 0.010 means the 1st percentile.")
         upper_q = st.number_input("Upper terminal-price quantile", 0.75, 0.999, 0.99, 0.005, format="%.3f", help="Highest simulated terminal-price quantile used to end the candidate strike grid. 0.990 means the 99th percentile.")
-        quantity_step = st.number_input("Quantity step", 0.001, value=0.025, step=0.005, format="%.3f", help="Optimizer search increment in option contracts. One contract represents 100 shares.")
-        max_quantity = st.number_input("Maximum absolute quantity per leg", 0.0, value=0.50, step=0.025, format="%.3f", help="Maximum long or short option contracts per leg. One contract represents 100 shares.")
-        max_total = st.number_input("Maximum total absolute quantity", 0.0, value=0.50, step=0.05)
+        quantity_step = st.number_input("Quantity step", 0.1, value=1.0, step=1.0, format="%.3f", help="Optimizer search increment in option-share equivalents. 1 = one share-equivalent; 100 = one standard listed option contract.")
+        max_quantity = st.number_input("Maximum absolute quantity per leg", 0.0, value=100.0, step=10.0, format="%.3f", help="Maximum long or short option-share equivalents per leg. 100 equals one standard listed option contract.")
+        max_total = st.number_input("Maximum total absolute quantity", 0.0, value=200.0, step=10.0)
         max_legs = st.number_input("Maximum active legs", 1, 5, 4, 1)
         optimization_paths = st.number_input("Stored paths used in search", min_value=min(500, len(result.terminal_market_caps)), max_value=len(result.terminal_market_caps), value=min(20_000, len(result.terminal_market_caps)), step=min(500, len(result.terminal_market_caps)))
 
     st.success(f"Frozen close snapshot | target {run.get('target_date', 'n/a')} | {len(result.terminal_market_caps):,} paths | Phase 2 curves loaded | pricing: {'strike-specific surface' if use_surface else 'Phase 1 ATM fallback'}")
-    st.caption("Prices are normalized to 100. One option contract represents 100 shares. For a one-share-equivalent diagnostic hedge, use 0.01 contracts. No Yahoo request occurs on this page.")
+    st.caption("Prices are normalized to 100. Option quantities are option-share equivalents: 1 = one share-equivalent; 100 = one standard listed option contract. No Yahoo request occurs on this page.")
 
     eligible = [ticker for ticker in tickers if float(probabilities.loc[ticker]) >= float(threshold)]
     if selected not in eligible:
@@ -226,12 +226,12 @@ def render() -> None:
             labels.append(f"{confidence:.1%} {boundary_type.lower()}")
         chain["Boundary used"] = labels
         candidate_tables.append(chain)
-        matrices.append(long_option_payoff_matrix(normalized_prices[ticker], chain, contract_multiplier=OPTION_CONTRACT_MULTIPLIER, include_premiums=True))
+        matrices.append(long_option_payoff_matrix(normalized_prices[ticker], chain, contract_multiplier=OPTION_QUANTITY_MULTIPLIER, include_premiums=True))
     candidates = pd.concat(candidate_tables, ignore_index=True)
     option_matrix = np.concatenate(matrices, axis=1)
     optimizer_candidates = candidates.copy()
-    optimizer_candidates["Theoretical premium"] = optimizer_candidates["Theoretical premium"].astype(float) * OPTION_CONTRACT_MULTIPLIER
-    optimizer_candidates["Premium unit"] = "per contract"
+    optimizer_candidates["Theoretical premium"] = optimizer_candidates["Theoretical premium"].astype(float) * OPTION_QUANTITY_MULTIPLIER
+    optimizer_candidates["Premium unit"] = "per share-equivalent"
 
     manual_tab, optimizer_tab, chain_tab, methodology_tab = st.tabs(["Manual Portfolio", "Optimizer 2", "Option Chain", "Methodology"])
 
@@ -249,7 +249,7 @@ def render() -> None:
             st.session_state.phase5_interactive_rows = upstream_rows
             clear_leg_state()
             st.rerun()
-        st.info("Contract sizing: 1.00 = 100 shares; 0.01 = one-share-equivalent option exposure.")
+        st.info("Option quantity sizing: 1 = one share-equivalent exposure; 100 = one standard listed option contract.")
         manual_inputs = render_interactive_leg_editor(tickers=eligible, curves=curves, default_ticker=selected, default_iv=default_iv, iv_by_ticker=fallback_ivs, normalized_spot=100.0, auto_surface_tickers=surface_tickers)
         try:
             legs = resolve_manual_option_legs(manual_inputs, pd.DataFrame(), time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, normalized_spot=100.0)
@@ -258,7 +258,7 @@ def render() -> None:
                 legs["Strike source"] = metadata["Definition mode"].to_numpy()
                 legs["Boundary used"] = metadata.apply(lambda row: f"{row['Implied confidence (%)']:.1f}% {row['Boundary type']}" if row["Definition mode"] == "Strike" else f"{row['Boundary confidence (%)']:.1f}% {row['Boundary type']}", axis=1).to_numpy()
                 legs = reprice_option_legs(legs, fallback_ivs, forward_ratios=forward_ratios, time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, use_surface=use_surface)
-            option_payoff, analytics = manual_option_payoffs_and_analytics(legs, normalized_prices, contract_multiplier=OPTION_CONTRACT_MULTIPLIER, include_premiums=True)
+            option_payoff, analytics = manual_option_payoffs_and_analytics(legs, normalized_prices, contract_multiplier=OPTION_QUANTITY_MULTIPLIER, include_premiums=True)
             total = base + option_payoff
             manual_metrics = payoff_metrics(total)
             profile = make_profile(result, current_caps, normalized_prices, winners, selected, total, option_payoff, base)
@@ -293,6 +293,6 @@ Phase 5 is downstream-only:
 - Phase 3 supplies the locked risk-free rate and decides whether the calibrated surface matches the target expiry.
 - Phase 4 can seed the manual portfolio, but Phase 5 may change quantities and strikes.
 - Candidate premiums use strike-specific surface IV when available. Distribution IV and pricing IV remain separate.
-- One option contract represents 100 shares in both Manual Portfolio and Optimizer 2. A quantity of 0.01 is one-share-equivalent exposure.
+- Manual Portfolio and Optimizer 2 use option-share-equivalent quantities. Quantity 1 is one share-equivalent; quantity 100 is one standard listed option contract.
 - Optimizer 2 deducts execution cost, enforces EV and ES5 floors, and caps active option legs at five.
         """)
