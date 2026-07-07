@@ -75,7 +75,7 @@ def default_interactive_rows(ticker: str, pricing_iv: float) -> list[dict]:
             "ticker": ticker,
             "option_type": "Put",
             "position": "Long",
-            "quantity": 0.10,
+            "quantity": 1.0,
             "define_by": "Boundary",
             "boundary_type": "Loss boundary",
             "confidence_pct": 80.0,
@@ -88,7 +88,7 @@ def default_interactive_rows(ticker: str, pricing_iv: float) -> list[dict]:
             "ticker": ticker,
             "option_type": "Call",
             "position": "Short",
-            "quantity": 0.10,
+            "quantity": 1.0,
             "define_by": "Boundary",
             "boundary_type": "Win boundary",
             "confidence_pct": 80.0,
@@ -167,12 +167,13 @@ def _render_leg_card(
         key=f"leg_position_{row_id}",
     )
     quantity = st.number_input(
-        "Contracts",
+        "Option quantity",
         min_value=0.0,
         value=float(row["quantity"]),
-        step=0.025,
+        step=1.0,
         format="%.3f",
         key=f"leg_quantity_{row_id}",
+        help="Option-share equivalent. 1 = one share-equivalent; 100 = one standard listed option contract.",
     )
 
     st.markdown("**Strike setup**")
@@ -268,7 +269,7 @@ def _render_leg_card(
         )
 
     st.caption(
-        f"{position} {quantity:.3f} x {ticker} {option_type} @ {strike:.2f} | "
+        f"{position} {quantity:.3f} share-eq x {ticker} {option_type} @ {strike:.2f} | "
         f"{confidence_pct:.1f}% {boundary_type.lower()}"
     )
     remove = st.button(
@@ -348,7 +349,7 @@ def render_interactive_leg_editor(
                 "ticker": default_ticker,
                 "option_type": "Call",
                 "position": "Long",
-                "quantity": 0.10,
+                "quantity": 1.0,
                 "define_by": "Boundary",
                 "boundary_type": "Win boundary",
                 "confidence_pct": 80.0,
