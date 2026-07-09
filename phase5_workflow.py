@@ -112,11 +112,12 @@ def contribution_stacked_figure(table: pd.DataFrame, axis_ticker: str) -> go.Fig
     if table.empty:
         return fig
     x = table["Price bin"]
-    leg_columns = [
+    total_column = "Total portfolio payoff" if "Total portfolio payoff" in table.columns else "Total option payoff"
+    contribution_columns = [
         column for column in table.columns
-        if column not in {"Price bin", "Scenario probability", "Total option payoff"}
+        if column not in {"Price bin", "Scenario probability", "Total option payoff", "Total portfolio payoff"}
     ]
-    for column in leg_columns:
+    for column in contribution_columns:
         fig.add_bar(
             x=x,
             y=table[column],
@@ -126,19 +127,19 @@ def contribution_stacked_figure(table: pd.DataFrame, axis_ticker: str) -> go.Fig
     fig.add_trace(
         go.Scatter(
             x=x,
-            y=table["Total option payoff"],
-            name="Total option payoff",
+            y=table[total_column],
+            name=total_column,
             mode="lines+markers",
             line=dict(color="#111827", width=2),
-            hovertemplate="%{x}<br>Total option payoff<br>%{y:$,.2f}<extra></extra>",
+            hovertemplate=f"%{{x}}<br>{total_column}<br>%{{y:$,.2f}}<extra></extra>",
         )
     )
     fig.add_hline(y=0, line_dash="dash", line_color="#111827")
     fig.update_layout(
-        title=f"Leg contribution by {axis_ticker} bin",
+        title=f"Payoff contribution by {axis_ticker} bin",
         barmode="relative",
         height=520,
-        yaxis_title="Average option payoff contribution",
+        yaxis_title="Average payoff contribution",
         xaxis_title=f"{axis_ticker} terminal stock price / current price",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(t=110, r=40, b=90, l=80),
@@ -251,8 +252,8 @@ def make_profile(result, current_caps, normalized_prices, winners, selected_tick
     )
 
 
-def leg_contribution_by_axis(legs: pd.DataFrame, normalized_prices: pd.DataFrame, axis_prices: pd.Series, *, bin_width: float = 5.0) -> pd.DataFrame:
-    if legs.empty:
+def leg_contribution_by_axis(legs: pd.DataFrame, normalized_prices: pd.DataFrame, axis_prices: pd.Series, base_payoff: np.ndarray | None = None, *, bin_width: float = 5.0) -> pd.DataFrame:
+    if legs.empty and base_payoff is None:
         return pd.DataFrame()
     prices = axis_prices.to_numpy(float)
     low = np.floor(np.quantile(prices, 0.01) / bin_width) * bin_width
@@ -260,6 +261,8 @@ def leg_contribution_by_axis(legs: pd.DataFrame, normalized_prices: pd.DataFrame
     edges = np.concatenate(([-np.inf], np.arange(low, high + 0.5 * bin_width, bin_width), [np.inf]))
     frame = pd.DataFrame({"Axis price": prices})
     frame["Price bin"] = pd.cut(frame["Axis price"], edges, include_lowest=True)
+    if base_payoff is not None:
+        frame["Polymarket payoff"] = np.asarray(base_payoff, dtype=float)
 
     for _, leg in legs.iterrows():
         ticker = str(leg["Ticker"])
@@ -274,12 +277,16 @@ def leg_contribution_by_axis(legs: pd.DataFrame, normalized_prices: pd.DataFrame
         frame[str(leg["Instrument"])] = payoff
 
     rows = []
-    leg_columns = [column for column in frame.columns if column not in {"Axis price", "Price bin"}]
+    contribution_columns = [column for column in frame.columns if column not in {"Axis price", "Price bin"}]
+    option_columns = [column for column in contribution_columns if column != "Polymarket payoff"]
     for interval, group in frame.groupby("Price bin", observed=True):
         label = f"<{interval.right:.0f}%" if not np.isfinite(interval.left) else (f">={interval.left:.0f}%" if not np.isfinite(interval.right) else f"{interval.left:.0f}-{interval.right:.0f}%")
         row = {"Price bin": label, "Scenario probability": len(group) / len(frame)}
-        row["Total option payoff"] = float(group[leg_columns].sum(axis=1).mean())
-        for column in leg_columns:
+        option_total = group[option_columns].sum(axis=1) if option_columns else pd.Series(0.0, index=group.index)
+        row["Total option payoff"] = float(option_total.mean())
+        if "Polymarket payoff" in group.columns:
+            row["Total portfolio payoff"] = float((group["Polymarket payoff"] + option_total).mean())
+        for column in contribution_columns:
             row[column] = float(group[column].mean())
         rows.append(row)
     return pd.DataFrame(rows)
@@ -489,7 +496,7 @@ def render() -> None:
                 trace_visibility = render_profile_trace_controls(chart_key_prefix, include_mean_sd=True)
             axis_prices = normalized_prices[axis_ticker]
             st.plotly_chart(manual_diagnostic_figure(base, total, axis_prices.to_numpy(float), name, trace_visibility, axis_ticker), width="stretch", key=f"{chart_key_prefix}_diagnostic")
-            contribution = leg_contribution_by_axis(legs, normalized_prices, axis_prices)
+            contribution = leg_contribution_by_axis(legs, normalized_prices, axis_prices, base_payoff=base)
             if not contribution.empty:
                 with st.expander(f"Leg contribution by {axis_ticker} bin", expanded=True):
                     st.plotly_chart(contribution_stacked_figure(contribution, axis_ticker), width="stretch", key=f"{chart_key_prefix}_contribution_stack")
