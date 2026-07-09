@@ -83,15 +83,6 @@ def display_legs(legs: pd.DataFrame) -> pd.DataFrame:
     return display[[column for column in order if column in display.columns]]
 
 
-def display_contribution_table(table: pd.DataFrame) -> pd.DataFrame:
-    display = table.copy()
-    money_columns = [column for column in display.columns if column not in {"Price bin", "Scenario probability"}]
-    for column in money_columns:
-        display[column] = display[column].map(dollars)
-    display["Scenario probability"] = display["Scenario probability"].map(pct)
-    return display
-
-
 def distribution_figure(baseline, portfolio, name) -> go.Figure:
     fig = go.Figure()
     fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability")
@@ -101,6 +92,46 @@ def distribution_figure(baseline, portfolio, name) -> go.Figure:
         yaxis_title="Scenario probability", barmode="overlay", yaxis_tickformat=".1%",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
+    return fig
+
+
+def contribution_stacked_figure(table: pd.DataFrame, axis_ticker: str) -> go.Figure:
+    fig = go.Figure()
+    if table.empty:
+        return fig
+    x = table["Price bin"]
+    leg_columns = [
+        column for column in table.columns
+        if column not in {"Price bin", "Scenario probability", "Total option payoff"}
+    ]
+    for column in leg_columns:
+        fig.add_bar(
+            x=x,
+            y=table[column],
+            name=column,
+            hovertemplate="%{x}<br>%{fullData.name}<br>%{y:$,.2f}<extra></extra>",
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=table["Total option payoff"],
+            name="Total option payoff",
+            mode="lines+markers",
+            line=dict(color="#111827", width=2),
+            hovertemplate="%{x}<br>Total option payoff<br>%{y:$,.2f}<extra></extra>",
+        )
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="#111827")
+    fig.update_layout(
+        title=f"Leg contribution by {axis_ticker} bin",
+        barmode="relative",
+        height=520,
+        yaxis_title="Average option payoff contribution",
+        xaxis_title=f"{axis_ticker} terminal stock price / current price",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(t=110, r=40, b=90, l=80),
+    )
+    fig.update_xaxes(tickangle=-45)
     return fig
 
 
@@ -314,6 +345,9 @@ def render() -> None:
         st.caption("Google appears as GOOGL in this model, not GOOG.")
 
     eligible = [ticker for ticker in tickers if float(probabilities.loc[ticker]) >= float(threshold)]
+    for ticker in relevant:
+        if ticker not in eligible:
+            eligible.append(ticker)
     if selected not in eligible:
         eligible.append(selected)
     eligible = sorted(set(eligible), key=lambda ticker: float(probabilities.loc[ticker]), reverse=True)
@@ -445,8 +479,8 @@ def render() -> None:
             st.plotly_chart(manual_diagnostic_figure(base, total, axis_prices.to_numpy(float), name, trace_visibility, axis_ticker), width="stretch", key=f"{chart_key_prefix}_diagnostic")
             contribution = leg_contribution_by_axis(legs, normalized_prices, axis_prices)
             if not contribution.empty:
-                with st.expander(f"Leg contribution by {axis_ticker} bin"):
-                    st.dataframe(display_contribution_table(contribution), width="stretch", hide_index=True)
+                with st.expander(f"Leg contribution by {axis_ticker} bin", expanded=True):
+                    st.plotly_chart(contribution_stacked_figure(contribution, axis_ticker), width="stretch", key=f"{chart_key_prefix}_contribution_stack")
             with st.expander("Payoff distribution and detailed bin table"):
                 st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
