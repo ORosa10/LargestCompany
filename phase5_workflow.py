@@ -76,15 +76,15 @@ def distribution_figure(baseline, portfolio, name) -> go.Figure:
     return fig
 
 
-def manual_diagnostic_figure(base, total, terminal_prices) -> go.Figure:
+def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual portfolio") -> go.Figure:
     base_profile = price_bin_profile(terminal_prices, base, bin_width=5.0)
     portfolio_profile = price_bin_profile(terminal_prices, total, bin_width=5.0)
     fig = aligned_profile_figure(base_profile, portfolio_profile)
 
     rename_map = {
-        "Optimizer 2 mean": "Manual portfolio mean",
-        "Optimizer 2 P5": "Manual portfolio P5",
-        "Optimizer 2 P1": "Manual portfolio P1",
+        "Optimizer 2 mean": f"{name} mean",
+        "Optimizer 2 P5": f"{name} P5",
+        "Optimizer 2 P1": f"{name} P1",
     }
     for trace in fig.data:
         if trace.name in rename_map:
@@ -94,7 +94,7 @@ def manual_diagnostic_figure(base, total, terminal_prices) -> go.Figure:
         go.Scatter(
             x=portfolio_profile["Price bin"],
             y=portfolio_profile["Expected payoff"] - portfolio_profile["Payoff SD"],
-            name="Manual mean - SD",
+            name=f"{name} mean - SD",
             mode="lines+markers",
             line=dict(color="#7c3aed", dash="dash"),
         ),
@@ -102,7 +102,7 @@ def manual_diagnostic_figure(base, total, terminal_prices) -> go.Figure:
         col=1,
     )
     fig.update_layout(
-        title=dict(text="Manual portfolio payoff, stress lines, and scenario probability", y=0.98),
+        title=dict(text=f"{name} payoff, stress lines, and scenario probability", y=0.98),
         height=820,
         legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0),
         margin=dict(t=150, r=40, b=90, l=80),
@@ -110,9 +110,10 @@ def manual_diagnostic_figure(base, total, terminal_prices) -> go.Figure:
     return fig
 
 
-def clear_leg_state() -> None:
+def clear_leg_state(prefix: str | None = None) -> None:
     for key in list(st.session_state):
-        if str(key).startswith("leg_"):
+        text_key = str(key)
+        if text_key.startswith("leg_") or (prefix and text_key.startswith(f"{prefix}_leg_")):
             del st.session_state[key]
 
 
@@ -248,24 +249,33 @@ def render() -> None:
     optimizer_candidates["Theoretical premium"] = optimizer_candidates["Theoretical premium"].astype(float) * OPTION_QUANTITY_MULTIPLIER
     optimizer_candidates["Premium unit"] = "per share-equivalent"
 
-    manual_tab, optimizer_tab, chain_tab, methodology_tab = st.tabs(["Manual Portfolio", "Optimizer 2", "Option Chain", "Methodology"])
-
-    with manual_tab:
+    def render_manual_portfolio_workspace(name: str, state_key: str, chart_key_prefix: str) -> None:
         default_iv = float(fallback_ivs.loc[selected])
-        if "phase5_interactive_rows" not in st.session_state:
-            st.session_state.phase5_interactive_rows = default_manual_rows(selected, default_iv)
+        if state_key not in st.session_state:
+            st.session_state[state_key] = default_manual_rows(selected, default_iv)
         a, b, _ = st.columns([1, 1, 3])
-        if a.button("Reset portfolio"):
-            st.session_state.phase5_interactive_rows = default_manual_rows(selected, default_iv)
-            clear_leg_state()
+        if a.button("Reset portfolio", key=f"{chart_key_prefix}_reset"):
+            st.session_state[state_key] = default_manual_rows(selected, default_iv)
+            clear_leg_state(state_key)
             st.rerun()
         upstream_rows = phase4_rows(phase4, default_iv)
-        if b.button("Load Phase 4 portfolio", disabled=upstream_rows is None):
-            st.session_state.phase5_interactive_rows = upstream_rows
-            clear_leg_state()
+        if b.button("Load Phase 4 portfolio", disabled=upstream_rows is None, key=f"{chart_key_prefix}_load_phase4"):
+            st.session_state[state_key] = upstream_rows
+            clear_leg_state(state_key)
             st.rerun()
         st.info("Option quantity sizing: 1 = one share-equivalent exposure; 100 = one standard listed option contract.")
-        manual_inputs = render_interactive_leg_editor(tickers=eligible, curves=curves, default_ticker=selected, default_iv=default_iv, iv_by_ticker=fallback_ivs, normalized_spot=100.0, auto_surface_tickers=surface_tickers)
+        manual_inputs = render_interactive_leg_editor(
+            tickers=eligible,
+            curves=curves,
+            default_ticker=selected,
+            default_iv=default_iv,
+            iv_by_ticker=fallback_ivs,
+            normalized_spot=100.0,
+            state_key=state_key,
+            key_prefix=state_key,
+            add_button_label="Add another option leg",
+            auto_surface_tickers=surface_tickers,
+        )
         try:
             legs = resolve_manual_option_legs(manual_inputs, pd.DataFrame(), time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, normalized_spot=100.0)
             metadata = manual_inputs[manual_inputs["Active"]].reset_index(drop=True)
@@ -277,12 +287,12 @@ def render() -> None:
             total = base + option_payoff
             manual_metrics = payoff_metrics(total)
             profile = make_profile(result, current_caps, normalized_prices, winners, selected, total, option_payoff, base)
-            st.dataframe(metrics_comparison(baseline_metrics, manual_metrics, "Manual portfolio"), width="stretch", hide_index=True)
+            st.dataframe(metrics_comparison(baseline_metrics, manual_metrics, name), width="stretch", hide_index=True)
             st.subheader("Live payoff profile")
             st.caption("Mean, mean minus SD, P5, P1, and scenario probability update with every manual leg.")
-            st.plotly_chart(manual_diagnostic_figure(base, total, normalized_prices[selected].to_numpy(float)), width="stretch", key="phase5_manual_diagnostic_v2")
+            st.plotly_chart(manual_diagnostic_figure(base, total, normalized_prices[selected].to_numpy(float), name), width="stretch", key=f"{chart_key_prefix}_diagnostic")
             with st.expander("Payoff distribution and detailed bin table"):
-                st.plotly_chart(distribution_figure(base, total, "Manual portfolio"), width="stretch", key="phase5_manual_distribution")
+                st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
             st.subheader("Resolved portfolio")
             st.dataframe(display_legs(legs), width="stretch", hide_index=True)
@@ -290,6 +300,14 @@ def render() -> None:
             st.dataframe(analytics, width="stretch", hide_index=True)
         except Exception as exc:
             st.error(str(exc))
+
+    manual_tab, manual2_tab, optimizer_tab, chain_tab, methodology_tab = st.tabs(["Manual Portfolio", "Manual Portfolio 2", "Optimizer 2", "Option Chain", "Methodology"])
+
+    with manual_tab:
+        render_manual_portfolio_workspace("Manual portfolio", "phase5_interactive_rows", "phase5_manual")
+
+    with manual2_tab:
+        render_manual_portfolio_workspace("Manual portfolio 2", "phase5_interactive_rows_2", "phase5_manual2")
 
     with optimizer_tab:
         render_robust_optimizer(base_payoff=base, option_payoff_matrix=option_matrix, candidates=optimizer_candidates, terminal_prices=normalized_prices[selected].to_numpy(float), quantity_min=-float(max_quantity), quantity_max=float(max_quantity), quantity_step=float(quantity_step), max_legs=int(max_legs), max_total_quantity=float(max_total), default_minimum_ev=float(baseline_metrics["Expected payoff"]), optimization_scenarios=int(optimization_paths), seed=int(run.get("seed", 42)))
@@ -306,8 +324,8 @@ Phase 5 is downstream-only:
 - Phase 1 supplies the frozen joint scenarios, ranks, market caps, forward carry, and fallback distribution IV.
 - Phase 2 supplies the saved conditional boundary curves; Phase 5 does not estimate them again.
 - Phase 3 supplies the locked risk-free rate and decides whether the calibrated surface matches the target expiry.
-- Phase 4 can seed the manual portfolio, but Phase 5 may change quantities and strikes.
+- Phase 4 can seed either manual portfolio, but Phase 5 may change quantities and strikes.
 - Candidate premiums use strike-specific surface IV when available. Distribution IV and pricing IV remain separate.
-- Manual Portfolio and Optimizer 2 use option-share-equivalent quantities. Quantity 1 is one share-equivalent; quantity 100 is one standard listed option contract.
+- Manual Portfolio, Manual Portfolio 2, and Optimizer 2 use option-share-equivalent quantities. Quantity 1 is one share-equivalent; quantity 100 is one standard listed option contract.
 - Optimizer 2 deducts execution cost, enforces EV and ES5 floors, and caps active option legs at five.
         """)
