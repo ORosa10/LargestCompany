@@ -24,6 +24,7 @@ from simulation_store import load_phase_artifact, load_simulation_snapshot
 NORMALIZED_SPOT = 100.0
 OPTION_QUANTITY_MULTIPLIER = 1.0
 DEFAULT_MANUAL_QUANTITY = 1.0
+PORTFOLIO_SLOTS = ["A", "B", "C", "D", "E"]
 
 
 def matching_metadata(left: dict, right: dict) -> bool:
@@ -46,6 +47,23 @@ def metrics_comparison(baseline: pd.Series, portfolio: pd.Series, name: str) -> 
             "Worst payoff": dollars(float(metrics["Worst payoff"])),
         })
     return pd.DataFrame(rows)
+
+
+def slot_metrics_row(slot: str, rows: list[dict], metrics: pd.Series) -> dict:
+    ev = float(metrics["Expected payoff"])
+    sd = float(metrics["Payoff standard deviation"])
+    active_legs = sum(1 for row in rows if bool(row.get("active", False)))
+    return {
+        "Slot": slot,
+        "Active legs": active_legs,
+        "Expected payoff": dollars(ev),
+        "Payoff SD": dollars(sd),
+        "EV / SD": f"{ev / sd:.3f}" if sd > 0 else "n/a",
+        "Median payoff": dollars(float(metrics["Median payoff"])),
+        "P(loss)": pct(float(metrics["Probability of loss"])),
+        "Expected shortfall 5%": dollars(float(metrics["Expected shortfall 5%"])),
+        "Worst payoff": dollars(float(metrics["Worst payoff"])),
+    }
 
 
 def display_legs(legs: pd.DataFrame) -> pd.DataFrame:
@@ -117,11 +135,37 @@ def clear_leg_state(prefix: str | None = None) -> None:
             del st.session_state[key]
 
 
+def copy_rows(rows: list[dict]) -> list[dict]:
+    return [dict(row) for row in rows]
+
+
 def default_manual_rows(ticker: str, pricing_iv: float) -> list[dict]:
     rows = default_interactive_rows(ticker, pricing_iv)
     for row in rows:
         row["quantity"] = DEFAULT_MANUAL_QUANTITY
     return rows
+
+
+def rows_to_manual_inputs(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Active": row["active"],
+                "Ticker": row["ticker"],
+                "Option type": row["option_type"],
+                "Position": row["position"],
+                "Quantity": row["quantity"],
+                "Strike source": "Manual strike",
+                "Boundary confidence (%)": row["confidence_pct"],
+                "Manual strike": row["strike"],
+                "Pricing IV": row["pricing_iv"],
+                "Definition mode": row["define_by"],
+                "Boundary type": row["boundary_type"],
+                "Implied confidence (%)": row["confidence_pct"],
+            }
+            for row in rows
+        ]
+    )
 
 
 def phase4_rows(phase4: dict | None, fallback_iv: float) -> list[dict] | None:
@@ -249,20 +293,58 @@ def render() -> None:
     optimizer_candidates["Theoretical premium"] = optimizer_candidates["Theoretical premium"].astype(float) * OPTION_QUANTITY_MULTIPLIER
     optimizer_candidates["Premium unit"] = "per share-equivalent"
 
+    def evaluate_manual_rows(rows: list[dict]) -> tuple[pd.DataFrame, np.ndarray, pd.Series, pd.DataFrame]:
+        manual_inputs = rows_to_manual_inputs(rows)
+        legs = resolve_manual_option_legs(manual_inputs, pd.DataFrame(), time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, normalized_spot=100.0)
+        metadata = manual_inputs[manual_inputs["Active"]].reset_index(drop=True)
+        if not legs.empty:
+            legs["Strike source"] = metadata["Definition mode"].to_numpy()
+            legs["Boundary used"] = metadata.apply(lambda row: f"{row['Implied confidence (%)']:.1f}% {row['Boundary type']}" if row["Definition mode"] == "Strike" else f"{row['Boundary confidence (%)']:.1f}% {row['Boundary type']}", axis=1).to_numpy()
+            legs = reprice_option_legs(legs, fallback_ivs, forward_ratios=forward_ratios, time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, use_surface=use_surface)
+        option_payoff, analytics = manual_option_payoffs_and_analytics(legs, normalized_prices, contract_multiplier=OPTION_QUANTITY_MULTIPLIER, include_premiums=True)
+        total = base + option_payoff
+        return legs, option_payoff, payoff_metrics(total), analytics
+
     def render_manual_portfolio_workspace(name: str, state_key: str, chart_key_prefix: str, use_sliders: bool = False) -> None:
         default_iv = float(fallback_ivs.loc[selected])
+        slots_key = f"{state_key}_saved_slots"
+        active_slot_key = f"{state_key}_active_slot"
+        loaded_slot_key = f"{state_key}_loaded_slot"
         if state_key not in st.session_state:
             st.session_state[state_key] = default_manual_rows(selected, default_iv)
-        a, b, _ = st.columns([1, 1, 3])
-        if a.button("Reset portfolio", key=f"{chart_key_prefix}_reset"):
+        if slots_key not in st.session_state:
+            st.session_state[slots_key] = {}
+        if active_slot_key not in st.session_state:
+            st.session_state[active_slot_key] = PORTFOLIO_SLOTS[0]
+        saved_slots = st.session_state[slots_key]
+
+        reset_col, phase4_col, slot_col, save_col = st.columns([1, 1, 1, 1])
+        if reset_col.button("Reset portfolio", key=f"{chart_key_prefix}_reset"):
             st.session_state[state_key] = default_manual_rows(selected, default_iv)
             clear_leg_state(state_key)
             st.rerun()
         upstream_rows = phase4_rows(phase4, default_iv)
-        if b.button("Load Phase 4 portfolio", disabled=upstream_rows is None, key=f"{chart_key_prefix}_load_phase4"):
+        if phase4_col.button("Load Phase 4 portfolio", disabled=upstream_rows is None, key=f"{chart_key_prefix}_load_phase4"):
             st.session_state[state_key] = upstream_rows
             clear_leg_state(state_key)
             st.rerun()
+
+        slot_labels = [f"{slot} saved" if slot in saved_slots else f"{slot} empty" for slot in PORTFOLIO_SLOTS]
+        selected_slot_label = slot_col.selectbox(
+            "Layout slot",
+            slot_labels,
+            index=PORTFOLIO_SLOTS.index(st.session_state[active_slot_key]),
+            key=f"{chart_key_prefix}_slot_select",
+        )
+        selected_slot = selected_slot_label.split()[0]
+        st.session_state[active_slot_key] = selected_slot
+        if st.session_state.get(loaded_slot_key) != selected_slot:
+            st.session_state[loaded_slot_key] = selected_slot
+            if selected_slot in saved_slots:
+                st.session_state[state_key] = copy_rows(saved_slots[selected_slot])
+                clear_leg_state(state_key)
+                st.rerun()
+
         st.info("Option quantity sizing: 1 = one share-equivalent exposure; 100 = one standard listed option contract.")
         manual_inputs = render_interactive_leg_editor(
             tickers=eligible,
@@ -277,18 +359,30 @@ def render() -> None:
             auto_surface_tickers=surface_tickers,
             use_sliders=use_sliders,
         )
+        if save_col.button(f"Save to {selected_slot}", key=f"{chart_key_prefix}_save_slot"):
+            st.session_state[slots_key][selected_slot] = copy_rows(st.session_state[state_key])
+            st.session_state[loaded_slot_key] = selected_slot
+            st.rerun()
+
         try:
-            legs = resolve_manual_option_legs(manual_inputs, pd.DataFrame(), time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, normalized_spot=100.0)
-            metadata = manual_inputs[manual_inputs["Active"]].reset_index(drop=True)
-            if not legs.empty:
-                legs["Strike source"] = metadata["Definition mode"].to_numpy()
-                legs["Boundary used"] = metadata.apply(lambda row: f"{row['Implied confidence (%)']:.1f}% {row['Boundary type']}" if row["Definition mode"] == "Strike" else f"{row['Boundary confidence (%)']:.1f}% {row['Boundary type']}", axis=1).to_numpy()
-                legs = reprice_option_legs(legs, fallback_ivs, forward_ratios=forward_ratios, time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, use_surface=use_surface)
-            option_payoff, analytics = manual_option_payoffs_and_analytics(legs, normalized_prices, contract_multiplier=OPTION_QUANTITY_MULTIPLIER, include_premiums=True)
+            legs, option_payoff, manual_metrics, analytics = evaluate_manual_rows(st.session_state[state_key])
             total = base + option_payoff
-            manual_metrics = payoff_metrics(total)
             profile = make_profile(result, current_caps, normalized_prices, winners, selected, total, option_payoff, base)
             st.dataframe(metrics_comparison(baseline_metrics, manual_metrics, name), width="stretch", hide_index=True)
+
+            if saved_slots:
+                comparison_rows = []
+                for slot in PORTFOLIO_SLOTS:
+                    if slot not in saved_slots:
+                        continue
+                    try:
+                        _, _, slot_metrics, _ = evaluate_manual_rows(saved_slots[slot])
+                        comparison_rows.append(slot_metrics_row(slot, saved_slots[slot], slot_metrics))
+                    except Exception as slot_exc:
+                        comparison_rows.append({"Slot": slot, "Active legs": "error", "Expected payoff": str(slot_exc)})
+                st.subheader("Saved layout comparison")
+                st.dataframe(pd.DataFrame(comparison_rows), width="stretch", hide_index=True)
+
             st.subheader("Live payoff profile")
             st.caption("Mean, mean minus SD, P5, P1, and scenario probability update with every manual leg.")
             st.plotly_chart(manual_diagnostic_figure(base, total, normalized_prices[selected].to_numpy(float), name), width="stretch", key=f"{chart_key_prefix}_diagnostic")
@@ -328,5 +422,6 @@ Phase 5 is downstream-only:
 - Phase 4 can seed either manual portfolio, but Phase 5 may change quantities and strikes.
 - Candidate premiums use strike-specific surface IV when available. Distribution IV and pricing IV remain separate.
 - Manual Portfolio, Manual Portfolio 2, and Optimizer 2 use option-share-equivalent quantities. Quantity 1 is one share-equivalent; quantity 100 is one standard listed option contract.
+- Manual Portfolio and Manual Portfolio 2 can save A-E in-session layouts for fast payoff comparison across the same locked market scenarios.
 - Optimizer 2 deducts execution cost, enforces EV and ES5 floors, and caps active option legs at five.
         """)
