@@ -83,6 +83,18 @@ def display_legs(legs: pd.DataFrame) -> pd.DataFrame:
     return display[[column for column in order if column in display.columns]]
 
 
+def display_contribution_table(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.copy()
+    money_columns = [
+        column for column in display.columns
+        if column not in {"Price bin", "Scenario probability"}
+    ]
+    for column in money_columns:
+        display[column] = display[column].map(dollars)
+    display["Scenario probability"] = display["Scenario probability"].map(pct)
+    return display
+
+
 def distribution_figure(baseline, portfolio, name) -> go.Figure:
     fig = go.Figure()
     fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability")
@@ -481,6 +493,7 @@ def render() -> None:
             if not contribution.empty:
                 with st.expander(f"Leg contribution by {axis_ticker} bin", expanded=True):
                     st.plotly_chart(contribution_stacked_figure(contribution, axis_ticker), width="stretch", key=f"{chart_key_prefix}_contribution_stack")
+                    st.dataframe(display_contribution_table(contribution), width="stretch", hide_index=True)
             with st.expander("Payoff distribution and detailed bin table"):
                 st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
