@@ -15,6 +15,7 @@ from interactive_portfolio import (
 from iv_surface_model import default_surface_nodes
 from manual_portfolio import manual_option_payoffs_and_analytics, resolve_manual_option_legs
 from optimization import build_candidate_option_universe, long_option_payoff_matrix, payoff_metrics
+from option_construction import option_payoff
 from option_valuation import reprice_option_legs
 from payoff_surface import polymarket_payoff, selected_payoff_profile_bins, terminal_stock_prices, winner_from_ranks
 from phase4_ui import display_profile, dollars, pct
@@ -82,6 +83,15 @@ def display_legs(legs: pd.DataFrame) -> pd.DataFrame:
     return display[[column for column in order if column in display.columns]]
 
 
+def display_contribution_table(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.copy()
+    money_columns = [column for column in display.columns if column not in {"Price bin", "Scenario probability"}]
+    for column in money_columns:
+        display[column] = display[column].map(dollars)
+    display["Scenario probability"] = display["Scenario probability"].map(pct)
+    return display
+
+
 def distribution_figure(baseline, portfolio, name) -> go.Figure:
     fig = go.Figure()
     fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability")
@@ -94,7 +104,7 @@ def distribution_figure(baseline, portfolio, name) -> go.Figure:
     return fig
 
 
-def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual portfolio", trace_visibility: dict | None = None) -> go.Figure:
+def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual portfolio", trace_visibility: dict | None = None, axis_ticker: str | None = None) -> go.Figure:
     base_profile = price_bin_profile(terminal_prices, base, bin_width=5.0)
     portfolio_profile = price_bin_profile(terminal_prices, total, bin_width=5.0)
     fig = aligned_profile_figure(base_profile, portfolio_profile, trace_visibility)
@@ -121,8 +131,10 @@ def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual p
             row=1,
             col=1,
         )
+    axis_label = axis_ticker or "selected ticker"
+    fig.update_xaxes(title_text=f"{axis_label} terminal stock price / current price", row=2, col=1)
     fig.update_layout(
-        title=dict(text=f"{name} payoff, stress lines, and scenario probability", y=0.98),
+        title=dict(text=f"{name} payoff by {axis_label} terminal-price bin", y=0.98),
         height=820,
         legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0),
         margin=dict(t=150, r=40, b=90, l=80),
@@ -194,6 +206,40 @@ def make_profile(result, current_caps, normalized_prices, winners, selected_tick
         scenario, result.terminal_market_caps, current_caps,
         selected_ticker=selected_ticker, bins=20,
     )
+
+
+def leg_contribution_by_axis(legs: pd.DataFrame, normalized_prices: pd.DataFrame, axis_prices: pd.Series, *, bin_width: float = 5.0) -> pd.DataFrame:
+    if legs.empty:
+        return pd.DataFrame()
+    prices = axis_prices.to_numpy(float)
+    low = np.floor(np.quantile(prices, 0.01) / bin_width) * bin_width
+    high = np.ceil(np.quantile(prices, 0.99) / bin_width) * bin_width
+    edges = np.concatenate(([-np.inf], np.arange(low, high + 0.5 * bin_width, bin_width), [np.inf]))
+    frame = pd.DataFrame({"Axis price": prices})
+    frame["Price bin"] = pd.cut(frame["Axis price"], edges, include_lowest=True)
+
+    for _, leg in legs.iterrows():
+        ticker = str(leg["Ticker"])
+        premium = float(leg["Theoretical premium"])
+        payoff = option_payoff(
+            str(leg["Option type"]),
+            str(leg["Position"]),
+            float(leg["Strike"]),
+            normalized_prices[ticker].to_numpy(float),
+            premium=premium,
+        ) * float(leg["Quantity"]) * OPTION_QUANTITY_MULTIPLIER
+        frame[str(leg["Instrument"])] = payoff
+
+    rows = []
+    leg_columns = [column for column in frame.columns if column not in {"Axis price", "Price bin"}]
+    for interval, group in frame.groupby("Price bin", observed=True):
+        label = f"<{interval.right:.0f}%" if not np.isfinite(interval.left) else (f">={interval.left:.0f}%" if not np.isfinite(interval.right) else f"{interval.left:.0f}-{interval.right:.0f}%")
+        row = {"Price bin": label, "Scenario probability": len(group) / len(frame)}
+        row["Total option payoff"] = float(group[leg_columns].sum(axis=1).mean())
+        for column in leg_columns:
+            row[column] = float(group[column].mean())
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def render() -> None:
@@ -389,8 +435,18 @@ def render() -> None:
 
             st.subheader("Live payoff profile")
             st.caption("Mean, mean minus SD, P5, P1, and scenario probability update with every manual leg.")
-            trace_visibility = render_profile_trace_controls(chart_key_prefix, include_mean_sd=True)
-            st.plotly_chart(manual_diagnostic_figure(base, total, normalized_prices[selected].to_numpy(float), name, trace_visibility), width="stretch", key=f"{chart_key_prefix}_diagnostic")
+            control_cols = st.columns([1, 2])
+            axis_options = [ticker for ticker in tickers if ticker in normalized_prices.columns]
+            default_axis_index = axis_options.index(selected) if selected in axis_options else 0
+            axis_ticker = control_cols[0].selectbox("Profile axis ticker", axis_options, index=default_axis_index, key=f"{chart_key_prefix}_axis_ticker")
+            with control_cols[1]:
+                trace_visibility = render_profile_trace_controls(chart_key_prefix, include_mean_sd=True)
+            axis_prices = normalized_prices[axis_ticker]
+            st.plotly_chart(manual_diagnostic_figure(base, total, axis_prices.to_numpy(float), name, trace_visibility, axis_ticker), width="stretch", key=f"{chart_key_prefix}_diagnostic")
+            contribution = leg_contribution_by_axis(legs, normalized_prices, axis_prices)
+            if not contribution.empty:
+                with st.expander(f"Leg contribution by {axis_ticker} bin"):
+                    st.dataframe(display_contribution_table(contribution), width="stretch", hide_index=True)
             with st.expander("Payoff distribution and detailed bin table"):
                 st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
