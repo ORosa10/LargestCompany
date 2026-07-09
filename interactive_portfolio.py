@@ -134,9 +134,14 @@ def _render_leg_card(
     iv_by_ticker: pd.Series,
     normalized_spot: float,
     auto_surface_tickers: set[str],
+    key_prefix: str,
 ) -> tuple[dict, bool]:
     """Render one narrow card with controls stacked vertically."""
     row_id = int(row["id"])
+
+    def widget_key(name: str) -> str:
+        return f"{key_prefix}_{name}_{row_id}"
+
     status = "Active" if row["active"] else "Inactive"
     st.markdown(f"#### Leg {row_number}")
     st.caption(
@@ -146,25 +151,25 @@ def _render_leg_card(
     active = st.checkbox(
         "Use this leg",
         value=bool(row["active"]),
-        key=f"leg_active_{row_id}",
+        key=widget_key("leg_active"),
     )
     ticker = st.selectbox(
         "Ticker",
         tickers,
         index=tickers.index(row["ticker"]) if row["ticker"] in tickers else 0,
-        key=f"leg_ticker_{row_id}",
+        key=widget_key("leg_ticker"),
     )
     option_type = st.selectbox(
         "Option type",
         OPTION_TYPES,
         index=OPTION_TYPES.index(row["option_type"]),
-        key=f"leg_type_{row_id}",
+        key=widget_key("leg_type"),
     )
     position = st.selectbox(
         "Trade direction",
         POSITIONS,
         index=POSITIONS.index(row["position"]),
-        key=f"leg_position_{row_id}",
+        key=widget_key("leg_position"),
     )
     quantity = st.number_input(
         "Option quantity",
@@ -172,7 +177,7 @@ def _render_leg_card(
         value=float(row["quantity"]),
         step=1.0,
         format="%.3f",
-        key=f"leg_quantity_{row_id}",
+        key=widget_key("leg_quantity"),
         help="Option-share equivalent. 1 = one share-equivalent; 100 = one standard listed option contract.",
     )
 
@@ -181,7 +186,7 @@ def _render_leg_card(
         "Editable input",
         DEFINE_MODES,
         index=DEFINE_MODES.index(row["define_by"]),
-        key=f"leg_mode_{row_id}",
+        key=widget_key("leg_mode"),
         help=(
             "Boundary calculates the strike. Strike calculates the implied "
             "boundary confidence."
@@ -191,7 +196,7 @@ def _render_leg_card(
         "Boundary type",
         BOUNDARY_TYPES,
         index=BOUNDARY_TYPES.index(row["boundary_type"]),
-        key=f"leg_boundary_{row_id}",
+        key=widget_key("leg_boundary"),
     )
     curve = curves[ticker]
 
@@ -203,7 +208,7 @@ def _render_leg_card(
             value=float(row["confidence_pct"]),
             step=1.0,
             format="%.1f",
-            key=f"leg_confidence_{row_id}",
+            key=widget_key("leg_confidence"),
         )
         strike = strike_at_confidence(
             curve,
@@ -216,7 +221,7 @@ def _render_leg_card(
             value=float(strike),
             disabled=True,
             format="%.2f",
-            key=f"leg_strike_locked_{row_id}",
+            key=widget_key("leg_strike_locked"),
         )
     else:
         strike = st.number_input(
@@ -225,7 +230,7 @@ def _render_leg_card(
             value=float(row["strike"]),
             step=5.0,
             format="%.2f",
-            key=f"leg_strike_{row_id}",
+            key=widget_key("leg_strike"),
         )
         confidence_pct = 100.0 * confidence_at_strike(
             curve,
@@ -238,7 +243,7 @@ def _render_leg_card(
             value=float(confidence_pct),
             disabled=True,
             format="%.1f",
-            key=f"leg_confidence_locked_{row_id}",
+            key=widget_key("leg_confidence_locked"),
         )
 
     previous_ticker = str(row.get("ticker", ticker))
@@ -252,7 +257,7 @@ def _render_leg_card(
             "Pricing IV",
             value="Auto from calibrated surface",
             disabled=True,
-            key=f"leg_iv_auto_{row_id}",
+            key=widget_key("leg_iv_auto"),
             help="The strike-specific IV is interpolated after the strike is resolved. The exact value appears in Resolved portfolio.",
         )
         pricing_iv = initial_iv
@@ -264,7 +269,7 @@ def _render_leg_card(
             value=initial_iv,
             step=0.01,
             format="%.2f",
-            key=f"leg_iv_{row_id}",
+            key=widget_key("leg_iv"),
             help="Used only when no calibrated surface is available. Annualized decimal: 0.42 means 42%.",
         )
 
@@ -274,7 +279,7 @@ def _render_leg_card(
     )
     remove = st.button(
         "Remove leg",
-        key=f"leg_remove_{row_id}",
+        key=widget_key("leg_remove"),
         use_container_width=True,
     )
 
@@ -303,6 +308,8 @@ def render_interactive_leg_editor(
     iv_by_ticker: pd.Series,
     normalized_spot: float = 100.0,
     state_key: str = "phase5_interactive_rows",
+    key_prefix: str | None = None,
+    add_button_label: str = "Add another option leg",
     auto_surface_tickers: set[str] | None = None,
 ) -> pd.DataFrame:
     """Render up to four vertical option cards per row."""
@@ -312,6 +319,7 @@ def render_interactive_leg_editor(
         )
     rows = st.session_state[state_key]
     surface_tickers = set() if auto_surface_tickers is None else set(auto_surface_tickers)
+    widget_prefix = key_prefix or state_key
 
     rendered_rows = []
     remove_id = None
@@ -329,6 +337,7 @@ def render_interactive_leg_editor(
                         iv_by_ticker=iv_by_ticker,
                         normalized_spot=normalized_spot,
                         auto_surface_tickers=surface_tickers,
+                        key_prefix=widget_prefix,
                     )
                     rendered_rows.append(rendered)
                     if remove:
@@ -340,7 +349,7 @@ def render_interactive_leg_editor(
         ]
         st.rerun()
 
-    if st.button("Add another option leg", type="secondary"):
+    if st.button(add_button_label, type="secondary", key=f"{widget_prefix}_add_leg"):
         next_id = max([int(row["id"]) for row in rendered_rows], default=0) + 1
         rendered_rows.append(
             {
