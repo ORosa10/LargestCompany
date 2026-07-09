@@ -18,7 +18,7 @@ from optimization import build_candidate_option_universe, long_option_payoff_mat
 from option_valuation import reprice_option_legs
 from payoff_surface import polymarket_payoff, selected_payoff_profile_bins, terminal_stock_prices, winner_from_ranks
 from phase4_ui import display_profile, dollars, pct
-from robust_optimizer import aligned_profile_figure, price_bin_profile, render_robust_optimizer
+from robust_optimizer import aligned_profile_figure, price_bin_profile, render_profile_trace_controls, render_robust_optimizer
 from simulation_store import load_phase_artifact, load_simulation_snapshot
 
 NORMALIZED_SPOT = 100.0
@@ -94,10 +94,10 @@ def distribution_figure(baseline, portfolio, name) -> go.Figure:
     return fig
 
 
-def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual portfolio") -> go.Figure:
+def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual portfolio", trace_visibility: dict | None = None) -> go.Figure:
     base_profile = price_bin_profile(terminal_prices, base, bin_width=5.0)
     portfolio_profile = price_bin_profile(terminal_prices, total, bin_width=5.0)
-    fig = aligned_profile_figure(base_profile, portfolio_profile)
+    fig = aligned_profile_figure(base_profile, portfolio_profile, trace_visibility)
 
     rename_map = {
         "Optimizer 2 mean": f"{name} mean",
@@ -108,17 +108,19 @@ def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual p
         if trace.name in rename_map:
             trace.name = rename_map[trace.name]
 
-    fig.add_trace(
-        go.Scatter(
-            x=portfolio_profile["Price bin"],
-            y=portfolio_profile["Expected payoff"] - portfolio_profile["Payoff SD"],
-            name=f"{name} mean - SD",
-            mode="lines+markers",
-            line=dict(color="#7c3aed", dash="dash"),
-        ),
-        row=1,
-        col=1,
-    )
+    show_mean_sd = trace_visibility is None or bool(trace_visibility.get("Portfolio mean - SD", False))
+    if show_mean_sd:
+        fig.add_trace(
+            go.Scatter(
+                x=portfolio_profile["Price bin"],
+                y=portfolio_profile["Expected payoff"] - portfolio_profile["Payoff SD"],
+                name=f"{name} mean - SD",
+                mode="lines+markers",
+                line=dict(color="#7c3aed", dash="dash"),
+            ),
+            row=1,
+            col=1,
+        )
     fig.update_layout(
         title=dict(text=f"{name} payoff, stress lines, and scenario probability", y=0.98),
         height=820,
@@ -262,6 +264,8 @@ def render() -> None:
 
     st.success(f"Frozen close snapshot | target {run.get('target_date', 'n/a')} | {len(result.terminal_market_caps):,} paths | Phase 2 curves loaded | pricing: {'strike-specific surface' if use_surface else 'Phase 1 ATM fallback'}")
     st.caption("Prices are normalized to 100. Option quantities are option-share equivalents: 1 = one share-equivalent; 100 = one standard listed option contract. No Yahoo request occurs on this page.")
+    if "GOOG" not in tickers and "GOOGL" in tickers:
+        st.caption("Google appears as GOOGL in this model, not GOOG.")
 
     eligible = [ticker for ticker in tickers if float(probabilities.loc[ticker]) >= float(threshold)]
     if selected not in eligible:
@@ -385,7 +389,8 @@ def render() -> None:
 
             st.subheader("Live payoff profile")
             st.caption("Mean, mean minus SD, P5, P1, and scenario probability update with every manual leg.")
-            st.plotly_chart(manual_diagnostic_figure(base, total, normalized_prices[selected].to_numpy(float), name), width="stretch", key=f"{chart_key_prefix}_diagnostic")
+            trace_visibility = render_profile_trace_controls(chart_key_prefix, include_mean_sd=True)
+            st.plotly_chart(manual_diagnostic_figure(base, total, normalized_prices[selected].to_numpy(float), name, trace_visibility), width="stretch", key=f"{chart_key_prefix}_diagnostic")
             with st.expander("Payoff distribution and detailed bin table"):
                 st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
