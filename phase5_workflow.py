@@ -340,7 +340,7 @@ def render() -> None:
         entry = st.number_input(f"{selected} {side} entry price", 0.0, 1.0, default_entry, 0.001, format="%.3f")
         shares = st.number_input("Polymarket shares", 0.0, value=100.0, step=10.0)
         st.header("Hedge universe")
-        threshold = st.number_input("Minimum Phase 1 P(#1)", 0.0, 1.0, 0.10, 0.01, format="%.2f")
+        threshold = st.number_input("Minimum Phase 1 P(#1)", 0.0, 1.0, 0.0001, 0.0001, format="%.4f", help="0.0001 = 0.01%. Event tickers are always included.")
         st.header("Candidate chain")
         grid_points = st.number_input("Strike grid points", 7, 61, 25, 2, help="Number of candidate strikes generated between the lower and upper terminal-price quantiles for every eligible ticker.")
         lower_q = st.number_input("Lower terminal-price quantile", 0.001, 0.25, 0.01, 0.005, format="%.3f", help="Lowest simulated terminal-price quantile used to start the candidate strike grid. 0.010 means the 1st percentile.")
