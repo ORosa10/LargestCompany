@@ -249,7 +249,7 @@ def render() -> None:
     optimizer_candidates["Theoretical premium"] = optimizer_candidates["Theoretical premium"].astype(float) * OPTION_QUANTITY_MULTIPLIER
     optimizer_candidates["Premium unit"] = "per share-equivalent"
 
-    def render_manual_portfolio_workspace(name: str, state_key: str, chart_key_prefix: str) -> None:
+    def render_manual_portfolio_workspace(name: str, state_key: str, chart_key_prefix: str, use_sliders: bool = False) -> None:
         default_iv = float(fallback_ivs.loc[selected])
         if state_key not in st.session_state:
             st.session_state[state_key] = default_manual_rows(selected, default_iv)
@@ -275,6 +275,7 @@ def render() -> None:
             key_prefix=state_key,
             add_button_label="Add another option leg",
             auto_surface_tickers=surface_tickers,
+            use_sliders=use_sliders,
         )
         try:
             legs = resolve_manual_option_legs(manual_inputs, pd.DataFrame(), time_to_expiry=time_to_expiry, risk_free_rate=risk_free_rate, normalized_spot=100.0)
@@ -307,7 +308,7 @@ def render() -> None:
         render_manual_portfolio_workspace("Manual portfolio", "phase5_interactive_rows", "phase5_manual")
 
     with manual2_tab:
-        render_manual_portfolio_workspace("Manual portfolio 2", "phase5_interactive_rows_2", "phase5_manual2")
+        render_manual_portfolio_workspace("Manual portfolio 2", "phase5_interactive_rows_2", "phase5_manual2", use_sliders=True)
 
     with optimizer_tab:
         render_robust_optimizer(base_payoff=base, option_payoff_matrix=option_matrix, candidates=optimizer_candidates, terminal_prices=normalized_prices[selected].to_numpy(float), quantity_min=-float(max_quantity), quantity_max=float(max_quantity), quantity_step=float(quantity_step), max_legs=int(max_legs), max_total_quantity=float(max_total), default_minimum_ev=float(baseline_metrics["Expected payoff"]), optimization_scenarios=int(optimization_paths), seed=int(run.get("seed", 42)))
