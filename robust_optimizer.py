@@ -9,6 +9,14 @@ import streamlit as st
 from optimization import selected_quantities_to_legs
 
 FLOOR_METRICS = ["Conditional P5", "Conditional mean"]
+PROFILE_TRACE_OPTIONS = [
+    "Polymarket-only mean",
+    "Portfolio mean",
+    "Portfolio P5",
+    "Portfolio P1",
+    "Scenario probability",
+    "Portfolio mean - SD",
+]
 
 @dataclass
 class RobustOptimizationResult:
@@ -181,15 +189,45 @@ def audit_table(base, prices, result, bins, minimum_ev, minimum_es5):
     return pd.DataFrame(rows)
 
 
-def aligned_profile_figure(base_profile, profile):
+def render_profile_trace_controls(key_prefix, *, include_mean_sd=False):
+    options = [
+        "Polymarket-only mean",
+        "Portfolio mean",
+        "Portfolio P5",
+        "Portfolio P1",
+        "Scenario probability",
+    ]
+    if include_mean_sd:
+        options.append("Portfolio mean - SD")
+    default = [option for option in options if option != "Portfolio P1"]
+    selected = st.multiselect(
+        "Graph traces",
+        options,
+        default=default,
+        key=f"{key_prefix}_profile_traces",
+        help="Hidden traces are removed from the figure so they do not affect the y-axis scale.",
+    )
+    return {option: option in selected for option in options}
+
+
+def _trace_enabled(trace_visibility, name):
+    return True if trace_visibility is None else bool(trace_visibility.get(name, False))
+
+
+def aligned_profile_figure(base_profile, profile, trace_visibility=None):
     labels = profile["Price bin"]
     colors = np.where(profile["Expected payoff"] >= 0, "#16a34a", "#dc2626")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.08, row_heights=[.72, .28])
-    fig.add_trace(go.Scatter(x=labels, y=base_profile["Expected payoff"], name="Polymarket-only mean", mode="lines", line=dict(color="#94a3b8", dash="dash")), row=1, col=1)
-    fig.add_trace(go.Bar(x=labels, y=profile["Expected payoff"], name="Optimizer 2 mean", marker_color=colors), row=1, col=1)
-    fig.add_trace(go.Scatter(x=labels, y=profile["Payoff P5"], name="Optimizer 2 P5", mode="lines+markers", line=dict(color="#f59e0b", dash="dash")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=labels, y=profile["Payoff P1"], name="Optimizer 2 P1", mode="lines+markers", line=dict(color="#dc2626", dash="dot")), row=1, col=1)
-    fig.add_trace(go.Bar(x=labels, y=profile["Scenario probability"], text=profile["Scenario probability"].map(lambda x: f"{x:.1%}"), textposition="outside", name="Scenario probability", marker_color="#60a5fa"), row=2, col=1)
+    if _trace_enabled(trace_visibility, "Polymarket-only mean"):
+        fig.add_trace(go.Scatter(x=labels, y=base_profile["Expected payoff"], name="Polymarket-only mean", mode="lines", line=dict(color="#94a3b8", dash="dash")), row=1, col=1)
+    if _trace_enabled(trace_visibility, "Portfolio mean"):
+        fig.add_trace(go.Bar(x=labels, y=profile["Expected payoff"], name="Optimizer 2 mean", marker_color=colors), row=1, col=1)
+    if _trace_enabled(trace_visibility, "Portfolio P5"):
+        fig.add_trace(go.Scatter(x=labels, y=profile["Payoff P5"], name="Optimizer 2 P5", mode="lines+markers", line=dict(color="#f59e0b", dash="dash")), row=1, col=1)
+    if _trace_enabled(trace_visibility, "Portfolio P1"):
+        fig.add_trace(go.Scatter(x=labels, y=profile["Payoff P1"], name="Optimizer 2 P1", mode="lines+markers", line=dict(color="#dc2626", dash="dot")), row=1, col=1)
+    if _trace_enabled(trace_visibility, "Scenario probability"):
+        fig.add_trace(go.Bar(x=labels, y=profile["Scenario probability"], text=profile["Scenario probability"].map(lambda x: f"{x:.1%}"), textposition="outside", name="Scenario probability", marker_color="#60a5fa"), row=2, col=1)
     fig.add_hline(y=0, line_dash="dash", line_color="black", row=1, col=1)
     fig.update_yaxes(title_text="Payoff", row=1, col=1)
     fig.update_yaxes(title_text="Probability", tickformat=".1%", row=2, col=1)
@@ -260,7 +298,8 @@ def render_robust_optimizer(*, base_payoff, option_payoff_matrix, candidates, te
     st.dataframe(robust_metrics_table(base_payoff, result), use_container_width=True, hide_index=True)
     st.subheader("Selected option legs")
     st.dataframe(result.selected_legs, use_container_width=True, hide_index=True)
-    st.plotly_chart(aligned_profile_figure(base_profile, result.profile), use_container_width=True, key="optimizer2_aligned_profile")
+    trace_visibility = render_profile_trace_controls("optimizer2")
+    st.plotly_chart(aligned_profile_figure(base_profile, result.profile, trace_visibility), use_container_width=True, key="optimizer2_aligned_profile")
     with st.expander("Show terminal-price bin statistics"):
         display = result.profile.copy()
         display["Scenario probability"] = display["Scenario probability"].map(lambda x: f"{x:.2%}")
