@@ -125,6 +125,10 @@ def optimized_legs_to_interactive_rows(
     return rows
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(max(float(value), low), high)
+
+
 def _render_leg_card(
     *,
     row: dict,
@@ -135,6 +139,7 @@ def _render_leg_card(
     normalized_spot: float,
     auto_surface_tickers: set[str],
     key_prefix: str,
+    use_sliders: bool,
 ) -> tuple[dict, bool]:
     """Render one narrow card with controls stacked vertically."""
     row_id = int(row["id"])
@@ -171,15 +176,27 @@ def _render_leg_card(
         index=POSITIONS.index(row["position"]),
         key=widget_key("leg_position"),
     )
-    quantity = st.number_input(
-        "Option quantity",
-        min_value=0.0,
-        value=float(row["quantity"]),
-        step=1.0,
-        format="%.3f",
-        key=widget_key("leg_quantity"),
-        help="Option-share equivalent. 1 = one share-equivalent; 100 = one standard listed option contract.",
-    )
+    if use_sliders:
+        quantity = st.slider(
+            "Quantity",
+            min_value=0.0,
+            max_value=200.0,
+            value=_clamp(row["quantity"], 0.0, 200.0),
+            step=1.0,
+            format="%.0f",
+            key=widget_key("leg_quantity"),
+            help="Option-share equivalent. 100 = one standard listed option contract.",
+        )
+    else:
+        quantity = st.number_input(
+            "Option quantity",
+            min_value=0.0,
+            value=float(row["quantity"]),
+            step=1.0,
+            format="%.3f",
+            key=widget_key("leg_quantity"),
+            help="Option-share equivalent. 1 = one share-equivalent; 100 = one standard listed option contract.",
+        )
 
     st.markdown("**Strike setup**")
     define_by = st.selectbox(
@@ -201,15 +218,26 @@ def _render_leg_card(
     curve = curves[ticker]
 
     if define_by == "Boundary":
-        confidence_pct = st.number_input(
-            "Confidence (%) - editable",
-            min_value=0.1,
-            max_value=99.9,
-            value=float(row["confidence_pct"]),
-            step=1.0,
-            format="%.1f",
-            key=widget_key("leg_confidence"),
-        )
+        if use_sliders:
+            confidence_pct = st.slider(
+                "Boundary confidence (%)",
+                min_value=0.1,
+                max_value=99.9,
+                value=_clamp(row["confidence_pct"], 0.1, 99.9),
+                step=0.5,
+                format="%.1f",
+                key=widget_key("leg_confidence"),
+            )
+        else:
+            confidence_pct = st.number_input(
+                "Confidence (%) - editable",
+                min_value=0.1,
+                max_value=99.9,
+                value=float(row["confidence_pct"]),
+                step=1.0,
+                format="%.1f",
+                key=widget_key("leg_confidence"),
+            )
         strike = strike_at_confidence(
             curve,
             confidence_pct / 100.0,
@@ -224,14 +252,25 @@ def _render_leg_card(
             key=widget_key("leg_strike_locked"),
         )
     else:
-        strike = st.number_input(
-            "Strike - editable",
-            min_value=0.01,
-            value=float(row["strike"]),
-            step=5.0,
-            format="%.2f",
-            key=widget_key("leg_strike"),
-        )
+        if use_sliders:
+            strike = st.slider(
+                "Strike",
+                min_value=1.0,
+                max_value=300.0,
+                value=_clamp(row["strike"], 1.0, 300.0),
+                step=1.0,
+                format="%.0f",
+                key=widget_key("leg_strike"),
+            )
+        else:
+            strike = st.number_input(
+                "Strike - editable",
+                min_value=0.01,
+                value=float(row["strike"]),
+                step=5.0,
+                format="%.2f",
+                key=widget_key("leg_strike"),
+            )
         confidence_pct = 100.0 * confidence_at_strike(
             curve,
             strike,
@@ -311,6 +350,7 @@ def render_interactive_leg_editor(
     key_prefix: str | None = None,
     add_button_label: str = "Add another option leg",
     auto_surface_tickers: set[str] | None = None,
+    use_sliders: bool = False,
 ) -> pd.DataFrame:
     """Render up to four vertical option cards per row."""
     if state_key not in st.session_state:
@@ -338,6 +378,7 @@ def render_interactive_leg_editor(
                         normalized_spot=normalized_spot,
                         auto_surface_tickers=surface_tickers,
                         key_prefix=widget_prefix,
+                        use_sliders=use_sliders,
                     )
                     rendered_rows.append(rendered)
                     if remove:
