@@ -97,11 +97,11 @@ def display_contribution_table(table: pd.DataFrame) -> pd.DataFrame:
 
 def distribution_figure(baseline, portfolio, name) -> go.Figure:
     fig = go.Figure()
-    fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability")
-    fig.add_histogram(x=portfolio, name=name, opacity=0.55, nbinsx=80, histnorm="probability")
+    fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability density")
+    fig.add_histogram(x=portfolio, name=name, opacity=0.55, nbinsx=80, histnorm="probability density")
     fig.update_layout(
-        title="Payoff distribution comparison", xaxis_title="Terminal payoff",
-        yaxis_title="Scenario probability", barmode="overlay", yaxis_tickformat=".1%",
+        title="Payoff density distribution", xaxis_title="Terminal payoff",
+        yaxis_title="Density", barmode="overlay",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     return fig
@@ -168,11 +168,7 @@ def price_bin_contains_strike(label: str, strike: float) -> bool:
 
 
 def leg_strike_note(leg: pd.Series) -> str:
-    side = "L" if str(leg["Position"]).lower().startswith("long") else "S"
-    option = "C" if str(leg["Option type"]).lower().startswith("call") else "P"
-    quantity = float(leg.get("Quantity", 1.0))
-    qty = "" if abs(quantity - 1.0) < 0.005 else f"{format_strike(quantity)}x "
-    return f"{qty}{side}{option} {format_strike(float(leg['Strike']))}"
+    return format_strike(float(leg["Strike"]))
 
 
 def add_strikes_to_price_bins(profile: pd.DataFrame, legs: pd.DataFrame, axis_ticker: str | None) -> pd.DataFrame:
@@ -185,12 +181,13 @@ def add_strikes_to_price_bins(profile: pd.DataFrame, legs: pd.DataFrame, axis_ti
     labels = []
     for label in display["Price bin"]:
         notes = [leg_strike_note(leg) for _, leg in axis_legs.iterrows() if price_bin_contains_strike(label, float(leg["Strike"]))]
+        notes = list(dict.fromkeys(notes))
         suffix = ""
         if notes:
-            shown = ", ".join(notes[:3])
-            if len(notes) > 3:
-                shown += f", +{len(notes) - 3}"
-            suffix = f"<br>{shown}"
+            shown = ", ".join(notes[:4])
+            if len(notes) > 4:
+                shown += f", +{len(notes) - 4}"
+            suffix = f"<br>Strikes: {shown}"
         labels.append(f"{label}{suffix}")
     display["Price bin"] = labels
     return display
@@ -226,7 +223,7 @@ def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual p
             col=1,
         )
     axis_label = axis_ticker or "selected ticker"
-    fig.update_xaxes(title_text=f"{axis_label} terminal stock price / current price; active {axis_label} strikes shown under matching bins", row=2, col=1)
+    fig.update_xaxes(title_text=f"{axis_label} terminal stock price / current price; strikes shown under matching bins", row=2, col=1)
     fig.update_layout(
         title=dict(text=f"{name} payoff by {axis_label} terminal-price bin", y=0.98),
         height=850,
@@ -552,8 +549,9 @@ def render() -> None:
                 with st.expander(f"Leg contribution by {axis_ticker} bin", expanded=True):
                     st.plotly_chart(contribution_stacked_figure(contribution, axis_ticker), width="stretch", key=f"{chart_key_prefix}_contribution_stack")
                     st.dataframe(display_contribution_table(contribution), width="stretch", hide_index=True)
-            with st.expander("Payoff distribution and detailed bin table"):
-                st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
+            st.subheader("Payoff density distribution")
+            st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
+            with st.expander("Detailed bin table"):
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
             st.subheader("Resolved portfolio")
             st.dataframe(display_legs(legs), width="stretch", hide_index=True)
