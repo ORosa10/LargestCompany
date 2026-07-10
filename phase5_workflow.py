@@ -148,9 +148,59 @@ def contribution_stacked_figure(table: pd.DataFrame, axis_ticker: str) -> go.Fig
     return fig
 
 
-def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual portfolio", trace_visibility: dict | None = None, axis_ticker: str | None = None) -> go.Figure:
+def format_strike(value: float) -> str:
+    return f"{value:.0f}" if abs(value - round(value)) < 0.005 else f"{value:.1f}"
+
+
+def price_bin_contains_strike(label: str, strike: float) -> bool:
+    clean = str(label).split("<br>")[0].replace("%", "")
+    try:
+        if clean.startswith("<"):
+            return strike <= float(clean[1:])
+        if clean.startswith(">="):
+            return strike >= float(clean[2:])
+        if "-" in clean:
+            left, right = clean.split("-", 1)
+            return float(left) < strike <= float(right)
+    except ValueError:
+        return False
+    return False
+
+
+def leg_strike_note(leg: pd.Series) -> str:
+    side = "L" if str(leg["Position"]).lower().startswith("long") else "S"
+    option = "C" if str(leg["Option type"]).lower().startswith("call") else "P"
+    quantity = float(leg.get("Quantity", 1.0))
+    qty = "" if abs(quantity - 1.0) < 0.005 else f"{format_strike(quantity)}x "
+    return f"{qty}{side}{option} {format_strike(float(leg['Strike']))}"
+
+
+def add_strikes_to_price_bins(profile: pd.DataFrame, legs: pd.DataFrame, axis_ticker: str | None) -> pd.DataFrame:
+    if legs is None or legs.empty or axis_ticker is None:
+        return profile
+    axis_legs = legs[legs["Ticker"].astype(str) == str(axis_ticker)]
+    if axis_legs.empty:
+        return profile
+    display = profile.copy()
+    labels = []
+    for label in display["Price bin"]:
+        notes = [leg_strike_note(leg) for _, leg in axis_legs.iterrows() if price_bin_contains_strike(label, float(leg["Strike"]))]
+        suffix = ""
+        if notes:
+            shown = ", ".join(notes[:3])
+            if len(notes) > 3:
+                shown += f", +{len(notes) - 3}"
+            suffix = f"<br>{shown}"
+        labels.append(f"{label}{suffix}")
+    display["Price bin"] = labels
+    return display
+
+
+def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual portfolio", trace_visibility: dict | None = None, axis_ticker: str | None = None, legs: pd.DataFrame | None = None) -> go.Figure:
     base_profile = price_bin_profile(terminal_prices, base, bin_width=5.0)
     portfolio_profile = price_bin_profile(terminal_prices, total, bin_width=5.0)
+    base_profile = add_strikes_to_price_bins(base_profile, legs, axis_ticker)
+    portfolio_profile = add_strikes_to_price_bins(portfolio_profile, legs, axis_ticker)
     fig = aligned_profile_figure(base_profile, portfolio_profile, trace_visibility)
 
     rename_map = {
@@ -176,12 +226,12 @@ def manual_diagnostic_figure(base, total, terminal_prices, name: str = "Manual p
             col=1,
         )
     axis_label = axis_ticker or "selected ticker"
-    fig.update_xaxes(title_text=f"{axis_label} terminal stock price / current price", row=2, col=1)
+    fig.update_xaxes(title_text=f"{axis_label} terminal stock price / current price; active {axis_label} strikes shown under matching bins", row=2, col=1)
     fig.update_layout(
         title=dict(text=f"{name} payoff by {axis_label} terminal-price bin", y=0.98),
-        height=820,
+        height=850,
         legend=dict(orientation="h", yanchor="bottom", y=1.12, xanchor="left", x=0),
-        margin=dict(t=150, r=40, b=90, l=80),
+        margin=dict(t=150, r=40, b=115, l=80),
     )
     return fig
 
@@ -495,9 +545,10 @@ def render() -> None:
             with control_cols[1]:
                 trace_visibility = render_profile_trace_controls(chart_key_prefix, include_mean_sd=True)
             axis_prices = normalized_prices[axis_ticker]
-            st.plotly_chart(manual_diagnostic_figure(base, total, axis_prices.to_numpy(float), name, trace_visibility, axis_ticker), width="stretch", key=f"{chart_key_prefix}_diagnostic")
+            st.plotly_chart(manual_diagnostic_figure(base, total, axis_prices.to_numpy(float), name, trace_visibility, axis_ticker, legs), width="stretch", key=f"{chart_key_prefix}_diagnostic")
             contribution = leg_contribution_by_axis(legs, normalized_prices, axis_prices, base_payoff=base)
             if not contribution.empty:
+                contribution = add_strikes_to_price_bins(contribution, legs, axis_ticker)
                 with st.expander(f"Leg contribution by {axis_ticker} bin", expanded=True):
                     st.plotly_chart(contribution_stacked_figure(contribution, axis_ticker), width="stretch", key=f"{chart_key_prefix}_contribution_stack")
                     st.dataframe(display_contribution_table(contribution), width="stretch", hide_index=True)
