@@ -4,7 +4,9 @@ from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from execution_mapping import (
     choose_expiration,
@@ -18,7 +20,7 @@ from manual_portfolio import manual_option_payoffs_and_analytics
 from market_data import fetch_spot_prices
 from optimization import payoff_metrics
 from payoff_surface import terminal_stock_prices
-from phase5_workflow import distribution_figure, manual_diagnostic_figure
+from phase5_workflow import distribution_figure
 from robust_optimizer import render_profile_trace_controls
 from simulation_store import load_simulation_snapshot
 
@@ -93,6 +95,89 @@ def real_execution_legs(mapping: pd.DataFrame, original_legs: pd.DataFrame, *, t
             "Contract symbol": mapped.get("Contract symbol", ""),
         })
     return pd.DataFrame(rows)
+
+
+def real_price_bin_profile(terminal_prices, payoffs, *, bin_width=5.0) -> pd.DataFrame:
+    prices, values = np.asarray(terminal_prices, float), np.asarray(payoffs, float)
+    low = np.floor(np.quantile(prices, 0.01) / bin_width) * bin_width
+    high = np.ceil(np.quantile(prices, 0.99) / bin_width) * bin_width
+    edges = np.concatenate(([-np.inf], np.arange(low, high + 0.5 * bin_width, bin_width), [np.inf]))
+    frame = pd.DataFrame({"Terminal price": prices, "Payoff": values})
+    frame["Price bin"] = pd.cut(frame["Terminal price"], edges, include_lowest=True)
+    rows = []
+    for interval, group in frame.groupby("Price bin", observed=True):
+        x = group["Payoff"].to_numpy(float)
+        if not np.isfinite(interval.left):
+            label = f"<${interval.right:,.0f}"
+        elif not np.isfinite(interval.right):
+            label = f">=${interval.left:,.0f}"
+        else:
+            label = f"${interval.left:,.0f}-${interval.right:,.0f}"
+        rows.append({
+            "Price bin": label,
+            "Price midpoint": group["Terminal price"].mean(),
+            "Scenario probability": len(group) / len(frame),
+            "Expected payoff": float(x.mean()),
+            "Payoff SD": float(x.std(ddof=0)),
+            "Payoff P1": float(np.quantile(x, 0.01)),
+            "Payoff P5": float(np.quantile(x, 0.05)),
+        })
+    return pd.DataFrame(rows)
+
+
+def strike_marker_rows(profile: pd.DataFrame, legs: pd.DataFrame, axis_ticker: str) -> pd.DataFrame:
+    if legs.empty:
+        return pd.DataFrame(columns=["Price bin", "Strikes"])
+    axis_legs = legs[legs["Ticker"].astype(str) == str(axis_ticker)]
+    if axis_legs.empty:
+        return pd.DataFrame(columns=["Price bin", "Strikes"])
+    rows = []
+    for _, profile_row in profile.iterrows():
+        label = str(profile_row["Price bin"])
+        midpoint = float(profile_row["Price midpoint"])
+        strikes = []
+        for _, leg in axis_legs.iterrows():
+            strike = float(leg["Strike"])
+            if abs(strike - midpoint) <= 3.0:
+                strikes.append(f"{strike:.2f}")
+        if strikes:
+            rows.append({"Price bin": label, "Strikes": ", ".join(dict.fromkeys(strikes))})
+    return pd.DataFrame(rows)
+
+
+def phase6_profile_figure(base, total, terminal_prices, name: str, trace_visibility: dict, axis_ticker: str, legs: pd.DataFrame) -> go.Figure:
+    base_profile = real_price_bin_profile(terminal_prices, base, bin_width=5.0)
+    portfolio_profile = real_price_bin_profile(terminal_prices, total, bin_width=5.0)
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.12,
+        row_heights=[0.72, 0.28],
+        specs=[[{"secondary_y": False}], [{"secondary_y": False}]],
+    )
+    x = portfolio_profile["Price bin"]
+    if trace_visibility.get("Polymarket-only mean", True):
+        fig.add_trace(go.Scatter(x=base_profile["Price bin"], y=base_profile["Expected payoff"], name="Polymarket-only mean", mode="lines", line=dict(color="#94a3b8", dash="dash")), row=1, col=1)
+    if trace_visibility.get("Portfolio mean", True):
+        fig.add_trace(go.Bar(x=x, y=portfolio_profile["Expected payoff"], name=f"{name} mean", marker_color="#16a34a"), row=1, col=1)
+    if trace_visibility.get("Portfolio P5", True):
+        fig.add_trace(go.Scatter(x=x, y=portfolio_profile["Payoff P5"], name=f"{name} P5", mode="lines+markers", line=dict(color="#f59e0b", dash="dash")), row=1, col=1)
+    if trace_visibility.get("Portfolio P1", False):
+        fig.add_trace(go.Scatter(x=x, y=portfolio_profile["Payoff P1"], name=f"{name} P1", mode="lines+markers", line=dict(color="#ef4444", dash="dot")), row=1, col=1)
+    if trace_visibility.get("Portfolio mean - SD", True):
+        fig.add_trace(go.Scatter(x=x, y=portfolio_profile["Expected payoff"] - portfolio_profile["Payoff SD"], name=f"{name} mean - SD", mode="lines+markers", line=dict(color="#7c3aed", dash="dash")), row=1, col=1)
+    markers = strike_marker_rows(portfolio_profile, legs, axis_ticker)
+    if not markers.empty:
+        fig.add_trace(go.Scatter(x=markers["Price bin"], y=np.zeros(len(markers)), name=f"{axis_ticker} listed strikes", mode="markers+text", text=markers["Strikes"], textposition="top center", marker=dict(symbol="diamond", size=8, color="#111827"), hovertemplate="%{x}<br>Strikes: %{text}<extra></extra>"), row=1, col=1)
+    if trace_visibility.get("Scenario probability", True):
+        fig.add_trace(go.Bar(x=x, y=portfolio_profile["Scenario probability"], name="Scenario probability", marker_color="#60a5fa"), row=2, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color="#111827", row=1, col=1)
+    fig.update_yaxes(title_text="Payoff", row=1, col=1)
+    fig.update_yaxes(title_text="Probability", tickformat=".1%", row=2, col=1)
+    fig.update_xaxes(title_text=f"{axis_ticker} terminal stock price", row=2, col=1, tickangle=-45)
+    fig.update_layout(title=f"{name} payoff by {axis_ticker} real terminal-price bin", height=850, legend=dict(orientation="h", yanchor="bottom", y=1.08, xanchor="left", x=0), margin=dict(t=130, r=40, b=110, l=80))
+    return fig
 
 
 snapshot = available_snapshot()
@@ -299,7 +384,8 @@ real_terminal = terminal_stock_prices(result.terminal_market_caps, current_caps,
 try:
     mapped_legs = real_execution_legs(edited_mapping, original_legs, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
     mapped_option_payoff, _ = manual_option_payoffs_and_analytics(mapped_legs, real_terminal, contract_multiplier=1.0, include_premiums=True)
-    base_payoff = original_total_payoff - manual_option_payoffs_and_analytics(original_legs, terminal_stock_prices(result.terminal_market_caps, current_caps, pd.Series(100.0, index=result.terminal_market_caps.columns)), contract_multiplier=1.0, include_premiums=True)[0]
+    original_option_payoff, _ = manual_option_payoffs_and_analytics(original_legs, terminal_stock_prices(result.terminal_market_caps, current_caps, pd.Series(100.0, index=result.terminal_market_caps.columns)), contract_multiplier=1.0, include_premiums=True)
+    base_payoff = original_total_payoff - original_option_payoff
     mapped_total_payoff = base_payoff + mapped_option_payoff
     st.subheader("Phase 6 real-market payoff metrics")
     st.dataframe(metric_table(base_payoff, mapped_total_payoff), use_container_width=True, hide_index=True)
@@ -314,7 +400,7 @@ try:
     with control_cols[1]:
         trace_visibility = render_profile_trace_controls("phase6_mapped", include_mean_sd=True)
     st.plotly_chart(
-        manual_diagnostic_figure(
+        phase6_profile_figure(
             base_payoff,
             mapped_total_payoff,
             real_terminal[axis_ticker].to_numpy(float),
