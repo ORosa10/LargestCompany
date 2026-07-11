@@ -13,7 +13,6 @@ from execution_mapping import (
     fetch_option_expirations,
     infer_listed_strike_step,
     map_normalized_legs,
-    rebuild_normalized_legs,
 )
 from manual_portfolio import manual_option_payoffs_and_analytics
 from market_data import fetch_spot_prices
@@ -25,7 +24,7 @@ from simulation_store import load_simulation_snapshot
 
 st.set_page_config(page_title="Phase 6", layout="wide")
 st.title("Phase 6: execution mapping")
-st.caption("Translate a selected Phase 5 research portfolio from normalized spot=100 into current spots, executable strike grids, and listed expiration dates.")
+st.caption("Map the selected Phase 5 research portfolio into real spots, real listed strikes, and editable real execution premiums.")
 
 
 def available_snapshot() -> dict | None:
@@ -48,9 +47,9 @@ def target_from_metadata(metadata: dict) -> date:
     return date.today() + timedelta(days=int(metadata.get("days_to_target", 365)))
 
 
-def metric_table(base, original, mapped) -> pd.DataFrame:
+def metric_table(base, mapped) -> pd.DataFrame:
     rows = []
-    for name, values in [("Polymarket only", base), ("Phase 5 portfolio", original), ("Phase 6 mapped portfolio", mapped)]:
+    for name, values in [("Polymarket only", base), ("Phase 6 real-market portfolio", mapped)]:
         metrics = payoff_metrics(values)
         ev = float(metrics["Expected payoff"])
         sd = float(metrics["Payoff standard deviation"])
@@ -62,6 +61,36 @@ def metric_table(base, original, mapped) -> pd.DataFrame:
             "P(loss)": f"{metrics['Probability of loss']:.2%}",
             "Expected shortfall 5%": f"${metrics['Expected shortfall 5%']:,.2f}",
             "Worst payoff": f"${metrics['Worst payoff']:,.2f}",
+        })
+    return pd.DataFrame(rows)
+
+
+def real_execution_legs(mapping: pd.DataFrame, original_legs: pd.DataFrame, *, time_to_expiry: float, risk_free_rate: float) -> pd.DataFrame:
+    rows = []
+    original = original_legs.reset_index(drop=True)
+    active_mapping = mapping[mapping["Use"]].reset_index(drop=True)
+    for _, mapped in active_mapping.iterrows():
+        source = original.iloc[int(mapped["Leg"]) - 1]
+        spot = float(mapped["Current spot"])
+        strike = float(mapped["Executable strike"])
+        premium = float(mapped["Execution premium"])
+        rows.append({
+            "Instrument": f"{mapped['Position']} {mapped['Ticker']} {mapped['Option type']} {strike:.2f}",
+            "Ticker": str(mapped["Ticker"]),
+            "Option type": str(mapped["Option type"]),
+            "Position": str(mapped["Position"]),
+            "Quantity": float(mapped["Quantity"]),
+            "Strike": strike,
+            "Strike / spot": strike / spot,
+            "Strike source": "Phase 6 real listed strike",
+            "Boundary used": source.get("Boundary used", "Mapped from Phase 5"),
+            "Spot": spot,
+            "Model IV": float(mapped.get("Model IV", np.nan)),
+            "Risk-free rate": risk_free_rate,
+            "Time to expiry": time_to_expiry,
+            "Theoretical premium": premium,
+            "Execution premium": premium,
+            "Contract symbol": mapped.get("Contract symbol", ""),
         })
     return pd.DataFrame(rows)
 
@@ -204,25 +233,28 @@ if option_chains:
 
 mapping = map_normalized_legs(original_legs, spot_lookup, step_lookup, option_chains=option_chains)
 pricing_basis = st.radio(
-    "Market premium basis",
+    "Default execution premium basis",
     ["Bid/ask mid", "Conservative executable"],
     horizontal=True,
     disabled=not bool(option_chains),
-    help="Conservative executable uses ask for long legs and bid for short legs. Mid uses the bid/ask midpoint when available.",
+    help="Conservative executable uses ask for long legs and bid for short legs. You can still override each premium manually below.",
 )
 if "Execution premium" not in mapping.columns:
     mapping["Execution premium"] = np.nan
 if option_chains:
     if pricing_basis == "Conservative executable" and "Conservative premium normalized" in mapping.columns:
-        mapping["Market premium normalized"] = mapping["Conservative premium normalized"].fillna(mapping.get("Market premium normalized", np.nan))
-        mapping["Execution premium"] = mapping["Market premium normalized"] * mapping["Current spot"] / 100.0
+        mapping["Reference premium"] = mapping["Conservative premium normalized"] * mapping["Current spot"] / 100.0
     elif "Mid" in mapping.columns:
-        mapping["Execution premium"] = mapping["Mid"]
+        mapping["Reference premium"] = mapping["Mid"]
+    else:
+        mapping["Reference premium"] = np.nan
 else:
     original_premiums = pd.to_numeric(original_legs.reset_index(drop=True).get("Theoretical premium"), errors="coerce")
-    mapping["Execution premium"] = original_premiums.to_numpy(float) * mapping["Current spot"] / 100.0
+    mapping["Reference premium"] = original_premiums.to_numpy(float) * mapping["Current spot"] / 100.0
+mapping["Execution premium"] = mapping["Reference premium"]
+
 st.subheader("Real-strike portfolio mapping")
-st.caption("Chain quotes are reference values. Edit Execution premium to the actual expected fill; Phase 6 converts that real-dollar premium back to the normalized spot=100 scale before recomputing payoff.")
+st.caption("Execution premium is a real-dollar option price. Edit it to the actual expected fill. Phase 6 payoff uses real terminal stock prices, real strikes, and this real premium without converting back to spot=100.")
 edited_mapping = st.data_editor(
     mapping,
     use_container_width=True,
@@ -241,15 +273,16 @@ edited_mapping = st.data_editor(
         "Strike step": st.column_config.NumberColumn(disabled=True, format="%.2f"),
         "Executable strike": st.column_config.NumberColumn(min_value=0.01, step=0.5, format="$%.2f"),
         "Listed strike": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-        "Mapped normalized strike": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Mapped normalized strike": None,
         "Strike mapping error": st.column_config.NumberColumn(disabled=True, format="%+.2f"),
         "Bid": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Ask": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Mid": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Bid/ask spread": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Reference premium": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Execution premium": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
-        "Market premium normalized": st.column_config.NumberColumn(disabled=True, format="%.2f"),
-        "Conservative premium normalized": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Market premium normalized": None,
+        "Conservative premium normalized": None,
         "Market IV": st.column_config.NumberColumn(disabled=True, format="%.2f"),
         "Model IV": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01, format="%.2f"),
         "Volume": st.column_config.NumberColumn(disabled=True, format="%.0f"),
@@ -257,30 +290,26 @@ edited_mapping = st.data_editor(
         "Contract symbol": st.column_config.TextColumn(disabled=True),
     },
 )
-if "Execution premium" in edited_mapping.columns:
-    edited_mapping["Market premium normalized"] = pd.to_numeric(edited_mapping["Execution premium"], errors="coerce") / edited_mapping["Current spot"].astype(float) * 100.0
 
 result = snapshot["result"]
 inputs = snapshot["simulation_inputs"].copy()
 current_caps = inputs.set_index("Ticker")["Current market cap"].astype(float)
-normalized_spots = pd.Series(100.0, index=result.terminal_market_caps.columns)
-normalized_terminal = terminal_stock_prices(result.terminal_market_caps, current_caps, normalized_spots)
+real_terminal = terminal_stock_prices(result.terminal_market_caps, current_caps, spot_lookup)
 
 try:
-    original_option_payoff, _ = manual_option_payoffs_and_analytics(original_legs, normalized_terminal, contract_multiplier=1.0, include_premiums=True)
-    base_payoff = original_total_payoff - original_option_payoff
-    mapped_legs = rebuild_normalized_legs(original_legs, edited_mapping, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
-    mapped_option_payoff, _ = manual_option_payoffs_and_analytics(mapped_legs, normalized_terminal, contract_multiplier=1.0, include_premiums=True)
+    mapped_legs = real_execution_legs(edited_mapping, original_legs, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
+    mapped_option_payoff, _ = manual_option_payoffs_and_analytics(mapped_legs, real_terminal, contract_multiplier=1.0, include_premiums=True)
+    base_payoff = original_total_payoff - manual_option_payoffs_and_analytics(original_legs, terminal_stock_prices(result.terminal_market_caps, current_caps, pd.Series(100.0, index=result.terminal_market_caps.columns)), contract_multiplier=1.0, include_premiums=True)[0]
     mapped_total_payoff = base_payoff + mapped_option_payoff
-    st.subheader("Phase 6 payoff metrics")
-    st.dataframe(metric_table(base_payoff, original_total_payoff, mapped_total_payoff), use_container_width=True, hide_index=True)
-    st.caption("Phase 6 mapped portfolio uses the executable strikes and editable execution premiums above. Premiums are normalized back to spot=100 so the payoff remains comparable to Phase 5.")
+    st.subheader("Phase 6 real-market payoff metrics")
+    st.dataframe(metric_table(base_payoff, mapped_total_payoff), use_container_width=True, hide_index=True)
+    st.caption("Phase 6 uses real-dollar option terms. It is no longer normalized to spot=100; this is the execution view.")
 
-    st.subheader("Phase 6 payoff profile")
+    st.subheader("Phase 6 real-market payoff profile")
     control_cols = st.columns([1, 2])
-    axis_options = [ticker for ticker in normalized_terminal.columns if ticker in tickers]
+    axis_options = [ticker for ticker in real_terminal.columns if ticker in tickers]
     if not axis_options:
-        axis_options = normalized_terminal.columns.astype(str).tolist()
+        axis_options = real_terminal.columns.astype(str).tolist()
     axis_ticker = control_cols[0].selectbox("Profile axis ticker", axis_options, index=0, key=f"phase6_axis_{source}")
     with control_cols[1]:
         trace_visibility = render_profile_trace_controls("phase6_mapped", include_mean_sd=True)
@@ -288,8 +317,8 @@ try:
         manual_diagnostic_figure(
             base_payoff,
             mapped_total_payoff,
-            normalized_terminal[axis_ticker].to_numpy(float),
-            "Phase 6 mapped portfolio",
+            real_terminal[axis_ticker].to_numpy(float),
+            "Phase 6 real-market portfolio",
             trace_visibility,
             axis_ticker,
             mapped_legs,
@@ -301,17 +330,17 @@ try:
     st.subheader("Phase 6 payoff probability distribution")
     distribution_traces = st.multiselect(
         "Payoff distribution traces",
-        ["Phase 6 mapped portfolio", "Polymarket only"],
-        default=["Phase 6 mapped portfolio"],
+        ["Phase 6 real-market portfolio", "Polymarket only"],
+        default=["Phase 6 real-market portfolio"],
         key=f"phase6_distribution_traces_{source}",
     )
     st.plotly_chart(
         distribution_figure(
             base_payoff,
             mapped_total_payoff,
-            "Phase 6 mapped portfolio",
+            "Phase 6 real-market portfolio",
             show_baseline="Polymarket only" in distribution_traces,
-            show_portfolio="Phase 6 mapped portfolio" in distribution_traces,
+            show_portfolio="Phase 6 real-market portfolio" in distribution_traces,
         ),
         use_container_width=True,
         key=f"phase6_distribution_{source}",
