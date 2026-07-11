@@ -97,11 +97,11 @@ def display_contribution_table(table: pd.DataFrame) -> pd.DataFrame:
 
 def distribution_figure(baseline, portfolio, name) -> go.Figure:
     fig = go.Figure()
-    fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability density")
-    fig.add_histogram(x=portfolio, name=name, opacity=0.55, nbinsx=80, histnorm="probability density")
+    fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability")
+    fig.add_histogram(x=portfolio, name=name, opacity=0.55, nbinsx=80, histnorm="probability")
     fig.update_layout(
-        title="Payoff density distribution", xaxis_title="Terminal payoff",
-        yaxis_title="Density", barmode="overlay",
+        title="Payoff probability distribution", xaxis_title="Terminal payoff",
+        yaxis_title="Scenario probability per payoff bucket", barmode="overlay", yaxis_tickformat=".1%",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     return fig
@@ -561,7 +561,8 @@ def render() -> None:
                 with st.expander(f"Leg contribution by {axis_ticker} bin", expanded=True):
                     st.plotly_chart(contribution_stacked_figure(contribution, axis_ticker), width="stretch", key=f"{chart_key_prefix}_contribution_stack")
                     st.dataframe(display_contribution_table(contribution), width="stretch", hide_index=True)
-            st.subheader("Payoff density distribution")
+            st.subheader("Payoff probability distribution")
+            st.caption("Bars show scenario probability in each payoff bucket. This makes the binary Polymarket payoff comparable to the option-adjusted portfolio, which spreads the same scenario mass across more payoff values.")
             st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
             with st.expander("Detailed bin table"):
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
