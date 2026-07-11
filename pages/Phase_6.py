@@ -290,7 +290,11 @@ spot_lookup = edited_spots.set_index("Ticker")["Current spot"].astype(float)
 step_lookup = edited_spots.set_index("Ticker")["Strike step"].astype(float)
 
 st.subheader("Expiration alignment")
-policy = st.selectbox("Expiration policy", ["First expiry on/after target", "Nearest listed expiry", "Last expiry on/before target"])
+policy = st.selectbox(
+    "Expiration policy",
+    ["Last Friday before month end", "First expiry on/after target", "Nearest listed expiry", "Last expiry on/before target"],
+    help="Default Phase 6 execution policy: use the listed expiry closest to the last Friday before the event month-end, falling back to the nearest listed expiry before that date if needed.",
+)
 expirations = st.session_state.get("phase6_expirations") or {}
 expiry_rows = []
 for ticker in tickers:
@@ -303,16 +307,18 @@ for ticker in tickers:
         "Selected option expiry": selected_expiry,
         "Gap days": gap,
         "Listed expirations found": len(listed),
-        "Treatment": "Event-date mark-to-market" if pd.notna(gap) and gap > 0 else ("Close package at option expiry" if pd.notna(gap) and gap < 0 else "Intrinsic at aligned expiry"),
+        "Treatment": "Month-end Friday execution mapping" if policy == "Last Friday before month end" else ("Event-date mark-to-market" if pd.notna(gap) and gap > 0 else ("Close package at option expiry" if pd.notna(gap) and gap < 0 else "Intrinsic at aligned expiry")),
     })
 expiry_table = pd.DataFrame(expiry_rows)
 st.dataframe(expiry_table, use_container_width=True, hide_index=True)
 if expiry_table["Gap days"].isna().any():
-    st.warning("Some expiration calendars are not loaded. Fetch listed expirations or enter the dates later in Phase 7.")
+    st.warning("Some expiration calendars are not loaded. Fetch listed expirations before relying on the mapped chains.")
+elif policy == "Last Friday before month end":
+    st.info("Phase 6 is using the last listed Friday before the target month-end as the execution expiry. Gap days only shows distance versus the event target date.")
 elif (expiry_table["Gap days"] > 0).any():
-    st.info("Recommended treatment: use the first expiry on/after the event and value the option mark-to-market on the event date with residual time value. Intrinsic payoff is only exact when expiry equals the event date.")
+    st.info("Selected expiry is after the event target, so residual option value remains at the event date.")
 if (expiry_table["Gap days"].abs() > 7).any():
-    st.warning("At least one option expiry differs from the event by more than seven days. Treat this as material model risk and do not silently use intrinsic payoff at the event date.")
+    st.warning("At least one option expiry differs from the event by more than seven days. Phase 7 should handle the residual event/expiry timing risk explicitly.")
 
 selected_expiry_by_ticker = {
     str(row["Ticker"]): row["Selected option expiry"]
@@ -521,11 +527,9 @@ try:
 except Exception as exc:
     st.error(f"Could not evaluate the mapped portfolio: {exc}")
 
-with st.expander("How to handle the option/event date mismatch", expanded=True):
+with st.expander("Phase 6 expiry convention", expanded=True):
     st.markdown("""
-1. **Preferred:** choose the first listed expiry on or after the Polymarket event. At the event date, value each still-live option at market or with an option model using its remaining time to expiry.
-2. **Before-target expiry:** close both the option package and the Polymarket position at the option expiry. This changes the effective research horizon and introduces Polymarket exit-price risk.
-3. **Rolling:** use an earlier liquid expiry and roll into the next contract. This introduces roll cost, changing IV, and execution risk.
+Phase 6 now maps execution to the listed expiry selected by **Last Friday before month end**. This keeps the execution screen tied to the practical month-end option package.
 
-For a gap of a few days, the first approach is usually the cleanest. For longer gaps, Phase 7 must explicitly model residual option value or rolling; intrinsic payoff at the event date would be wrong.
+Phase 7 will handle the separate question of event-date versus option-expiry timing risk. For Phase 6, the table intentionally shows the gap in days but does not try to model the residual timing mismatch.
     """)
