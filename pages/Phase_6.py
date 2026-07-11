@@ -6,7 +6,15 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from execution_mapping import choose_expiration, default_strike_step, fetch_option_expirations, map_normalized_legs, rebuild_normalized_legs
+from execution_mapping import (
+    choose_expiration,
+    default_strike_step,
+    fetch_option_chain_quotes_for_expiries,
+    fetch_option_expirations,
+    infer_listed_strike_step,
+    map_normalized_legs,
+    rebuild_normalized_legs,
+)
 from manual_portfolio import manual_option_payoffs_and_analytics
 from market_data import fetch_spot_prices
 from optimization import payoff_metrics
@@ -66,6 +74,10 @@ manual_legs = st.session_state.get("phase5_manual_legs")
 manual_total = st.session_state.get("phase5_manual_total_payoff")
 if manual_legs is not None and not manual_legs.empty and manual_total is not None:
     portfolio_sources["Phase 5 manual portfolio"] = (manual_legs.copy(), np.asarray(manual_total, dtype=float))
+manual2_legs = st.session_state.get("phase5_manual2_legs")
+manual2_total = st.session_state.get("phase5_manual2_total_payoff")
+if manual2_legs is not None and not manual2_legs.empty and manual2_total is not None:
+    portfolio_sources["Phase 5 manual portfolio 2"] = (manual2_legs.copy(), np.asarray(manual2_total, dtype=float))
 robust_result = st.session_state.get("phase5_robust_optimization")
 if robust_result is not None and not robust_result.selected_legs.empty:
     portfolio_sources["Phase 5 Optimizer 2"] = (robust_result.selected_legs.copy(), np.asarray(robust_result.payoffs, dtype=float))
@@ -131,29 +143,6 @@ edited_spots = st.data_editor(
 spot_lookup = edited_spots.set_index("Ticker")["Current spot"].astype(float)
 step_lookup = edited_spots.set_index("Ticker")["Strike step"].astype(float)
 
-mapping = map_normalized_legs(original_legs, spot_lookup, step_lookup)
-st.subheader("Real-strike portfolio mapping")
-st.caption("Raw real strike preserves Phase 5 moneyness exactly. Executable strike is rounded to the provisional grid and remains editable. Phase 7 will replace this grid with the actual listed chain.")
-edited_mapping = st.data_editor(
-    mapping,
-    use_container_width=True,
-    hide_index=True,
-    key=f"phase6_mapping_{source}",
-    column_config={
-        "Leg": st.column_config.NumberColumn(disabled=True),
-        "Ticker": st.column_config.TextColumn(disabled=True),
-        "Option type": st.column_config.TextColumn(disabled=True),
-        "Position": st.column_config.TextColumn(disabled=True),
-        "Phase 5 normalized strike": st.column_config.NumberColumn(disabled=True, format="%.2f"),
-        "Current spot": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-        "Raw real strike": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-        "Mapped normalized strike": st.column_config.NumberColumn(disabled=True, format="%.2f"),
-        "Strike mapping error": st.column_config.NumberColumn(disabled=True, format="%+.2f"),
-        "Executable strike": st.column_config.NumberColumn(min_value=0.01, step=0.5, format="$%.2f"),
-        "Model IV": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01, format="%.2f"),
-    },
-)
-
 st.subheader("Expiration alignment")
 policy = st.selectbox("Expiration policy", ["First expiry on/after target", "Nearest listed expiry", "Last expiry on/before target"])
 expirations = st.session_state.get("phase6_expirations") or {}
@@ -178,6 +167,86 @@ elif (expiry_table["Gap days"] > 0).any():
     st.info("Recommended treatment: use the first expiry on/after the event and value the option mark-to-market on the event date with residual time value. Intrinsic payoff is only exact when expiry equals the event date.")
 if (expiry_table["Gap days"].abs() > 7).any():
     st.warning("At least one option expiry differs from the event by more than seven days. Treat this as material model risk and do not silently use intrinsic payoff at the event date.")
+
+selected_expiry_by_ticker = {
+    str(row["Ticker"]): row["Selected option expiry"]
+    for _, row in expiry_table.dropna(subset=["Selected option expiry"]).iterrows()
+}
+chain_left, chain_right, _ = st.columns([1, 1, 3])
+if chain_left.button("Fetch selected option chains", disabled=not bool(selected_expiry_by_ticker)):
+    try:
+        st.session_state.phase6_option_chains = fetch_option_chain_quotes_for_expiries(selected_expiry_by_ticker)
+        st.session_state.phase6_chain_error = None
+    except Exception as exc:
+        st.session_state.phase6_chain_error = str(exc)
+if chain_right.button("Clear option chains"):
+    st.session_state.phase6_option_chains = {}
+if st.session_state.get("phase6_chain_error"):
+    st.error(st.session_state.phase6_chain_error)
+
+option_chains = st.session_state.get("phase6_option_chains") or {}
+if option_chains:
+    spacing_rows = []
+    for ticker, chain in option_chains.items():
+        spot = float(spot_lookup.loc[ticker]) if ticker in spot_lookup.index else np.nan
+        spacing_rows.append({
+            "Ticker": ticker,
+            "Expiry": str(chain["Expiry"].iloc[0]) if "Expiry" in chain.columns and not chain.empty else "",
+            "Listed strikes": int(chain["strike"].nunique()) if "strike" in chain.columns else 0,
+            "Inferred local strike step": infer_listed_strike_step(chain["strike"], spot),
+            "Min strike": float(chain["strike"].min()),
+            "Max strike": float(chain["strike"].max()),
+        })
+    st.subheader("Listed chain reality check")
+    st.dataframe(pd.DataFrame(spacing_rows), use_container_width=True, hide_index=True)
+
+mapping = map_normalized_legs(original_legs, spot_lookup, step_lookup, option_chains=option_chains)
+pricing_basis = st.radio(
+    "Market premium basis",
+    ["Bid/ask mid", "Conservative executable"],
+    horizontal=True,
+    disabled=not bool(option_chains),
+    help="Conservative executable uses ask for long legs and bid for short legs. Mid uses the bid/ask midpoint when available.",
+)
+if pricing_basis == "Conservative executable" and "Conservative premium normalized" in mapping.columns:
+    if "Market premium normalized" not in mapping.columns:
+        mapping["Market premium normalized"] = np.nan
+    mapping["Market premium normalized"] = mapping["Conservative premium normalized"].fillna(mapping["Market premium normalized"])
+st.subheader("Real-strike portfolio mapping")
+st.caption("Raw real strike preserves Phase 5 moneyness. If a listed chain is loaded, Executable strike is the nearest actual listed strike and premiums use Yahoo bid/ask mid normalized back to spot=100. Without a chain, the editable provisional grid is used.")
+edited_mapping = st.data_editor(
+    mapping,
+    use_container_width=True,
+    hide_index=True,
+    key=f"phase6_mapping_{source}",
+    column_config={
+        "Leg": st.column_config.NumberColumn(disabled=True),
+        "Use": st.column_config.CheckboxColumn(),
+        "Ticker": st.column_config.TextColumn(disabled=True),
+        "Option type": st.column_config.TextColumn(disabled=True),
+        "Position": st.column_config.TextColumn(disabled=True),
+        "Quantity": st.column_config.NumberColumn(disabled=True, format="%.3f"),
+        "Phase 5 normalized strike": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Current spot": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Raw real strike": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Strike step": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Executable strike": st.column_config.NumberColumn(min_value=0.01, step=0.5, format="$%.2f"),
+        "Listed strike": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Mapped normalized strike": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Strike mapping error": st.column_config.NumberColumn(disabled=True, format="%+.2f"),
+        "Bid": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Ask": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Mid": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Bid/ask spread": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Market premium normalized": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Conservative premium normalized": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Market IV": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Model IV": st.column_config.NumberColumn(min_value=0.0001, max_value=5.0, step=0.01, format="%.2f"),
+        "Volume": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+        "Open interest": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+        "Contract symbol": st.column_config.TextColumn(disabled=True),
+    },
+)
 
 result = snapshot["result"]
 inputs = snapshot["simulation_inputs"].copy()
