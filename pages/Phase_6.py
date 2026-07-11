@@ -19,6 +19,8 @@ from manual_portfolio import manual_option_payoffs_and_analytics
 from market_data import fetch_spot_prices
 from optimization import payoff_metrics
 from payoff_surface import terminal_stock_prices
+from phase5_workflow import distribution_figure, manual_diagnostic_figure
+from robust_optimizer import render_profile_trace_controls
 from simulation_store import load_simulation_snapshot
 
 st.set_page_config(page_title="Phase 6", layout="wide")
@@ -208,12 +210,19 @@ pricing_basis = st.radio(
     disabled=not bool(option_chains),
     help="Conservative executable uses ask for long legs and bid for short legs. Mid uses the bid/ask midpoint when available.",
 )
-if pricing_basis == "Conservative executable" and "Conservative premium normalized" in mapping.columns:
-    if "Market premium normalized" not in mapping.columns:
-        mapping["Market premium normalized"] = np.nan
-    mapping["Market premium normalized"] = mapping["Conservative premium normalized"].fillna(mapping["Market premium normalized"])
+if "Execution premium" not in mapping.columns:
+    mapping["Execution premium"] = np.nan
+if option_chains:
+    if pricing_basis == "Conservative executable" and "Conservative premium normalized" in mapping.columns:
+        mapping["Market premium normalized"] = mapping["Conservative premium normalized"].fillna(mapping.get("Market premium normalized", np.nan))
+        mapping["Execution premium"] = mapping["Market premium normalized"] * mapping["Current spot"] / 100.0
+    elif "Mid" in mapping.columns:
+        mapping["Execution premium"] = mapping["Mid"]
+else:
+    original_premiums = pd.to_numeric(original_legs.reset_index(drop=True).get("Theoretical premium"), errors="coerce")
+    mapping["Execution premium"] = original_premiums.to_numpy(float) * mapping["Current spot"] / 100.0
 st.subheader("Real-strike portfolio mapping")
-st.caption("Raw real strike preserves Phase 5 moneyness. If a listed chain is loaded, Executable strike is the nearest actual listed strike and premiums use Yahoo bid/ask mid normalized back to spot=100. Without a chain, the editable provisional grid is used.")
+st.caption("Chain quotes are reference values. Edit Execution premium to the actual expected fill; Phase 6 converts that real-dollar premium back to the normalized spot=100 scale before recomputing payoff.")
 edited_mapping = st.data_editor(
     mapping,
     use_container_width=True,
@@ -238,6 +247,7 @@ edited_mapping = st.data_editor(
         "Ask": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Mid": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Bid/ask spread": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+        "Execution premium": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
         "Market premium normalized": st.column_config.NumberColumn(disabled=True, format="%.2f"),
         "Conservative premium normalized": st.column_config.NumberColumn(disabled=True, format="%.2f"),
         "Market IV": st.column_config.NumberColumn(disabled=True, format="%.2f"),
@@ -247,6 +257,8 @@ edited_mapping = st.data_editor(
         "Contract symbol": st.column_config.TextColumn(disabled=True),
     },
 )
+if "Execution premium" in edited_mapping.columns:
+    edited_mapping["Market premium normalized"] = pd.to_numeric(edited_mapping["Execution premium"], errors="coerce") / edited_mapping["Current spot"].astype(float) * 100.0
 
 result = snapshot["result"]
 inputs = snapshot["simulation_inputs"].copy()
@@ -260,12 +272,55 @@ try:
     mapped_legs = rebuild_normalized_legs(original_legs, edited_mapping, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
     mapped_option_payoff, _ = manual_option_payoffs_and_analytics(mapped_legs, normalized_terminal, contract_multiplier=1.0, include_premiums=True)
     mapped_total_payoff = base_payoff + mapped_option_payoff
-    st.subheader("Strike-rounding impact under stored Phase 5 scenarios")
+    st.subheader("Phase 6 payoff metrics")
     st.dataframe(metric_table(base_payoff, original_total_payoff, mapped_total_payoff), use_container_width=True, hide_index=True)
-    st.caption("This comparison isolates current-spot mapping and strike rounding. It still uses theoretical premiums and the Phase 5 event-date payoff convention; Phase 7 will introduce listed contracts, live quotes, spreads, and correct event-date mark-to-market for expiry gaps.")
+    st.caption("Phase 6 mapped portfolio uses the executable strikes and editable execution premiums above. Premiums are normalized back to spot=100 so the payoff remains comparable to Phase 5.")
+
+    st.subheader("Phase 6 payoff profile")
+    control_cols = st.columns([1, 2])
+    axis_options = [ticker for ticker in normalized_terminal.columns if ticker in tickers]
+    if not axis_options:
+        axis_options = normalized_terminal.columns.astype(str).tolist()
+    axis_ticker = control_cols[0].selectbox("Profile axis ticker", axis_options, index=0, key=f"phase6_axis_{source}")
+    with control_cols[1]:
+        trace_visibility = render_profile_trace_controls("phase6_mapped", include_mean_sd=True)
+    st.plotly_chart(
+        manual_diagnostic_figure(
+            base_payoff,
+            mapped_total_payoff,
+            normalized_terminal[axis_ticker].to_numpy(float),
+            "Phase 6 mapped portfolio",
+            trace_visibility,
+            axis_ticker,
+            mapped_legs,
+        ),
+        use_container_width=True,
+        key=f"phase6_profile_{source}",
+    )
+
+    st.subheader("Phase 6 payoff probability distribution")
+    distribution_traces = st.multiselect(
+        "Payoff distribution traces",
+        ["Phase 6 mapped portfolio", "Polymarket only"],
+        default=["Phase 6 mapped portfolio"],
+        key=f"phase6_distribution_traces_{source}",
+    )
+    st.plotly_chart(
+        distribution_figure(
+            base_payoff,
+            mapped_total_payoff,
+            "Phase 6 mapped portfolio",
+            show_baseline="Polymarket only" in distribution_traces,
+            show_portfolio="Phase 6 mapped portfolio" in distribution_traces,
+        ),
+        use_container_width=True,
+        key=f"phase6_distribution_{source}",
+    )
+
     st.session_state.phase6_mapped_legs = mapped_legs
     st.session_state.phase6_mapping_table = edited_mapping
     st.session_state.phase6_expiry_table = expiry_table
+    st.session_state.phase6_mapped_total_payoff = mapped_total_payoff
 except Exception as exc:
     st.error(f"Could not evaluate the mapped portfolio: {exc}")
 
