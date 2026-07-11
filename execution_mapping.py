@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -129,6 +129,12 @@ def nearest_listed_option(chain: pd.DataFrame, option_type: str, target_strike: 
     }
 
 
+def last_friday_before_month_end(target_date: date) -> date:
+    month_end = (pd.Timestamp(target_date) + pd.offsets.MonthEnd(0)).date()
+    days_back = (month_end.weekday() - 4) % 7
+    return month_end - timedelta(days=days_back)
+
+
 def choose_expiration(
     expirations: list[date],
     target_date: date,
@@ -137,6 +143,10 @@ def choose_expiration(
     if not expirations:
         return None
     ordered = sorted(expirations)
+    if policy == "Last Friday before month end":
+        anchor = last_friday_before_month_end(target_date)
+        candidates = [value for value in ordered if value <= anchor]
+        return candidates[-1] if candidates else ordered[0]
     if policy == "First expiry on/after target":
         candidates = [value for value in ordered if value >= target_date]
         return candidates[0] if candidates else ordered[-1]
