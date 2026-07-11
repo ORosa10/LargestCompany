@@ -19,14 +19,18 @@ from execution_mapping import (
 from manual_portfolio import manual_option_payoffs_and_analytics
 from market_data import fetch_spot_prices
 from optimization import payoff_metrics
-from payoff_surface import terminal_stock_prices
+from payoff_surface import polymarket_payoff, terminal_stock_prices, winner_from_ranks
 from phase5_workflow import distribution_figure
 from robust_optimizer import render_profile_trace_controls
-from simulation_store import load_simulation_snapshot
+from simulation_store import load_phase_artifact, load_simulation_snapshot, save_phase_artifact
+
+CONTRACT_MULTIPLIER = 100.0
+PHASE5_AUTOSAVE_ARTIFACT = "phase5_manual_autosave"
+PHASE6_CANDIDATE_ARTIFACT = "phase6_execution_candidate"
 
 st.set_page_config(page_title="Phase 6", layout="wide")
 st.title("Phase 6: execution mapping")
-st.caption("Map the selected Phase 5 research portfolio into real spots, real listed strikes, and editable real execution premiums.")
+st.caption("Map the selected Phase 5 research portfolio into real spots, real listed strikes, editable real execution premiums, and execution-sized payoffs.")
 
 
 def available_snapshot() -> dict | None:
@@ -37,6 +41,19 @@ def available_snapshot() -> dict | None:
             "run_metadata": st.session_state.get("last_run") or {},
         }
     return load_simulation_snapshot()
+
+
+def matching_metadata(left: dict, right: dict) -> bool:
+    return all(left.get(key) == right.get(key) for key in ["target_date", "days_to_target", "simulations", "seed"])
+
+
+def load_phase5_autosave(run_metadata: dict) -> dict:
+    payload = load_phase_artifact(PHASE5_AUTOSAVE_ARTIFACT)
+    if not isinstance(payload, dict):
+        return {}
+    if not matching_metadata(run_metadata, payload.get("run_metadata") or {}):
+        return {}
+    return payload
 
 
 def target_from_metadata(metadata: dict) -> date:
@@ -180,6 +197,14 @@ def phase6_profile_figure(base, total, terminal_prices, name: str, trace_visibil
     return fig
 
 
+def order_of_magnitude_polymarket_shares(mapping: pd.DataFrame) -> float:
+    active = mapping[mapping["Use"]] if "Use" in mapping.columns else mapping
+    quantities = pd.to_numeric(active.get("Quantity", pd.Series(dtype=float)), errors="coerce").abs().replace([np.inf, -np.inf], np.nan).dropna()
+    if quantities.empty:
+        return 100.0
+    return float(max(100.0, np.ceil(float(quantities.max())) * CONTRACT_MULTIPLIER))
+
+
 snapshot = available_snapshot()
 if snapshot is None:
     st.error("No stored Monte Carlo snapshot is available. Run Phase 1 first.")
@@ -210,8 +235,13 @@ target_date = target_from_metadata(metadata)
 days_to_target = max((target_date - date.today()).days, 1)
 time_to_target = days_to_target / 365.0
 risk_free_rate = float(original_legs.get("Risk-free rate", pd.Series([0.04])).iloc[0])
+result = snapshot["result"]
+inputs = snapshot["simulation_inputs"].copy()
+current_caps = inputs.set_index("Ticker")["Current market cap"].astype(float)
+phase5_sidebar = (load_phase5_autosave(metadata).get("sidebar") or {})
 
 st.success(f"Loaded {source}: {len(original_legs)} option legs across {len(tickers)} ticker(s). Event target: {target_date}.")
+st.info("Phase 6 sizing: option quantity is listed contracts; option premium is still per share; option payoff is contracts x 100 shares x per-share payoff.")
 
 fetch_left, fetch_right, _ = st.columns([1, 1, 3])
 if fetch_left.button("Fetch current spots", type="primary"):
@@ -339,7 +369,7 @@ else:
 mapping["Execution premium"] = mapping["Reference premium"]
 
 st.subheader("Real-strike portfolio mapping")
-st.caption("Execution premium is a real-dollar option price. Edit it to the actual expected fill. Phase 6 payoff uses real terminal stock prices, real strikes, and this real premium without converting back to spot=100.")
+st.caption("Execution premium is the real per-share option quote. Edit it to the expected fill. Quantity is listed contracts; Phase 6 multiplies option payoff by 100 shares per contract.")
 edited_mapping = st.data_editor(
     mapping,
     use_container_width=True,
@@ -351,7 +381,7 @@ edited_mapping = st.data_editor(
         "Ticker": st.column_config.TextColumn(disabled=True),
         "Option type": st.column_config.TextColumn(disabled=True),
         "Position": st.column_config.TextColumn(disabled=True),
-        "Quantity": st.column_config.NumberColumn(disabled=True, format="%.3f"),
+        "Quantity": st.column_config.NumberColumn(disabled=True, format="%.3f", help="Listed option contracts. 1 = one contract = 100 shares."),
         "Phase 5 normalized strike": st.column_config.NumberColumn(disabled=True, format="%.2f"),
         "Current spot": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Raw real strike": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
@@ -365,7 +395,7 @@ edited_mapping = st.data_editor(
         "Mid": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Bid/ask spread": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
         "Reference premium": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-        "Execution premium": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
+        "Execution premium": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f", help="Per-share option premium, as quoted in the listed option chain."),
         "Market premium normalized": None,
         "Conservative premium normalized": None,
         "Market IV": st.column_config.NumberColumn(disabled=True, format="%.2f"),
@@ -376,20 +406,70 @@ edited_mapping = st.data_editor(
     },
 )
 
-result = snapshot["result"]
-inputs = snapshot["simulation_inputs"].copy()
-current_caps = inputs.set_index("Ticker")["Current market cap"].astype(float)
-real_terminal = terminal_stock_prices(result.terminal_market_caps, current_caps, spot_lookup)
+st.subheader("Phase 6 Polymarket sizing")
+input_by_ticker = inputs.set_index("Ticker")
+rank_tickers = result.ranks.columns.astype(str).tolist()
+pm_ticker_options = [ticker for ticker in rank_tickers if ticker in input_by_ticker.index]
+default_pm_ticker = str(phase5_sidebar.get("selected_ticker") or (pm_ticker_options[0] if pm_ticker_options else ""))
+if default_pm_ticker not in pm_ticker_options and pm_ticker_options:
+    default_pm_ticker = pm_ticker_options[0]
+default_side = str(phase5_sidebar.get("side") or "NO")
+if default_side not in ["YES", "NO"]:
+    default_side = "NO"
+suggested_pm_shares = order_of_magnitude_polymarket_shares(edited_mapping)
+size_cols = st.columns([1, 1, 1, 2])
+pm_ticker = size_cols[0].selectbox("Polymarket ticker", pm_ticker_options, index=pm_ticker_options.index(default_pm_ticker) if default_pm_ticker in pm_ticker_options else 0, key=f"phase6_pm_ticker_{source}")
+pm_side = size_cols[1].radio("Side", ["YES", "NO"], index=["YES", "NO"].index(default_side), horizontal=True, key=f"phase6_pm_side_{source}")
+yes_price = float(input_by_ticker.loc[pm_ticker, "Polymarket YES price"]) if pm_ticker in input_by_ticker.index and "Polymarket YES price" in input_by_ticker.columns else 0.5
+default_entry = yes_price if pm_side == "YES" else 1.0 - yes_price
+saved_entry_matches = phase5_sidebar.get("selected_ticker") == pm_ticker and phase5_sidebar.get("side") == pm_side
+saved_entry = float(phase5_sidebar.get("entry", default_entry)) if saved_entry_matches else default_entry
+saved_entry = min(max(saved_entry, 0.0), 1.0)
+pm_entry = size_cols[2].number_input("Entry price", 0.0, 1.0, saved_entry, 0.001, format="%.3f", key=f"phase6_pm_entry_{source}")
+pm_shares = size_cols[3].number_input("Polymarket shares", min_value=0.0, value=suggested_pm_shares, step=100.0, format="%.0f", key=f"phase6_pm_shares_{source}")
+st.caption(f"Auto default is order-of-magnitude only: max absolute option contracts x 100 = {suggested_pm_shares:,.0f} Polymarket shares. Override it if the actual ticket size differs.")
 
 try:
     mapped_legs = real_execution_legs(edited_mapping, original_legs, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
-    mapped_option_payoff, _ = manual_option_payoffs_and_analytics(mapped_legs, real_terminal, contract_multiplier=1.0, include_premiums=True)
-    original_option_payoff, _ = manual_option_payoffs_and_analytics(original_legs, terminal_stock_prices(result.terminal_market_caps, current_caps, pd.Series(100.0, index=result.terminal_market_caps.columns)), contract_multiplier=1.0, include_premiums=True)
-    base_payoff = original_total_payoff - original_option_payoff
+    real_terminal = terminal_stock_prices(result.terminal_market_caps, current_caps, spot_lookup)
+    mapped_option_payoff, _ = manual_option_payoffs_and_analytics(mapped_legs, real_terminal, contract_multiplier=CONTRACT_MULTIPLIER, include_premiums=True)
+    winners = winner_from_ranks(result.ranks)
+    base_payoff = polymarket_payoff(winners, selected_ticker=pm_ticker, side=pm_side, entry_price=float(pm_entry), quantity=float(pm_shares)).to_numpy(float)
     mapped_total_payoff = base_payoff + mapped_option_payoff
+    metrics_display = metric_table(base_payoff, mapped_total_payoff)
     st.subheader("Phase 6 real-market payoff metrics")
-    st.dataframe(metric_table(base_payoff, mapped_total_payoff), use_container_width=True, hide_index=True)
+    st.dataframe(metrics_display, use_container_width=True, hide_index=True)
     st.caption("Phase 6 uses real-dollar option terms. It is no longer normalized to spot=100; this is the execution view.")
+
+    save_payload = {
+        "saved_at": pd.Timestamp.utcnow().isoformat(),
+        "run_metadata": metadata,
+        "source": source,
+        "target_date": str(target_date),
+        "pricing_basis": pricing_basis,
+        "contract_multiplier": CONTRACT_MULTIPLIER,
+        "unit_notes": "Quantity = listed contracts; execution premium = per-share option quote; option payoff = contracts x 100 x per-share payoff.",
+        "polymarket": {
+            "selected_ticker": pm_ticker,
+            "side": pm_side,
+            "entry": float(pm_entry),
+            "shares": float(pm_shares),
+            "sizing_default": suggested_pm_shares,
+        },
+        "spots": edited_spots.copy(),
+        "expiry_table": expiry_table.copy(),
+        "mapping_table": edited_mapping.copy(),
+        "mapped_legs": mapped_legs.copy(),
+        "metrics": metrics_display.copy(),
+        "payoffs": {
+            "polymarket": base_payoff,
+            "options": mapped_option_payoff,
+            "total": mapped_total_payoff,
+        },
+    }
+    if st.button("Save Phase 6 execution candidate", type="primary"):
+        path = save_phase_artifact(PHASE6_CANDIDATE_ARTIFACT, save_payload)
+        st.success(f"Saved Phase 6 execution candidate to {path}.")
 
     st.subheader("Phase 6 real-market payoff profile")
     control_cols = st.columns([1, 2])
@@ -436,6 +516,8 @@ try:
     st.session_state.phase6_mapping_table = edited_mapping
     st.session_state.phase6_expiry_table = expiry_table
     st.session_state.phase6_mapped_total_payoff = mapped_total_payoff
+    st.session_state.phase6_polymarket_payoff = base_payoff
+    st.session_state.phase6_option_payoff = mapped_option_payoff
 except Exception as exc:
     st.error(f"Could not evaluate the mapped portfolio: {exc}")
 
