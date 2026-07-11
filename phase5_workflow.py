@@ -605,6 +605,12 @@ def render() -> None:
             persist_phase5_autosave()
             legs, option_payoff, manual_metrics, analytics = evaluate_manual_rows(st.session_state[state_key])
             total = base + option_payoff
+            if chart_key_prefix == "phase5_manual":
+                st.session_state.phase5_manual_legs = legs
+                st.session_state.phase5_manual_total_payoff = total
+            elif chart_key_prefix == "phase5_manual2":
+                st.session_state.phase5_manual2_legs = legs
+                st.session_state.phase5_manual2_total_payoff = total
             profile = make_profile(result, current_caps, normalized_prices, winners, selected, total, option_payoff, base)
             st.dataframe(metrics_comparison(baseline_metrics, manual_metrics, name), width="stretch", hide_index=True)
 
