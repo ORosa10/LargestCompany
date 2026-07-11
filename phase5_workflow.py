@@ -20,16 +20,26 @@ from option_valuation import reprice_option_legs
 from payoff_surface import polymarket_payoff, selected_payoff_profile_bins, terminal_stock_prices, winner_from_ranks
 from phase4_ui import display_profile, dollars, pct
 from robust_optimizer import aligned_profile_figure, price_bin_profile, render_profile_trace_controls, render_robust_optimizer
-from simulation_store import load_phase_artifact, load_simulation_snapshot
+from simulation_store import load_phase_artifact, load_simulation_snapshot, save_phase_artifact
 
 NORMALIZED_SPOT = 100.0
 OPTION_QUANTITY_MULTIPLIER = 1.0
 DEFAULT_MANUAL_QUANTITY = 1.0
 PORTFOLIO_SLOTS = ["A", "B", "C", "D", "E"]
+PHASE5_AUTOSAVE_ARTIFACT = "phase5_manual_autosave"
 
 
 def matching_metadata(left: dict, right: dict) -> bool:
     return all(left.get(key) == right.get(key) for key in ["target_date", "days_to_target", "simulations", "seed"])
+
+
+def load_phase5_autosave(run_metadata: dict) -> dict:
+    payload = load_phase_artifact(PHASE5_AUTOSAVE_ARTIFACT)
+    if not isinstance(payload, dict):
+        return {}
+    if not matching_metadata(run_metadata, payload.get("run_metadata") or {}):
+        return {}
+    return payload
 
 
 def metrics_comparison(baseline: pd.Series, portfolio: pd.Series, name: str) -> pd.DataFrame:
@@ -95,10 +105,12 @@ def display_contribution_table(table: pd.DataFrame) -> pd.DataFrame:
     return display
 
 
-def distribution_figure(baseline, portfolio, name) -> go.Figure:
+def distribution_figure(baseline, portfolio, name, *, show_baseline: bool = False, show_portfolio: bool = True) -> go.Figure:
     fig = go.Figure()
-    fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability")
-    fig.add_histogram(x=portfolio, name=name, opacity=0.55, nbinsx=80, histnorm="probability")
+    if show_baseline:
+        fig.add_histogram(x=baseline, name="Polymarket only", opacity=0.55, nbinsx=80, histnorm="probability")
+    if show_portfolio:
+        fig.add_histogram(x=portfolio, name=name, opacity=0.55, nbinsx=80, histnorm="probability")
     fig.update_layout(
         title="Payoff probability distribution", xaxis_title="Terminal payoff",
         yaxis_title="Scenario probability per payoff bucket", barmode="overlay", yaxis_tickformat=".1%",
@@ -370,6 +382,9 @@ def render() -> None:
             st.error(f"{name} is missing or belongs to another Phase 1 run. Open the phases in order before Phase 5.")
             st.stop()
 
+    phase5_autosave = load_phase5_autosave(run)
+    saved_sidebar = phase5_autosave.get("sidebar") or {}
+
     result = snapshot["result"]
     inputs = snapshot["simulation_inputs"].copy()
     curves = phase2.get("curves") or {}
@@ -394,18 +409,25 @@ def render() -> None:
     forward_ratios = input_by_ticker["Forward / spot"].astype(float) if "Forward / spot" in input_by_ticker.columns else None
     surface_tickers = set(default_surface_nodes()["Ticker"].astype(str)) if use_surface else set()
 
-    default_selected = str((phase4 or {}).get("selected_ticker", phase3.get("selected_ticker", relevant[0])))
+    default_selected = str(saved_sidebar.get("selected_ticker") or (phase4 or {}).get("selected_ticker", phase3.get("selected_ticker", relevant[0])))
     if default_selected not in relevant:
         default_selected = relevant[0]
 
     with st.sidebar:
         st.header("Locked upstream position")
         selected = st.selectbox("Polymarket ticker", relevant, index=relevant.index(default_selected))
-        side = st.radio("Side", ["YES", "NO"], horizontal=True)
+        default_side = str(saved_sidebar.get("side") or "NO")
+        if default_side not in ["YES", "NO"]:
+            default_side = "NO"
+        side = st.radio("Side", ["YES", "NO"], index=["YES", "NO"].index(default_side), horizontal=True)
         yes_price = float(input_by_ticker.loc[selected, "Polymarket YES price"])
         default_entry = yes_price if side == "YES" else 1.0 - yes_price
-        entry = st.number_input(f"{selected} {side} entry price", 0.0, 1.0, default_entry, 0.001, format="%.3f")
-        shares = st.number_input("Polymarket shares", 0.0, value=100.0, step=10.0)
+        saved_entry_matches = saved_sidebar.get("selected_ticker") == selected and saved_sidebar.get("side") == side
+        saved_entry = float(saved_sidebar.get("entry", default_entry)) if saved_entry_matches else default_entry
+        saved_entry = min(max(saved_entry, 0.0), 1.0)
+        saved_shares = max(float(saved_sidebar.get("shares", 100.0)), 0.0)
+        entry = st.number_input(f"{selected} {side} entry price", 0.0, 1.0, saved_entry, 0.001, format="%.3f")
+        shares = st.number_input("Polymarket shares", 0.0, value=saved_shares, step=10.0)
         st.header("Hedge universe")
         threshold = st.number_input("Minimum Phase 1 P(#1)", 0.0, 1.0, 0.0001, 0.0001, format="%.4f", help="0.0001 = 0.01%. Event tickers are always included.")
         st.header("Candidate chain")
@@ -420,6 +442,7 @@ def render() -> None:
 
     st.success(f"Frozen close snapshot | target {run.get('target_date', 'n/a')} | {len(result.terminal_market_caps):,} paths | Phase 2 curves loaded | pricing: {'strike-specific surface' if use_surface else 'Phase 1 ATM fallback'}")
     st.caption("Prices are normalized to 100. Option quantities are option-share equivalents: 1 = one share-equivalent; 100 = one standard listed option contract. No Yahoo request occurs on this page.")
+    st.caption("Phase 5 autosaves manual portfolios, saved layout slots, and Polymarket entry settings to the local phase artifact store for this same Phase 1 run.")
     if "GOOG" not in tickers and "GOOGL" in tickers:
         st.caption("Google appears as GOOGL in this model, not GOOG.")
 
@@ -468,28 +491,77 @@ def render() -> None:
         total = base + option_payoff
         return legs, option_payoff, payoff_metrics(total), analytics
 
+    def persist_phase5_autosave() -> None:
+        workspaces = {}
+        for key in ["phase5_interactive_rows", "phase5_interactive_rows_2"]:
+            workspace = {}
+            if key in st.session_state:
+                workspace["rows"] = copy_rows(st.session_state[key])
+            slots_key = f"{key}_saved_slots"
+            if slots_key in st.session_state:
+                saved_slots_state = st.session_state[slots_key] if isinstance(st.session_state[slots_key], dict) else {}
+                workspace["saved_slots"] = {
+                    slot: copy_rows(rows)
+                    for slot, rows in saved_slots_state.items()
+                }
+            active_slot_key = f"{key}_active_slot"
+            loaded_slot_key = f"{key}_loaded_slot"
+            if active_slot_key in st.session_state:
+                workspace["active_slot"] = st.session_state[active_slot_key]
+            if loaded_slot_key in st.session_state:
+                workspace["loaded_slot"] = st.session_state[loaded_slot_key]
+            if workspace:
+                workspaces[key] = workspace
+
+        payload = {
+            "run_metadata": run,
+            "sidebar": {
+                "selected_ticker": selected,
+                "side": side,
+                "entry": float(entry),
+                "shares": float(shares),
+            },
+            "workspaces": workspaces,
+        }
+        try:
+            save_phase_artifact(PHASE5_AUTOSAVE_ARTIFACT, payload)
+        except Exception:
+            pass
+
     def render_manual_portfolio_workspace(name: str, state_key: str, chart_key_prefix: str, use_sliders: bool = False) -> None:
         default_iv = float(fallback_ivs.loc[selected])
         slots_key = f"{state_key}_saved_slots"
         active_slot_key = f"{state_key}_active_slot"
         loaded_slot_key = f"{state_key}_loaded_slot"
+        saved_workspace = (phase5_autosave.get("workspaces") or {}).get(state_key, {})
         if state_key not in st.session_state:
-            st.session_state[state_key] = default_manual_rows(selected, default_iv)
+            saved_rows = saved_workspace.get("rows")
+            st.session_state[state_key] = copy_rows(saved_rows) if isinstance(saved_rows, list) else default_manual_rows(selected, default_iv)
         if slots_key not in st.session_state:
-            st.session_state[slots_key] = {}
+            saved_slots_payload = saved_workspace.get("saved_slots") or {}
+            if not isinstance(saved_slots_payload, dict):
+                saved_slots_payload = {}
+            st.session_state[slots_key] = {
+                slot: copy_rows(rows)
+                for slot, rows in saved_slots_payload.items()
+                if slot in PORTFOLIO_SLOTS and isinstance(rows, list)
+            }
         if active_slot_key not in st.session_state:
-            st.session_state[active_slot_key] = PORTFOLIO_SLOTS[0]
+            saved_active_slot = saved_workspace.get("active_slot", PORTFOLIO_SLOTS[0])
+            st.session_state[active_slot_key] = saved_active_slot if saved_active_slot in PORTFOLIO_SLOTS else PORTFOLIO_SLOTS[0]
         saved_slots = st.session_state[slots_key]
 
         reset_col, phase4_col, slot_col, save_col = st.columns([1, 1, 1, 1])
         if reset_col.button("Reset portfolio", key=f"{chart_key_prefix}_reset"):
             st.session_state[state_key] = default_manual_rows(selected, default_iv)
             clear_leg_state(state_key)
+            persist_phase5_autosave()
             st.rerun()
         upstream_rows = phase4_rows(phase4, default_iv)
         if phase4_col.button("Load Phase 4 portfolio", disabled=upstream_rows is None, key=f"{chart_key_prefix}_load_phase4"):
             st.session_state[state_key] = upstream_rows
             clear_leg_state(state_key)
+            persist_phase5_autosave()
             st.rerun()
 
         slot_labels = [f"{slot} saved" if slot in saved_slots else f"{slot} empty" for slot in PORTFOLIO_SLOTS]
@@ -506,6 +578,7 @@ def render() -> None:
             if selected_slot in saved_slots:
                 st.session_state[state_key] = copy_rows(saved_slots[selected_slot])
                 clear_leg_state(state_key)
+                persist_phase5_autosave()
                 st.rerun()
 
         st.info("Option quantity sizing: 1 = one share-equivalent exposure; 100 = one standard listed option contract.")
@@ -525,9 +598,11 @@ def render() -> None:
         if save_col.button(f"Save to {selected_slot}", key=f"{chart_key_prefix}_save_slot"):
             st.session_state[slots_key][selected_slot] = copy_rows(st.session_state[state_key])
             st.session_state[loaded_slot_key] = selected_slot
+            persist_phase5_autosave()
             st.rerun()
 
         try:
+            persist_phase5_autosave()
             legs, option_payoff, manual_metrics, analytics = evaluate_manual_rows(st.session_state[state_key])
             total = base + option_payoff
             profile = make_profile(result, current_caps, normalized_prices, winners, selected, total, option_payoff, base)
@@ -563,7 +638,24 @@ def render() -> None:
                     st.dataframe(display_contribution_table(contribution), width="stretch", hide_index=True)
             st.subheader("Payoff probability distribution")
             st.caption("Bars show scenario probability in each payoff bucket. This makes the binary Polymarket payoff comparable to the option-adjusted portfolio, which spreads the same scenario mass across more payoff values.")
-            st.plotly_chart(distribution_figure(base, total, name), width="stretch", key=f"{chart_key_prefix}_distribution")
+            distribution_traces = st.multiselect(
+                "Payoff distribution traces",
+                [name, "Polymarket only"],
+                default=[name],
+                key=f"{chart_key_prefix}_distribution_traces",
+                help="Polymarket only has two payoff outcomes and can dominate the y-axis. Turn it on only when you want that reference.",
+            )
+            st.plotly_chart(
+                distribution_figure(
+                    base,
+                    total,
+                    name,
+                    show_baseline="Polymarket only" in distribution_traces,
+                    show_portfolio=name in distribution_traces,
+                ),
+                width="stretch",
+                key=f"{chart_key_prefix}_distribution",
+            )
             with st.expander("Detailed bin table"):
                 st.dataframe(display_profile(profile), width="stretch", hide_index=True)
             st.subheader("Resolved portfolio")
