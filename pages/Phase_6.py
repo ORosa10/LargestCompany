@@ -84,6 +84,22 @@ def metric_table(base, mapped) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def metrics_delta_table(theory, market) -> pd.DataFrame:
+    theory_metrics = payoff_metrics(theory)
+    market_metrics = payoff_metrics(market)
+    rows = []
+    for key in ["Expected payoff", "Payoff standard deviation", "Median payoff", "Probability of loss", "Expected shortfall 5%", "Worst payoff"]:
+        theory_value = float(theory_metrics[key])
+        market_value = float(market_metrics[key])
+        rows.append({
+            "Metric": key,
+            "Phase 5 theory translated": theory_value,
+            "Phase 6 market execution": market_value,
+            "Delta": market_value - theory_value,
+        })
+    return pd.DataFrame(rows)
+
+
 def real_execution_legs(mapping: pd.DataFrame, original_legs: pd.DataFrame, *, time_to_expiry: float, risk_free_rate: float) -> pd.DataFrame:
     rows = []
     original = original_legs.reset_index(drop=True)
@@ -110,6 +126,92 @@ def real_execution_legs(mapping: pd.DataFrame, original_legs: pd.DataFrame, *, t
             "Theoretical premium": premium,
             "Execution premium": premium,
             "Contract symbol": mapped.get("Contract symbol", ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def translated_theory_legs(mapping: pd.DataFrame, original_legs: pd.DataFrame, *, time_to_expiry: float, risk_free_rate: float) -> pd.DataFrame:
+    rows = []
+    original = original_legs.reset_index(drop=True)
+    active_mapping = mapping[mapping["Use"]].reset_index(drop=True)
+    for _, mapped in active_mapping.iterrows():
+        source = original.iloc[int(mapped["Leg"]) - 1]
+        spot = float(mapped["Current spot"])
+        strike = float(mapped["Raw real strike"])
+        premium = float(source.get("Theoretical premium", np.nan)) * spot / 100.0
+        rows.append({
+            "Instrument": f"{mapped['Position']} {mapped['Ticker']} {mapped['Option type']} theory {strike:.2f}",
+            "Ticker": str(mapped["Ticker"]),
+            "Option type": str(mapped["Option type"]),
+            "Position": str(mapped["Position"]),
+            "Quantity": float(mapped["Quantity"]),
+            "Strike": strike,
+            "Strike / spot": strike / spot,
+            "Strike source": "Phase 5 normalized theory translated to current spot",
+            "Boundary used": source.get("Boundary used", "Mapped from Phase 5"),
+            "Spot": spot,
+            "Model IV": float(mapped.get("Model IV", np.nan)),
+            "Risk-free rate": risk_free_rate,
+            "Time to expiry": time_to_expiry,
+            "Theoretical premium": premium,
+            "Execution premium": premium,
+            "Contract symbol": "",
+        })
+    return pd.DataFrame(rows)
+
+
+def execution_cost_summary(legs: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, leg in legs.iterrows():
+        quantity = float(leg["Quantity"])
+        premium = float(leg["Execution premium"])
+        strike = float(leg["Strike"])
+        multiplier = quantity * CONTRACT_MULTIPLIER
+        cashflow = premium * multiplier
+        if str(leg["Position"]) == "Long":
+            cashflow *= -1.0
+        rows.append({
+            "Instrument": leg["Instrument"],
+            "Contracts": quantity,
+            "Strike": strike,
+            "Execution premium / share": premium,
+            "Premium cashflow": cashflow,
+            "Strike notional": strike * multiplier,
+        })
+    table = pd.DataFrame(rows)
+    if not table.empty:
+        table.loc[len(table)] = {
+            "Instrument": "Total",
+            "Contracts": table["Contracts"].sum(),
+            "Strike": np.nan,
+            "Execution premium / share": np.nan,
+            "Premium cashflow": table["Premium cashflow"].sum(),
+            "Strike notional": table["Strike notional"].sum(),
+        }
+    return table
+
+
+def leg_mapping_comparison(mapping: pd.DataFrame, original_legs: pd.DataFrame) -> pd.DataFrame:
+    original = original_legs.reset_index(drop=True)
+    rows = []
+    for _, mapped in mapping[mapping["Use"]].iterrows():
+        source = original.iloc[int(mapped["Leg"]) - 1]
+        spot = float(mapped["Current spot"])
+        phase5_premium = float(source.get("Theoretical premium", np.nan)) * spot / 100.0
+        execution_premium = float(mapped.get("Execution premium", np.nan))
+        rows.append({
+            "Leg": int(mapped["Leg"]),
+            "Ticker": str(mapped["Ticker"]),
+            "Option type": str(mapped["Option type"]),
+            "Position": str(mapped["Position"]),
+            "Contracts": float(mapped["Quantity"]),
+            "Phase 5 strike / spot": float(source["Strike"]) / 100.0,
+            "Phase 5 raw real strike": float(mapped["Raw real strike"]),
+            "Phase 6 executable strike": float(mapped["Executable strike"]),
+            "Strike delta": float(mapped["Executable strike"]) - float(mapped["Raw real strike"]),
+            "Phase 5 premium / share": phase5_premium,
+            "Phase 6 premium / share": execution_premium,
+            "Premium delta / share": execution_premium - phase5_premium,
         })
     return pd.DataFrame(rows)
 
@@ -205,10 +307,47 @@ def order_of_magnitude_polymarket_shares(mapping: pd.DataFrame) -> float:
     return float(max(100.0, np.ceil(float(quantities.max())) * CONTRACT_MULTIPLIER))
 
 
+def apply_loaded_values(base: pd.DataFrame, loaded: pd.DataFrame | None, columns: list[str], *, key_column: str = "Ticker") -> pd.DataFrame:
+    if loaded is None or loaded.empty or key_column not in base.columns or key_column not in loaded.columns:
+        return base
+    output = base.copy()
+    loaded_indexed = loaded.set_index(key_column)
+    for index, row in output.iterrows():
+        key = row[key_column]
+        if key not in loaded_indexed.index:
+            continue
+        loaded_row = loaded_indexed.loc[key]
+        if isinstance(loaded_row, pd.DataFrame):
+            loaded_row = loaded_row.iloc[0]
+        for column in columns:
+            if column in output.columns and column in loaded_row.index and pd.notna(loaded_row[column]):
+                output.at[index, column] = loaded_row[column]
+    return output
+
+
+def loaded_candidate_for_current_run(run_metadata: dict, source: str) -> dict:
+    candidate = st.session_state.get("phase6_loaded_candidate")
+    if not isinstance(candidate, dict):
+        return {}
+    if not matching_metadata(run_metadata, candidate.get("run_metadata") or {}):
+        return {}
+    if candidate.get("source") != source:
+        return {}
+    return candidate
+
+
+def coerce_loaded_table(payload: dict, key: str) -> pd.DataFrame | None:
+    value = payload.get(key)
+    return value.copy() if isinstance(value, pd.DataFrame) else None
+
+
 snapshot = available_snapshot()
 if snapshot is None:
     st.error("No stored Monte Carlo snapshot is available. Run Phase 1 first.")
     st.stop()
+
+if "phase6_load_version" not in st.session_state:
+    st.session_state.phase6_load_version = 0
 
 portfolio_sources = {}
 manual_legs = st.session_state.get("phase5_manual_legs")
@@ -239,6 +378,18 @@ result = snapshot["result"]
 inputs = snapshot["simulation_inputs"].copy()
 current_caps = inputs.set_index("Ticker")["Current market cap"].astype(float)
 phase5_sidebar = (load_phase5_autosave(metadata).get("sidebar") or {})
+
+saved_candidate = load_phase_artifact(PHASE6_CANDIDATE_ARTIFACT)
+load_cols = st.columns([1, 4])
+can_load_candidate = isinstance(saved_candidate, dict) and matching_metadata(metadata, saved_candidate.get("run_metadata") or {}) and saved_candidate.get("source") == source
+if load_cols[0].button("Load last saved candidate", disabled=not can_load_candidate):
+    st.session_state.phase6_loaded_candidate = saved_candidate
+    st.session_state.phase6_load_version += 1
+    st.rerun()
+if isinstance(saved_candidate, dict) and not can_load_candidate:
+    load_cols[1].caption("Saved Phase 6 candidate exists, but it belongs to another run or another Phase 5 source.")
+loaded_candidate = loaded_candidate_for_current_run(metadata, source)
+load_suffix = st.session_state.phase6_load_version
 
 st.success(f"Loaded {source}: {len(original_legs)} option legs across {len(tickers)} ticker(s). Event target: {target_date}.")
 st.info("Phase 6 sizing: option quantity is listed contracts; option premium is still per share; option payoff is contracts x 100 shares x per-share payoff.")
@@ -272,13 +423,14 @@ else:
         "Strike step": [default_strike_step(float(lookup.loc[ticker, "spot_price"])) for ticker in tickers],
         "Source": [str(lookup.loc[ticker, "source"]) for ticker in tickers],
     })
+spot_table = apply_loaded_values(spot_table, coerce_loaded_table(loaded_candidate, "spots"), ["Current spot", "Strike step", "Source"])
 
 st.subheader("Current underlyings and provisional strike grids")
 edited_spots = st.data_editor(
     spot_table,
     use_container_width=True,
     hide_index=True,
-    key=f"phase6_spots_{source}",
+    key=f"phase6_spots_{source}_{load_suffix}",
     column_config={
         "Ticker": st.column_config.TextColumn(disabled=True),
         "Current spot": st.column_config.NumberColumn(min_value=0.01, step=0.01, format="$%.2f"),
@@ -310,19 +462,37 @@ for ticker in tickers:
         "Treatment": "Month-end Friday execution mapping" if policy == "Last Friday before month end" else ("Event-date mark-to-market" if pd.notna(gap) and gap > 0 else ("Close package at option expiry" if pd.notna(gap) and gap < 0 else "Intrinsic at aligned expiry")),
     })
 expiry_table = pd.DataFrame(expiry_rows)
-st.dataframe(expiry_table, use_container_width=True, hide_index=True)
-if expiry_table["Gap days"].isna().any():
-    st.warning("Some expiration calendars are not loaded. Fetch listed expirations before relying on the mapped chains.")
+expiry_table = apply_loaded_values(expiry_table, coerce_loaded_table(loaded_candidate, "expiry_table"), ["Selected option expiry", "Treatment"])
+expiry_table["Selected option expiry"] = pd.to_datetime(expiry_table["Selected option expiry"], errors="coerce").dt.date
+expiry_table["Gap days"] = expiry_table["Selected option expiry"].apply(lambda value: (value - target_date).days if pd.notna(value) else np.nan)
+edited_expiry_table = st.data_editor(
+    expiry_table,
+    use_container_width=True,
+    hide_index=True,
+    key=f"phase6_expiry_{source}_{load_suffix}",
+    column_config={
+        "Ticker": st.column_config.TextColumn(disabled=True),
+        "Event target": st.column_config.DateColumn(disabled=True),
+        "Selected option expiry": st.column_config.DateColumn(help="Manual override. Use this when the selected month-end Friday chain is not the actual execution contract you want."),
+        "Gap days": st.column_config.NumberColumn(disabled=True),
+        "Listed expirations found": st.column_config.NumberColumn(disabled=True),
+        "Treatment": st.column_config.TextColumn(disabled=True),
+    },
+)
+edited_expiry_table["Selected option expiry"] = pd.to_datetime(edited_expiry_table["Selected option expiry"], errors="coerce").dt.date
+edited_expiry_table["Gap days"] = edited_expiry_table["Selected option expiry"].apply(lambda value: (value - target_date).days if pd.notna(value) else np.nan)
+if edited_expiry_table["Gap days"].isna().any():
+    st.warning("Some expiration calendars are not loaded. Fetch listed expirations or enter expiries manually before relying on the mapped chains.")
 elif policy == "Last Friday before month end":
-    st.info("Phase 6 is using the last listed Friday before the target month-end as the execution expiry. Gap days only shows distance versus the event target date.")
-elif (expiry_table["Gap days"] > 0).any():
+    st.info("Phase 6 defaults to the last listed Friday before the target month-end. You can override each selected expiry directly in the table.")
+elif (edited_expiry_table["Gap days"] > 0).any():
     st.info("Selected expiry is after the event target, so residual option value remains at the event date.")
-if (expiry_table["Gap days"].abs() > 7).any():
+if (edited_expiry_table["Gap days"].abs() > 7).any():
     st.warning("At least one option expiry differs from the event by more than seven days. Phase 7 should handle the residual event/expiry timing risk explicitly.")
 
 selected_expiry_by_ticker = {
     str(row["Ticker"]): row["Selected option expiry"]
-    for _, row in expiry_table.dropna(subset=["Selected option expiry"]).iterrows()
+    for _, row in edited_expiry_table.dropna(subset=["Selected option expiry"]).iterrows()
 }
 chain_left, chain_right, _ = st.columns([1, 1, 3])
 if chain_left.button("Fetch selected option chains", disabled=not bool(selected_expiry_by_ticker)):
@@ -373,6 +543,14 @@ else:
     original_premiums = pd.to_numeric(original_legs.reset_index(drop=True).get("Theoretical premium"), errors="coerce")
     mapping["Reference premium"] = original_premiums.to_numpy(float) * mapping["Current spot"] / 100.0
 mapping["Execution premium"] = mapping["Reference premium"]
+loaded_mapping = coerce_loaded_table(loaded_candidate, "mapping_table")
+if loaded_mapping is not None and "Leg" in loaded_mapping.columns:
+    mapping = apply_loaded_values(
+        mapping,
+        loaded_mapping,
+        ["Use", "Executable strike", "Execution premium", "Model IV", "Contract symbol"],
+        key_column="Leg",
+    )
 
 st.subheader("Real-strike portfolio mapping")
 st.caption("Execution premium is the real per-share option quote. Edit it to the expected fill. Quantity is listed contracts; Phase 6 multiplies option payoff by 100 shares per contract.")
@@ -380,7 +558,7 @@ edited_mapping = st.data_editor(
     mapping,
     use_container_width=True,
     hide_index=True,
-    key=f"phase6_mapping_{source}",
+    key=f"phase6_mapping_{source}_{load_suffix}",
     column_config={
         "Leg": st.column_config.NumberColumn(disabled=True),
         "Use": st.column_config.CheckboxColumn(),
@@ -416,36 +594,84 @@ st.subheader("Phase 6 Polymarket sizing")
 input_by_ticker = inputs.set_index("Ticker")
 rank_tickers = result.ranks.columns.astype(str).tolist()
 pm_ticker_options = [ticker for ticker in rank_tickers if ticker in input_by_ticker.index]
-default_pm_ticker = str(phase5_sidebar.get("selected_ticker") or (pm_ticker_options[0] if pm_ticker_options else ""))
+loaded_pm = loaded_candidate.get("polymarket") if isinstance(loaded_candidate.get("polymarket"), dict) else {}
+default_pm_ticker = str(loaded_pm.get("selected_ticker") or phase5_sidebar.get("selected_ticker") or (pm_ticker_options[0] if pm_ticker_options else ""))
 if default_pm_ticker not in pm_ticker_options and pm_ticker_options:
     default_pm_ticker = pm_ticker_options[0]
-default_side = str(phase5_sidebar.get("side") or "NO")
+default_side = str(loaded_pm.get("side") or phase5_sidebar.get("side") or "NO")
 if default_side not in ["YES", "NO"]:
     default_side = "NO"
 suggested_pm_shares = order_of_magnitude_polymarket_shares(edited_mapping)
 size_cols = st.columns([1, 1, 1, 2])
-pm_ticker = size_cols[0].selectbox("Polymarket ticker", pm_ticker_options, index=pm_ticker_options.index(default_pm_ticker) if default_pm_ticker in pm_ticker_options else 0, key=f"phase6_pm_ticker_{source}")
-pm_side = size_cols[1].radio("Side", ["YES", "NO"], index=["YES", "NO"].index(default_side), horizontal=True, key=f"phase6_pm_side_{source}")
+pm_ticker = size_cols[0].selectbox("Polymarket ticker", pm_ticker_options, index=pm_ticker_options.index(default_pm_ticker) if default_pm_ticker in pm_ticker_options else 0, key=f"phase6_pm_ticker_{source}_{load_suffix}")
+pm_side = size_cols[1].radio("Side", ["YES", "NO"], index=["YES", "NO"].index(default_side), horizontal=True, key=f"phase6_pm_side_{source}_{load_suffix}")
 yes_price = float(input_by_ticker.loc[pm_ticker, "Polymarket YES price"]) if pm_ticker in input_by_ticker.index and "Polymarket YES price" in input_by_ticker.columns else 0.5
 default_entry = yes_price if pm_side == "YES" else 1.0 - yes_price
 saved_entry_matches = phase5_sidebar.get("selected_ticker") == pm_ticker and phase5_sidebar.get("side") == pm_side
 saved_entry = float(phase5_sidebar.get("entry", default_entry)) if saved_entry_matches else default_entry
+saved_entry = float(loaded_pm.get("entry", saved_entry))
 saved_entry = min(max(saved_entry, 0.0), 1.0)
-pm_entry = size_cols[2].number_input("Entry price", 0.0, 1.0, saved_entry, 0.001, format="%.3f", key=f"phase6_pm_entry_{source}")
-pm_shares = size_cols[3].number_input("Polymarket shares", min_value=0.0, value=suggested_pm_shares, step=100.0, format="%.0f", key=f"phase6_pm_shares_{source}")
+pm_entry = size_cols[2].number_input("Entry price", 0.0, 1.0, saved_entry, 0.001, format="%.3f", key=f"phase6_pm_entry_{source}_{load_suffix}")
+default_pm_shares = float(loaded_pm.get("shares", suggested_pm_shares))
+pm_shares = size_cols[3].number_input("Polymarket shares", min_value=0.0, value=default_pm_shares, step=100.0, format="%.0f", key=f"phase6_pm_shares_{source}_{load_suffix}")
 st.caption(f"Auto default is order-of-magnitude only: max absolute option contracts x 100 = {suggested_pm_shares:,.0f} Polymarket shares. Override it if the actual ticket size differs.")
 
 try:
     mapped_legs = real_execution_legs(edited_mapping, original_legs, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
+    theory_legs = translated_theory_legs(edited_mapping, original_legs, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
     real_terminal = terminal_stock_prices(result.terminal_market_caps, current_caps, spot_lookup)
     mapped_option_payoff, _ = manual_option_payoffs_and_analytics(mapped_legs, real_terminal, contract_multiplier=CONTRACT_MULTIPLIER, include_premiums=True)
+    theory_option_payoff, _ = manual_option_payoffs_and_analytics(theory_legs, real_terminal, contract_multiplier=CONTRACT_MULTIPLIER, include_premiums=True)
     winners = winner_from_ranks(result.ranks)
     base_payoff = polymarket_payoff(winners, selected_ticker=pm_ticker, side=pm_side, entry_price=float(pm_entry), quantity=float(pm_shares)).to_numpy(float)
     mapped_total_payoff = base_payoff + mapped_option_payoff
+    theory_total_payoff = base_payoff + theory_option_payoff
     metrics_display = metric_table(base_payoff, mapped_total_payoff)
     st.subheader("Phase 6 real-market payoff metrics")
     st.dataframe(metrics_display, use_container_width=True, hide_index=True)
     st.caption("Phase 6 uses real-dollar option terms. It is no longer normalized to spot=100; this is the execution view.")
+
+    with st.expander("Execution cost summary", expanded=True):
+        st.dataframe(
+            execution_cost_summary(mapped_legs),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Contracts": st.column_config.NumberColumn(format="%.3f"),
+                "Strike": st.column_config.NumberColumn(format="$%.2f"),
+                "Execution premium / share": st.column_config.NumberColumn(format="$%.2f"),
+                "Premium cashflow": st.column_config.NumberColumn(format="$%.2f"),
+                "Strike notional": st.column_config.NumberColumn(format="$%.2f"),
+            },
+        )
+
+    with st.expander("Phase 5 theory vs Phase 6 market reality", expanded=True):
+        st.caption("Theory is Phase 5 translated to current real spot and raw real strike. Market execution is the selected listed strike plus edited execution premium.")
+        st.dataframe(
+            leg_mapping_comparison(edited_mapping, original_legs),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Contracts": st.column_config.NumberColumn(format="%.3f"),
+                "Phase 5 strike / spot": st.column_config.NumberColumn(format="%.2f"),
+                "Phase 5 raw real strike": st.column_config.NumberColumn(format="$%.2f"),
+                "Phase 6 executable strike": st.column_config.NumberColumn(format="$%.2f"),
+                "Strike delta": st.column_config.NumberColumn(format="%+.2f"),
+                "Phase 5 premium / share": st.column_config.NumberColumn(format="$%.2f"),
+                "Phase 6 premium / share": st.column_config.NumberColumn(format="$%.2f"),
+                "Premium delta / share": st.column_config.NumberColumn(format="%+.2f"),
+            },
+        )
+        st.dataframe(
+            metrics_delta_table(theory_total_payoff, mapped_total_payoff),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Phase 5 theory translated": st.column_config.NumberColumn(format="%.4f"),
+                "Phase 6 market execution": st.column_config.NumberColumn(format="%.4f"),
+                "Delta": st.column_config.NumberColumn(format="%+.4f"),
+            },
+        )
 
     save_payload = {
         "saved_at": pd.Timestamp.utcnow().isoformat(),
@@ -463,12 +689,17 @@ try:
             "sizing_default": suggested_pm_shares,
         },
         "spots": edited_spots.copy(),
-        "expiry_table": expiry_table.copy(),
+        "expiry_table": edited_expiry_table.copy(),
         "mapping_table": edited_mapping.copy(),
         "mapped_legs": mapped_legs.copy(),
         "metrics": metrics_display.copy(),
+        "execution_cost_summary": execution_cost_summary(mapped_legs),
+        "leg_mapping_comparison": leg_mapping_comparison(edited_mapping, original_legs),
+        "metrics_delta": metrics_delta_table(theory_total_payoff, mapped_total_payoff),
         "payoffs": {
             "polymarket": base_payoff,
+            "theory_options": theory_option_payoff,
+            "theory_total": theory_total_payoff,
             "options": mapped_option_payoff,
             "total": mapped_total_payoff,
         },
@@ -520,8 +751,9 @@ try:
 
     st.session_state.phase6_mapped_legs = mapped_legs
     st.session_state.phase6_mapping_table = edited_mapping
-    st.session_state.phase6_expiry_table = expiry_table
+    st.session_state.phase6_expiry_table = edited_expiry_table
     st.session_state.phase6_mapped_total_payoff = mapped_total_payoff
+    st.session_state.phase6_theory_total_payoff = theory_total_payoff
     st.session_state.phase6_polymarket_payoff = base_payoff
     st.session_state.phase6_option_payoff = mapped_option_payoff
 except Exception as exc:
