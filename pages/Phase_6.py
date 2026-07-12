@@ -307,6 +307,14 @@ def order_of_magnitude_polymarket_shares(mapping: pd.DataFrame) -> float:
     return float(max(100.0, np.ceil(float(quantities.max())) * CONTRACT_MULTIPLIER))
 
 
+def phase5_polymarket_shares(sidebar: dict, fallback: float = 100.0) -> float:
+    value = sidebar.get("shares", fallback)
+    try:
+        return max(float(value), 0.0)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def apply_loaded_values(base: pd.DataFrame, loaded: pd.DataFrame | None, columns: list[str], *, key_column: str = "Ticker") -> pd.DataFrame:
     if loaded is None or loaded.empty or key_column not in base.columns or key_column not in loaded.columns:
         return base
@@ -612,14 +620,17 @@ saved_entry = float(phase5_sidebar.get("entry", default_entry)) if saved_entry_m
 saved_entry = float(loaded_pm.get("entry", saved_entry))
 saved_entry = min(max(saved_entry, 0.0), 1.0)
 pm_entry = size_cols[2].number_input("Entry price", 0.0, 1.0, saved_entry, 0.001, format="%.3f", key=f"phase6_pm_entry_{source}_{load_suffix}")
-default_pm_shares = float(loaded_pm.get("shares", suggested_pm_shares))
+default_pm_shares = float(loaded_pm.get("shares", phase5_polymarket_shares(phase5_sidebar, 100.0)))
 pm_shares = size_cols[3].number_input("Polymarket shares", min_value=0.0, value=default_pm_shares, step=100.0, format="%.0f", key=f"phase6_pm_shares_{source}_{load_suffix}")
-st.caption(f"Auto default is order-of-magnitude only: max absolute option contracts x 100 = {suggested_pm_shares:,.0f} Polymarket shares. Override it if the actual ticket size differs.")
+st.caption(f"Sizing suggestion only: max absolute option contracts x 100 = {suggested_pm_shares:,.0f} Polymarket shares. Current value follows Phase 5 saved shares unless you override it.")
 
 try:
     mapped_legs = real_execution_legs(edited_mapping, original_legs, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
     theory_legs = translated_theory_legs(edited_mapping, original_legs, time_to_expiry=time_to_target, risk_free_rate=risk_free_rate)
-    real_terminal = terminal_stock_prices(result.terminal_market_caps, current_caps, spot_lookup)
+    terminal_market_caps_for_legs = result.terminal_market_caps[tickers]
+    current_caps_for_legs = current_caps.reindex(tickers)
+    spot_lookup_for_legs = spot_lookup.reindex(tickers)
+    real_terminal = terminal_stock_prices(terminal_market_caps_for_legs, current_caps_for_legs, spot_lookup_for_legs)
     mapped_option_payoff, _ = manual_option_payoffs_and_analytics(mapped_legs, real_terminal, contract_multiplier=CONTRACT_MULTIPLIER, include_premiums=True)
     theory_option_payoff, _ = manual_option_payoffs_and_analytics(theory_legs, real_terminal, contract_multiplier=CONTRACT_MULTIPLIER, include_premiums=True)
     winners = winner_from_ranks(result.ranks)
