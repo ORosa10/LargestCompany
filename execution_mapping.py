@@ -160,14 +160,17 @@ def choose_expiration(
     raise ValueError(f"Unknown expiration policy: {policy}")
 
 
-def phase5_share_equivalent_to_contracts(quantity: float) -> float:
+def phase5_share_equivalent_to_contracts(quantity: float, spot: float) -> float:
     """Convert Phase 5 share-equivalent quantity to listed contract-equivalent quantity.
 
-    Phase 5 quantities are intentionally share-equivalent units. Phase 6 still
-    multiplies option payoff by 100 because listed contracts are 100 shares, so
-    the mapped quantity must be divided by 100 to preserve the Phase 5 sizing.
+    Phase 5 quantities are sized against the normalized spot=100 payoff scale.
+    A real listed contract controls 100 shares, so one contract earns ``spot``
+    dollars for a 100-point normalized move. Divide by the current spot to keep
+    the Phase 5 payoff shape comparable against the same Polymarket share count.
     """
-    return float(quantity) / PHASE6_LISTED_CONTRACT_MULTIPLIER
+    if spot <= 0:
+        raise ValueError("spot must be positive.")
+    return float(quantity) / float(spot)
 
 
 def map_normalized_legs(
@@ -184,7 +187,7 @@ def map_normalized_legs(
         step = float(strike_step_by_ticker.loc[ticker])
         normalized_strike = float(leg["Strike"])
         phase5_quantity = float(leg["Quantity"])
-        mapped_quantity = phase5_share_equivalent_to_contracts(phase5_quantity)
+        mapped_quantity = phase5_share_equivalent_to_contracts(phase5_quantity, spot)
         raw_strike = spot * normalized_strike / 100.0
         executable_strike = round_to_strike_grid(raw_strike, step)
         quote = nearest_listed_option((option_chains or {}).get(ticker), str(leg["Option type"]), raw_strike)
