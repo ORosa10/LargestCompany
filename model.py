@@ -40,6 +40,45 @@ RESULT_COLUMNS = [
 ]
 
 
+SHOCK_MODELS = ["Normal shocks", "Student-t df=10", "Student-t df=6", "Student-t copula df=5"]
+
+
+def standard_shocks(
+    rng: np.random.Generator,
+    simulations: int,
+    dimensions: int,
+    shock_model: str = "Normal shocks",
+) -> np.ndarray:
+    """Draw standardized (unit-variance) marginal shocks for the given model.
+
+    "Normal shocks" is the baseline Gaussian copula. The independent Student-t
+    variants (df=10, df=6) fatten each marginal but keep zero tail dependence.
+    "Student-t copula df=5" divides all tickers in a simulation by one shared
+    chi-square mixing variable, so extreme moves arrive jointly (tail
+    dependence). The per-row scalar factors cleanly through the downstream
+    Cholesky mixing, so applying it here is equivalent to scaling correlated
+    normals. Every model is standardized to unit variance so implied volatility
+    still sets the scale.
+    """
+
+    if shock_model == "Normal shocks":
+        return rng.standard_normal((simulations, dimensions))
+    if shock_model == "Student-t copula df=5":
+        df = 5
+        normals = rng.standard_normal((simulations, dimensions))
+        mixing = rng.chisquare(df, size=(simulations, 1))
+        shocks = normals * np.sqrt(df / mixing)
+        return shocks / np.sqrt(df / (df - 2.0))
+    if shock_model == "Student-t df=10":
+        df = 10
+    elif shock_model == "Student-t df=6":
+        df = 6
+    else:
+        raise ValueError(f"Unknown shock model: {shock_model}.")
+    shocks = rng.standard_t(df, size=(simulations, dimensions))
+    return shocks / np.sqrt(df / (df - 2.0))
+
+
 @dataclass(frozen=True)
 class SimulationResult:
     results: pd.DataFrame
@@ -76,6 +115,7 @@ def run_probability_engine(
     days_to_target: int,
     simulations: int,
     seed: int,
+    shock_model: str = "Normal shocks",
 ) -> SimulationResult:
     """Run correlated lognormal market-cap simulations.
 
@@ -103,15 +143,15 @@ def run_probability_engine(
     rng = np.random.default_rng(seed)
     horizon_years = days_to_target / 365.0
 
-    independent_normals = rng.standard_normal((simulations, len(tickers)))
-    correlated_normals = independent_normals @ cholesky.T
+    independent_shocks = standard_shocks(rng, simulations, len(tickers), shock_model)
+    correlated_shocks = independent_shocks @ cholesky.T
 
     market_caps_0 = clean_inputs["Current market cap"].to_numpy(dtype=float)
     volatilities = clean_inputs["Implied volatility"].to_numpy(dtype=float)
 
     log_carry = forward_log_carry(clean_inputs, tickers)
     drift = log_carry - 0.5 * np.square(volatilities) * horizon_years
-    diffusion = volatilities * np.sqrt(horizon_years) * correlated_normals
+    diffusion = volatilities * np.sqrt(horizon_years) * correlated_shocks
     terminal_caps = market_caps_0 * np.exp(drift + diffusion)
     terminal_market_caps = pd.DataFrame(terminal_caps, columns=tickers)
 

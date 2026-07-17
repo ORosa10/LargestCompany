@@ -158,11 +158,52 @@ Global expected payoff = sum(bin scenario probability * average payoff in bin)
 
 Boundary confidence affects Phase 4 through option construction: different confidence levels create different strikes and theoretical premiums. If every option quantity is zero, the expected payoff becomes only the Polymarket payoff and boundary confidence has no payoff effect.
 
+## Phase 7: Risk Assessment And Sensitivity
+
+Phase 7 lives in the `Phase 7` Streamlit page and the `phase7.py` engine.
+
+Phase 7 changes no model. It stresses the inputs of the existing engine and
+quantifies how fragile the outputs are, so an edge can be classified as a robust
+signal or an artifact of assumptions before it is traded. Every stress reuses
+the Phase 1 probability engine and the Phase 4 payoff surface, so Phase 7
+measures exactly the numbers the rest of the app produces.
+
+1. Monte Carlo error. Means and ranking probabilities converge quickly, but tail
+   metrics (expected shortfall, worst case) rest on few scenarios and converge
+   slowly. Phase 7 reruns across seeds and reports the cross-seed standard
+   deviation as a plus/minus error. Large relative dispersion on a tail metric
+   is a signal to raise the simulation count.
+
+2. Tail-dependence stress. Marginals and dependence are separated. The Gaussian
+   copula has zero tail dependence; the Student-t copula (df=5, shared
+   chi-square shock) makes extremes arrive jointly. Only the dependence family
+   changes. Bounded-loss spreads keep the worst case fixed by construction, so
+   the effect shows up in expected payoff and edge.
+
+3. Gap vs randomness. Scaling every IV by k isolates randomness; widening or
+   compressing the market-cap gaps at fixed volatility isolates structure. The
+   scan that moves P(#1) more is the dominant lever.
+
+5. Model robustness. P(#1) and edge are recomputed across a grid of correlation
+   variants and shock models. An edge that keeps its sign across the grid is
+   tradeable; one that flips is model-dependent.
+
+Test 4 (out-of-sample optimizer validation) is intentionally omitted while the
+workflow uses a manual portfolio rather than an automatic optimizer.
+
 ## Drift And Dividends
 
-For now, the model does not add a risk-free drift, equity risk premium, or dividend yield.
+The model adds no equity risk premium. It does support an optional forward
+carry: when a "Forward / spot" column is supplied (a put-call parity implied
+forward, produced by `implied_forwards.py`), the base engine centres each
+company on its forward, `E[MC_T] = MC_0 * forward / spot`, instead of pure
+zero-drift. With no forward column the engine reduces to the original lognormal
+convexity adjustment, so the baseline behaviour is unchanged.
 
-That is deliberate. This tool is comparing relative ranking probabilities using current market caps, implied volatility, and correlation assumptions. For short-dated ranking markets, drift and dividends are usually second-order compared with current market-cap gaps and volatility. They can be added later as explicit scenario inputs if needed.
+Beyond that, the tool compares relative ranking probabilities using current
+market caps, implied volatility, and correlation assumptions. For short-dated
+ranking markets, drift and dividends are usually second-order compared with
+current market-cap gaps and volatility.
 
 ## Correlation Estimation
 
@@ -255,6 +296,7 @@ iv_surfaces.py                  Yahoo option-chain near-ATM IV extraction
 pages/Phase_2.py                Phase 2 workspace with internal tabs
 pages/Phase_3.py                Phase 3 option construction workspace
 pages/Phase_4.py                Phase 4 payoff profile workspace
+pages/Phase_7.py                Phase 7 risk assessment and sensitivity workspace
 pages/Correlation_Comparison.py Correlation analysis page
 pages/IV_Analysis.py            IV sensitivity page
 pages/Return_Diagnostics.py     Return-shape diagnostics page
@@ -262,6 +304,7 @@ tests/test_model.py             Probability engine sanity tests
 tests/test_boundaries.py        Conditional boundary tests
 tests/test_option_construction.py Option construction tests
 tests/test_payoff_surface.py    Payoff surface/profile tests
+tests/test_phase7.py            Phase 7 sensitivity and robustness tests
 requirements.txt                Python dependencies
 ```
 
@@ -278,3 +321,5 @@ Phase 4: payoff profile engine.
 Phase 5: optimization engine.
 
 Phase 6: robustness engine.
+
+Phase 7: risk assessment and sensitivity engine.

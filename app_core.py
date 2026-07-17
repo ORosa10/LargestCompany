@@ -17,6 +17,7 @@ from correlations import (
 from iv_surfaces import apply_iv_estimates, estimate_atm_ivs
 from market_data import apply_market_caps, fetch_market_caps
 from model import (
+    SHOCK_MODELS,
     SimulationResult,
     build_rank_distribution,
     cholesky_with_jitter,
@@ -25,6 +26,7 @@ from model import (
     default_correlation_matrix,
     forward_log_carry,
     rank_descending,
+    standard_shocks,
     validate_company_inputs,
 )
 
@@ -37,7 +39,6 @@ CORRELATION_METHODS = [
     "Rolling historical correlation",
     "Manual/default correlation matrix",
 ]
-SHOCK_MODELS = ["Normal shocks", "Student-t df=10", "Student-t df=6", "Student-t copula df=5"]
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
@@ -172,27 +173,6 @@ def select_correlation_matrix(
         corr, _ = smooth_vol_adjusted_correlation(prices, current_ivs, vol_window=63, low_quantile=float(smooth_low_quantile), high_quantile=float(smooth_high_quantile), min_observations=30)
         return corr, f"Vol-adjusted smooth correlation, low/high buckets={smooth_low_quantile:.0%}/{smooth_high_quantile:.0%}", price_info
     return rolling_correlation(prices, int(rolling_lookback)), f"Rolling historical correlation, {rolling_lookback} trading days, Yahoo Finance {price_history_period}", price_info
-
-
-def standard_shocks(rng: np.random.Generator, simulations: int, dimensions: int, shock_model: str) -> np.ndarray:
-    if shock_model == "Normal shocks":
-        return rng.standard_normal((simulations, dimensions))
-    if shock_model == "Student-t copula df=5":
-        # Student-t copula: one chi-square mixing variable shared across all
-        # tickers per simulation. Unlike the independent-marginal Student-t
-        # shocks above, the shared scale creates joint tail dependence (fat
-        # tails hit names together). The per-row scalar factors cleanly through
-        # the downstream Cholesky mixing, so applying it here is equivalent to
-        # scaling correlated normals. Standardized to unit marginal variance so
-        # implied volatility still sets the scale.
-        df = 5
-        normals = rng.standard_normal((simulations, dimensions))
-        mixing = rng.chisquare(df, size=(simulations, 1))
-        shocks = normals * np.sqrt(df / mixing)
-        return shocks / np.sqrt(df / (df - 2.0))
-    df = 10 if shock_model == "Student-t df=10" else 6
-    shocks = rng.standard_t(df, size=(simulations, dimensions))
-    return shocks / np.sqrt(df / (df - 2.0))
 
 
 def run_engine(company_inputs: pd.DataFrame, correlation_matrix: pd.DataFrame, *, days_to_target: int, simulations: int, seed: int, shock_model: str) -> SimulationResult:
