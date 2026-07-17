@@ -80,11 +80,14 @@ def run_probability_engine(
     """Run correlated lognormal market-cap simulations.
 
     Financial model:
-        MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)
+        MC_T = MC_0 * exp((mu - 0.5 * sigma^2) * T + sigma * sqrt(T) * Z)
 
-    The drift term is only the lognormal convexity adjustment. The model accepts
-    current market cap, implied volatility, and correlations as inputs; it does
-    not forecast expected returns.
+    ``mu * T`` is the total forward log carry taken from an optional
+    "Forward / spot" column (put-call parity implied forward). When no forward
+    ratios are supplied it is zero, so the baseline model reduces to the pure
+    lognormal convexity adjustment. The model accepts current market cap,
+    implied volatility, correlations, and (optionally) forward carry as inputs;
+    it does not forecast an equity risk premium.
     """
 
     clean_inputs = validate_company_inputs(company_inputs)
@@ -106,7 +109,8 @@ def run_probability_engine(
     market_caps_0 = clean_inputs["Current market cap"].to_numpy(dtype=float)
     volatilities = clean_inputs["Implied volatility"].to_numpy(dtype=float)
 
-    drift = -0.5 * np.square(volatilities) * horizon_years
+    log_carry = forward_log_carry(clean_inputs, tickers)
+    drift = log_carry - 0.5 * np.square(volatilities) * horizon_years
     diffusion = volatilities * np.sqrt(horizon_years) * correlated_normals
     terminal_caps = market_caps_0 * np.exp(drift + diffusion)
     terminal_market_caps = pd.DataFrame(terminal_caps, columns=tickers)
@@ -151,6 +155,22 @@ def run_probability_engine(
         cleaned_correlation=cleaned_corr,
         warnings=tuple(corr_warnings + chol_warnings),
     )
+
+
+def forward_log_carry(company_inputs: pd.DataFrame, tickers: list[str]) -> np.ndarray:
+    """Total log forward carry over the horizon from an optional forward column.
+
+    Reads a "Forward / spot" column (target-date forward divided by spot, e.g.
+    from put-call parity). Returns zeros when the column is absent or invalid,
+    keeping the baseline zero-drift behaviour unchanged. When present, the base
+    engine centres each company on its forward: E[MC_T] = MC_0 * forward / spot.
+    """
+
+    if "Forward / spot" not in company_inputs.columns:
+        return np.zeros(len(tickers))
+    ratios = pd.to_numeric(company_inputs["Forward / spot"], errors="coerce").to_numpy(dtype=float)
+    ratios = np.where(np.isfinite(ratios) & (ratios > 0.0), ratios, 1.0)
+    return np.log(ratios)
 
 
 def validate_company_inputs(company_inputs: pd.DataFrame) -> pd.DataFrame:

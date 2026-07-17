@@ -23,6 +23,7 @@ from model import (
     clean_correlation_matrix,
     default_company_inputs,
     default_correlation_matrix,
+    forward_log_carry,
     rank_descending,
     validate_company_inputs,
 )
@@ -36,7 +37,7 @@ CORRELATION_METHODS = [
     "Rolling historical correlation",
     "Manual/default correlation matrix",
 ]
-SHOCK_MODELS = ["Normal shocks", "Student-t df=10", "Student-t df=6"]
+SHOCK_MODELS = ["Normal shocks", "Student-t df=10", "Student-t df=6", "Student-t copula df=5"]
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
@@ -176,6 +177,19 @@ def select_correlation_matrix(
 def standard_shocks(rng: np.random.Generator, simulations: int, dimensions: int, shock_model: str) -> np.ndarray:
     if shock_model == "Normal shocks":
         return rng.standard_normal((simulations, dimensions))
+    if shock_model == "Student-t copula df=5":
+        # Student-t copula: one chi-square mixing variable shared across all
+        # tickers per simulation. Unlike the independent-marginal Student-t
+        # shocks above, the shared scale creates joint tail dependence (fat
+        # tails hit names together). The per-row scalar factors cleanly through
+        # the downstream Cholesky mixing, so applying it here is equivalent to
+        # scaling correlated normals. Standardized to unit marginal variance so
+        # implied volatility still sets the scale.
+        df = 5
+        normals = rng.standard_normal((simulations, dimensions))
+        mixing = rng.chisquare(df, size=(simulations, 1))
+        shocks = normals * np.sqrt(df / mixing)
+        return shocks / np.sqrt(df / (df - 2.0))
     df = 10 if shock_model == "Student-t df=10" else 6
     shocks = rng.standard_t(df, size=(simulations, dimensions))
     return shocks / np.sqrt(df / (df - 2.0))
@@ -194,7 +208,8 @@ def run_engine(company_inputs: pd.DataFrame, correlation_matrix: pd.DataFrame, *
 
     market_caps_0 = clean_inputs["Current market cap"].to_numpy(dtype=float)
     volatilities = clean_inputs["Implied volatility"].to_numpy(dtype=float)
-    drift = -0.5 * np.square(volatilities) * horizon_years
+    log_carry = forward_log_carry(clean_inputs, tickers)
+    drift = log_carry - 0.5 * np.square(volatilities) * horizon_years
     diffusion = volatilities * np.sqrt(horizon_years) * correlated_shocks
     terminal_caps = market_caps_0 * np.exp(drift + diffusion)
 
@@ -560,6 +575,6 @@ with methodology_tab:
     st.code("MC_T = MC_0 * exp((-0.5 * sigma^2) * T + sigma * sqrt(T) * Z)")
     st.write("Market caps and correlations are linked to stock market data when Yahoo sources are selected. IV and Polymarket prices remain manual unless Yahoo near-ATM IV is explicitly selected.")
     st.subheader("Shock distribution")
-    st.write("Normal shocks are the baseline. Student-t shocks are included only as a fat-tail sensitivity: IV still sets the volatility scale, while the standardized shock shape changes.")
+    st.write("Normal shocks are the baseline. Independent Student-t shocks (df=10, df=6) are a fat-tail marginal sensitivity. The Student-t copula (df=5) shares one mixing variable across tickers, adding joint tail dependence so names crash together; IV still sets the volatility scale.")
     st.subheader("No strategy layer yet")
     st.write("This phase reports statistical fair probabilities and model-vs-market gaps only. Hedging, ROI strategy, and payoff construction are intentionally left for later phases.")
