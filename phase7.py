@@ -87,7 +87,13 @@ def _selected_probability_and_edge(result, selected_ticker: str) -> tuple[float,
     return float(row["Model probability"].iloc[0]), float(row["Edge"].iloc[0])
 
 
-def _portfolio_tail_summary(result, portfolio: PortfolioSpec, *, shortfall_probability: float = 0.05) -> pd.Series:
+def portfolio_scenarios(result, portfolio: PortfolioSpec) -> pd.DataFrame:
+    """Per-scenario portfolio payoff for a saved simulation, via the Phase 4 engine.
+
+    Shared by Phase 7 tail metrics and Phase 8 risk management so both read the
+    exact same payoff distribution.
+    """
+
     legs = portfolio.option_legs.copy()
     if "Quantity" not in legs.columns:
         legs["Quantity"] = 0.0
@@ -101,7 +107,7 @@ def _portfolio_tail_summary(result, portfolio: PortfolioSpec, *, shortfall_proba
     if missing:
         raise ValueError("Missing terminal market-cap scenarios for: " + ", ".join(missing) + ".")
 
-    scenario = calculate_scenario_payoffs(
+    return calculate_scenario_payoffs(
         result.terminal_market_caps[required],
         result.ranks,
         portfolio.current_market_caps,
@@ -114,6 +120,10 @@ def _portfolio_tail_summary(result, portfolio: PortfolioSpec, *, shortfall_proba
         contract_multiplier=float(portfolio.contract_multiplier),
         include_option_premiums=bool(portfolio.include_option_premiums),
     )
+
+
+def _portfolio_tail_summary(result, portfolio: PortfolioSpec, *, shortfall_probability: float = 0.05) -> pd.Series:
+    scenario = portfolio_scenarios(result, portfolio)
     return payoff_summary(scenario, shortfall_probability=shortfall_probability)
 
 

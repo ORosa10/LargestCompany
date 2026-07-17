@@ -191,6 +191,31 @@ measures exactly the numbers the rest of the app produces.
 Test 4 (out-of-sample optimizer validation) is intentionally omitted while the
 workflow uses a manual portfolio rather than an automatic optimizer.
 
+## Phase 8: Risk Management And Position Sizing
+
+Phase 8 lives in the `Phase 8` Streamlit page and the `phase8.py` engine.
+
+Phase 8 changes no model. It reads the Phase 4 payoff distribution and the real
+execution costs and turns them into the decision metrics a trader sizes against.
+
+Because the Phase 4 payoff surface already reports payoffs *net* of option
+premiums and the Polymarket entry cost, "Total payoff" is net profit and loss:
+the worst scenario is the maximum loss and the mean is expected net profit.
+
+- Capital: net cash outlay (Polymarket cost plus net option debit) and gross
+  premium paid.
+- Maximum loss / capital at risk: the worst simulated net outcome, bounded by
+  the spread construction.
+- Return on capital (expected profit / cash outlay) and return on
+  capital-at-risk (expected profit / maximum loss).
+- Probability of profit and of loss, expected shortfall, and risk of ruin
+  (probability of losing at least a chosen share of the capital at risk).
+- Breakeven levels: the selected-ticker terminal levels where the
+  expected-payoff profile crosses zero.
+- Position sizing: linear budget scaling of the fixed structure, and Kelly
+  sizing (full and fractional) that maximizes long-run log growth over the
+  scenarios.
+
 ## Drift And Dividends
 
 The model adds no equity risk premium. It does support an optional forward
@@ -297,6 +322,7 @@ pages/Phase_2.py                Phase 2 workspace with internal tabs
 pages/Phase_3.py                Phase 3 option construction workspace
 pages/Phase_4.py                Phase 4 payoff profile workspace
 pages/Phase_7.py                Phase 7 risk assessment and sensitivity workspace
+pages/Phase_8.py                Phase 8 risk management and position sizing workspace
 pages/Correlation_Comparison.py Correlation analysis page
 pages/IV_Analysis.py            IV sensitivity page
 pages/Return_Diagnostics.py     Return-shape diagnostics page
@@ -305,6 +331,7 @@ tests/test_boundaries.py        Conditional boundary tests
 tests/test_option_construction.py Option construction tests
 tests/test_payoff_surface.py    Payoff surface/profile tests
 tests/test_phase7.py            Phase 7 sensitivity and robustness tests
+tests/test_phase8.py            Phase 8 risk-management and sizing tests
 requirements.txt                Python dependencies
 ```
 
@@ -323,3 +350,5 @@ Phase 5: optimization engine.
 Phase 6: robustness engine.
 
 Phase 7: risk assessment and sensitivity engine.
+
+Phase 8: risk management and position-sizing engine.
