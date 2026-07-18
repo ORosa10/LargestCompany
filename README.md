@@ -200,8 +200,11 @@ workflow uses a manual portfolio rather than an automatic optimizer.
 
 Phase 8 lives in the `Phase 8` Streamlit page and the `phase8.py` engine.
 
-Phase 8 changes no model. It reads the Phase 4 payoff distribution and the real
+Phase 8 changes no model. It reads the payoff distribution and the real
 execution costs and turns them into the decision metrics a trader sizes against.
+It uses the real Phase 6 execution candidate (real listed strikes, real fill
+premiums, real contract sizes) when saved, and falls back to the Phase 4 theory
+portfolio otherwise. Phase 7's payoff-based tests use the same portfolio source.
 
 Because the Phase 4 payoff surface already reports payoffs *net* of option
 premiums and the Polymarket entry cost, "Total payoff" is net profit and loss:

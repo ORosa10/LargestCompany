@@ -561,3 +561,84 @@ def assessment(
         watch_outs.append("No material risk flags on these scenarios.")
 
     return {"headline": headline, "findings": pd.DataFrame(findings), "watch_outs": watch_outs}
+
+
+# ---------------------------------------------------------------------------
+# Loading a saved portfolio: prefer the real Phase 6 execution candidate
+# ---------------------------------------------------------------------------
+PHASE6_ARTIFACT = "phase6_execution_candidate"
+
+
+def _spot_series_from_legs(legs: pd.DataFrame, fallback: object = None) -> pd.Series:
+    if isinstance(legs, pd.DataFrame) and "Spot" in legs.columns and not legs.empty:
+        return legs.drop_duplicates("Ticker").set_index("Ticker")["Spot"].astype(float)
+    if isinstance(fallback, pd.Series):
+        return fallback.astype(float)
+    if isinstance(fallback, pd.DataFrame) and {"Ticker", "Spot"}.issubset(fallback.columns):
+        return fallback.drop_duplicates("Ticker").set_index("Ticker")["Spot"].astype(float)
+    if isinstance(fallback, dict):
+        return pd.Series(fallback, dtype=float)
+    return pd.Series(dtype=float)
+
+
+def phase6_portfolio(payload: dict, current_market_caps) -> PortfolioSpec:
+    """Build a PortfolioSpec from a saved Phase 6 execution candidate.
+
+    Uses the real listed strikes, real per-share execution premiums, and real
+    contract quantities from ``mapped_legs`` - the same legs Phase 6 priced.
+    """
+
+    legs = payload.get("mapped_legs")
+    if not isinstance(legs, pd.DataFrame) or legs.empty:
+        raise ValueError("Phase 6 candidate has no mapped legs.")
+    polymarket = payload.get("polymarket") or {}
+    spot_series = _spot_series_from_legs(legs, payload.get("spots"))
+    default_ticker = str(legs["Ticker"].iloc[0])
+    return PortfolioSpec(
+        option_legs=legs.copy(),
+        current_market_caps=pd.Series(current_market_caps, dtype=float),
+        spot_prices=spot_series,
+        selected_ticker=str(polymarket.get("selected_ticker", default_ticker)),
+        polymarket_side=str(polymarket.get("side", "NO")),
+        polymarket_entry_price=float(polymarket.get("entry", 0.0)),
+        polymarket_quantity=float(polymarket.get("shares", 0.0)),
+        contract_multiplier=float(payload.get("contract_multiplier", 100.0)),
+        include_option_premiums=True,
+    )
+
+
+def phase4_portfolio(payload: dict, current_market_caps, default_ticker: str) -> PortfolioSpec:
+    """Build a PortfolioSpec from a saved Phase 4 (theory) portfolio."""
+
+    legs = payload.get("active_option_legs")
+    if not isinstance(legs, pd.DataFrame):
+        raise ValueError("Phase 4 artifact has no option legs.")
+    legs = legs.copy()
+    spot_series = _spot_series_from_legs(legs)
+    return PortfolioSpec(
+        option_legs=legs,
+        current_market_caps=pd.Series(current_market_caps, dtype=float),
+        spot_prices=spot_series,
+        selected_ticker=str(payload.get("selected_ticker", default_ticker)),
+        polymarket_side=str(payload.get("polymarket_side", "NO")),
+        polymarket_entry_price=float(payload.get("polymarket_entry_price", 0.0)),
+        polymarket_quantity=float(payload.get("polymarket_quantity", 0.0)),
+        contract_multiplier=float(payload.get("contract_multiplier", 100.0)),
+        include_option_premiums=bool(payload.get("include_option_premiums", True)),
+    )
+
+
+def load_saved_portfolio(
+    current_market_caps,
+    default_ticker: str,
+    *,
+    phase6: dict | None = None,
+    phase4: dict | None = None,
+) -> tuple[PortfolioSpec | None, str]:
+    """Return (portfolio, source_label), preferring the real Phase 6 candidate."""
+
+    if isinstance(phase6, dict) and isinstance(phase6.get("mapped_legs"), pd.DataFrame) and not phase6["mapped_legs"].empty:
+        return phase6_portfolio(phase6, current_market_caps), "Phase 6 real execution"
+    if isinstance(phase4, dict) and isinstance(phase4.get("active_option_legs"), pd.DataFrame):
+        return phase4_portfolio(phase4, current_market_caps, default_ticker), "Phase 4 theory"
+    return None, "none"

@@ -207,3 +207,69 @@ def test_assessment_strong_iv_flag_when_iv_range_large():
     assert "strongly iv-driven" in joined
     assert "lightly hedged" not in joined                # P(loss) 0.18 -> well hedged
     assert "deep tail" not in joined                     # worst change small
+
+
+def _phase6_payload():
+    mapped_legs = pd.DataFrame(
+        [
+            {"Instrument": "Short NVDA Put 140.00", "Ticker": "NVDA", "Option type": "Put", "Position": "Short", "Quantity": 2.0, "Strike": 140.0, "Spot": 175.0, "Theoretical premium": 3.0, "Execution premium": 3.0},
+            {"Instrument": "Long NVDA Call 190.00", "Ticker": "NVDA", "Option type": "Call", "Position": "Long", "Quantity": 3.0, "Strike": 190.0, "Spot": 175.0, "Theoretical premium": 7.0, "Execution premium": 7.0},
+        ]
+    )
+    return {
+        "mapped_legs": mapped_legs,
+        "polymarket": {"selected_ticker": "NVDA", "side": "NO", "entry": 0.17, "shares": 100.0},
+        "contract_multiplier": 100.0,
+        "spots": pd.Series({"NVDA": 175.0}),
+    }
+
+
+def _phase4_payload():
+    return {
+        "active_option_legs": pd.DataFrame(
+            [{"Instrument": "L", "Ticker": "NVDA", "Option type": "Call", "Position": "Long", "Quantity": 1.0, "Strike": 200.0, "Spot": 175.0, "Theoretical premium": 5.0}]
+        ),
+        "selected_ticker": "NVDA",
+        "polymarket_side": "YES",
+        "polymarket_entry_price": 0.83,
+        "polymarket_quantity": 100.0,
+    }
+
+
+def test_load_saved_portfolio_prefers_phase6():
+    from phase7 import load_saved_portfolio
+    caps = pd.Series({"NVDA": 4_300e9, "AAPL": 3_100e9, "GOOGL": 2_100e9})
+    spec, label = load_saved_portfolio(caps, "NVDA", phase6=_phase6_payload(), phase4=_phase4_payload())
+    assert label == "Phase 6 real execution"
+    assert spec.polymarket_side == "NO"
+    assert len(spec.option_legs) == 2
+    assert spec.spot_prices["NVDA"] == pytest.approx(175.0)
+
+
+def test_load_saved_portfolio_falls_back_to_phase4_then_none():
+    from phase7 import load_saved_portfolio
+    caps = pd.Series({"NVDA": 4_300e9})
+    spec, label = load_saved_portfolio(caps, "NVDA", phase6=None, phase4=_phase4_payload())
+    assert label == "Phase 4 theory"
+    assert spec.polymarket_side == "YES"
+    spec_none, label_none = load_saved_portfolio(caps, "NVDA", phase6=None, phase4=None)
+    assert spec_none is None and label_none == "none"
+
+
+def test_phase6_portfolio_scenarios_run():
+    from phase7 import phase6_portfolio, portfolio_scenarios
+    from model import default_correlation_matrix, run_probability_engine
+    company = pd.DataFrame(
+        [
+            {"Ticker": "NVDA", "Current market cap": 4_300e9, "Implied volatility": 0.42, "Polymarket YES price": 0.83},
+            {"Ticker": "AAPL", "Current market cap": 3_100e9, "Implied volatility": 0.24, "Polymarket YES price": 0.123},
+            {"Ticker": "GOOGL", "Current market cap": 2_100e9, "Implied volatility": 0.28, "Polymarket YES price": 0.046},
+        ]
+    )
+    corr = default_correlation_matrix(company["Ticker"].tolist())
+    result = run_probability_engine(company, corr, days_to_target=90, simulations=6000, seed=3)
+    caps = company.set_index("Ticker")["Current market cap"].astype(float)
+    spec = phase6_portfolio(_phase6_payload(), caps)
+    scenario = portfolio_scenarios(result, spec)
+    assert "Total payoff" in scenario.columns
+    assert len(scenario) == 6000

@@ -15,6 +15,7 @@ import streamlit as st
 
 from model import SHOCK_MODELS
 from phase7 import (
+    PHASE6_ARTIFACT,
     PortfolioSpec,
     assessment,
     constant_correlation,
@@ -24,6 +25,7 @@ from phase7 import (
     gap_vs_randomness,
     iv_scaling_scan,
     model_robustness,
+    load_saved_portfolio,
     multi_seed_dispersion,
     robustness_summary,
 )
@@ -68,38 +70,25 @@ base_simulations = int(run_metadata.get("simulations", len(result.terminal_marke
 tickers = simulation_inputs["Ticker"].astype(str).tolist()
 base_correlation = result.cleaned_correlation.copy()
 
+current_caps = simulation_inputs.set_index("Ticker")["Current market cap"].astype(float)
+relevant = simulation_inputs.loc[simulation_inputs["Polymarket YES price"].astype(float) > 0]
+default_ticker = (
+    str(relevant.sort_values("Polymarket YES price", ascending=False)["Ticker"].iloc[0])
+    if not relevant.empty
+    else tickers[0]
+)
+phase6 = load_phase_artifact(PHASE6_ARTIFACT)
 phase4 = load_phase_artifact("phase4")
-portfolio = None
-portfolio_note = ""
-if phase4 is not None and isinstance(phase4.get("active_option_legs"), pd.DataFrame):
-    legs = phase4["active_option_legs"].copy()
-    selected_ticker = str(phase4.get("selected_ticker", tickers[0]))
-    current_caps = simulation_inputs.set_index("Ticker")["Current market cap"].astype(float)
-    if "Spot" in legs.columns and not legs.empty:
-        spot_series = legs.drop_duplicates("Ticker").set_index("Ticker")["Spot"].astype(float)
-    else:
-        spot_series = pd.Series(dtype=float)
-    portfolio = PortfolioSpec(
-        option_legs=legs,
-        current_market_caps=current_caps,
-        spot_prices=spot_series,
-        selected_ticker=selected_ticker,
-        polymarket_side=str(phase4.get("polymarket_side", "NO")),
-        polymarket_entry_price=float(phase4.get("polymarket_entry_price", 0.0)),
-        polymarket_quantity=float(phase4.get("polymarket_quantity", 0.0)),
-        contract_multiplier=float(phase4.get("contract_multiplier", 100.0)),
-        include_option_premiums=bool(phase4.get("include_option_premiums", True)),
-    )
-    portfolio_note = f"Loaded saved Phase 4 portfolio for {selected_ticker} ({portfolio.polymarket_side} + option legs)."
+portfolio, portfolio_source = load_saved_portfolio(current_caps, default_ticker, phase6=phase6, phase4=phase4)
+if portfolio is not None:
+    selected_ticker = portfolio.selected_ticker
+    st.info(f"Loaded {portfolio_source} portfolio for {selected_ticker} ({portfolio.polymarket_side} + option legs).")
 else:
-    relevant = simulation_inputs.loc[simulation_inputs["Polymarket YES price"].astype(float) > 0]
-    selected_ticker = str(relevant.sort_values("Polymarket YES price", ascending=False)["Ticker"].iloc[0]) if not relevant.empty else tickers[0]
-    portfolio_note = (
-        "No saved Phase 4 portfolio found. Running probability-only stresses "
-        f"(tail-metric tests need a saved Phase 4 payoff). Selected ticker: {selected_ticker}."
+    selected_ticker = default_ticker
+    st.info(
+        "No saved Phase 6 or Phase 4 portfolio found. Running probability-only stresses "
+        f"(tail-metric tests need a saved payoff). Selected ticker: {selected_ticker}."
     )
-
-st.info(portfolio_note)
 
 # ---------------------------------------------------------------------------
 # Controls

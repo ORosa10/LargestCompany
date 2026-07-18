@@ -4,7 +4,9 @@ Phase 8 reads the saved Phase 1 scenarios and the saved Phase 4 portfolio and
 turns them into the money view: capital deployed, maximum loss, return on
 capital and on capital at risk, probability of profit and of ruin, breakeven
 levels, and Kelly-based position sizing for a bankroll. It changes no model;
-payoffs come straight from the Phase 4 surface. See ``phase8.py``.
+payoffs come straight from the payoff surface. It reads the real Phase 6
+execution candidate when saved, and falls back to the Phase 4 theory portfolio.
+See ``phase8.py``.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from phase7 import PortfolioSpec, portfolio_scenarios
+from phase7 import PHASE6_ARTIFACT, PortfolioSpec, load_saved_portfolio, portfolio_scenarios
 from phase8 import (
     breakeven_bands,
     budget_scaling,
@@ -29,8 +31,8 @@ st.set_page_config(page_title="Phase 8", layout="wide")
 st.title("Phase 8: Risk management & position sizing")
 st.caption(
     "Phase 8 turns the payoff distribution and real execution costs into the "
-    "decision metrics you size against. It reads the Phase 4 payoff surface, so "
-    "every number is net of option premiums and the Polymarket entry cost."
+    "decision metrics you size against. It reads the real Phase 6 executed portfolio "
+    "when available, so every number is net of real fills and the Polymarket entry cost."
 )
 
 
@@ -47,38 +49,27 @@ def ratio(value: float) -> str:
 
 
 snapshot = load_simulation_snapshot()
-phase4 = load_phase_artifact("phase4")
 if snapshot is None:
     st.error("No saved Phase 1 simulation was found. Run Phase 1 first.")
-    st.stop()
-if phase4 is None or not isinstance(phase4.get("active_option_legs"), pd.DataFrame):
-    st.error("No saved Phase 4 portfolio was found. Open Phase 4 and save a portfolio, then return here.")
     st.stop()
 
 result = snapshot["result"]
 simulation_inputs = snapshot["simulation_inputs"].copy()
 current_caps = simulation_inputs.set_index("Ticker")["Current market cap"].astype(float)
-legs = phase4["active_option_legs"].copy()
-selected_ticker = str(phase4.get("selected_ticker", simulation_inputs["Ticker"].iloc[0]))
-spot_series = (
-    legs.drop_duplicates("Ticker").set_index("Ticker")["Spot"].astype(float)
-    if "Spot" in legs.columns and not legs.empty
-    else pd.Series(dtype=float)
-)
-portfolio = PortfolioSpec(
-    option_legs=legs,
-    current_market_caps=current_caps,
-    spot_prices=spot_series,
-    selected_ticker=selected_ticker,
-    polymarket_side=str(phase4.get("polymarket_side", "NO")),
-    polymarket_entry_price=float(phase4.get("polymarket_entry_price", 0.0)),
-    polymarket_quantity=float(phase4.get("polymarket_quantity", 0.0)),
-    contract_multiplier=float(phase4.get("contract_multiplier", 100.0)),
-    include_option_premiums=bool(phase4.get("include_option_premiums", True)),
-)
+default_ticker = str(simulation_inputs["Ticker"].iloc[0])
+phase6 = load_phase_artifact(PHASE6_ARTIFACT)
+phase4 = load_phase_artifact("phase4")
+portfolio, portfolio_source = load_saved_portfolio(current_caps, default_ticker, phase6=phase6, phase4=phase4)
+if portfolio is None:
+    st.error(
+        "No saved portfolio was found. Save a Phase 6 execution candidate (preferred) "
+        "or open Phase 4 to save a theory portfolio, then return here."
+    )
+    st.stop()
+selected_ticker = portfolio.selected_ticker
 
 st.info(
-    f"Portfolio: {portfolio.polymarket_side} {selected_ticker} + saved Phase 4 option legs | "
+    f"Portfolio: {portfolio_source} - {portfolio.polymarket_side} {selected_ticker} + option legs | "
     f"{len(result.terminal_market_caps):,} scenarios."
 )
 
