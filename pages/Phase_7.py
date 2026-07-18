@@ -16,6 +16,7 @@ import streamlit as st
 from model import SHOCK_MODELS
 from phase7 import (
     PortfolioSpec,
+    assessment,
     constant_correlation,
     copula_tail_stress,
     dispersion_summary,
@@ -129,8 +130,9 @@ with st.sidebar:
 
 seeds = list(range(base_seed, base_seed + int(n_seeds)))
 
-tab1, tab2, tab3, tab5, methodology = st.tabs(
+summary_tab, tab1, tab2, tab3, tab5, methodology = st.tabs(
     [
+        "0. Summary",
         "1. Monte Carlo error",
         "2. Tail-dependence",
         "3. Gap vs randomness",
@@ -138,6 +140,65 @@ tab1, tab2, tab3, tab5, methodology = st.tabs(
         "Methodology",
     ]
 )
+
+with summary_tab:
+    st.subheader("Overall assessment")
+    st.caption(
+        "Runs all four tests on the current portfolio and sidebar settings, then "
+        "gives a plain-language verdict on whether the edge is a real signal and a "
+        "list of things to watch before trading."
+    )
+    if st.button("Run full assessment", key="run_summary"):
+        with st.spinner("Running all four tests..."):
+            summary_factors = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+            disp = dispersion_summary(
+                multi_seed_dispersion(
+                    simulation_inputs, base_correlation, portfolio,
+                    days_to_target=days_to_target, simulations=int(simulations), seeds=seeds,
+                    shortfall_probability=float(shortfall_probability),
+                )
+            )
+            cop = copula_tail_stress(
+                simulation_inputs, base_correlation, portfolio,
+                days_to_target=days_to_target, simulations=int(simulations), seeds=seeds,
+                shortfall_probability=float(shortfall_probability),
+            )
+            iv_scan = iv_scaling_scan(
+                simulation_inputs, base_correlation, selected_ticker=selected_ticker,
+                days_to_target=days_to_target, simulations=int(simulations), seed=base_seed, factors=summary_factors,
+            )
+            gap_scan = gap_scaling_scan(
+                simulation_inputs, base_correlation, selected_ticker=selected_ticker,
+                days_to_target=days_to_target, simulations=int(simulations), seed=base_seed, factors=summary_factors,
+            )
+            gap_verdict = gap_vs_randomness(iv_scan, gap_scan)
+            variants = {"Saved correlation": base_correlation}
+            if use_constant_variants:
+                variants["Independent (0.0)"] = constant_correlation(tickers, 0.0)
+                variants["Low constant (0.2)"] = constant_correlation(tickers, 0.2)
+                variants["High constant (0.8)"] = constant_correlation(tickers, 0.8)
+            shocks = robustness_shocks or ["Normal shocks"]
+            grid = model_robustness(
+                simulation_inputs, variants, selected_ticker=selected_ticker,
+                days_to_target=days_to_target, simulations=int(simulations), seed=base_seed, shock_models=shocks,
+            )
+            report = assessment(disp, cop, gap_verdict, robustness_summary(grid), selected_ticker=selected_ticker)
+        st.session_state.phase7_summary = report
+
+    if "phase7_summary" in st.session_state:
+        report = st.session_state.phase7_summary
+        headline = report["headline"]
+        if "not fully robust" in headline.lower():
+            st.warning(headline)
+        else:
+            st.success(headline)
+        st.subheader("Findings by test")
+        st.dataframe(report["findings"], width="stretch", hide_index=True)
+        st.subheader("What to watch")
+        for item in report["watch_outs"]:
+            st.warning(item)
+    else:
+        st.info("Set seeds, simulations, and stress families in the sidebar, then click Run full assessment.")
 
 # ---------------------------------------------------------------------------
 # Test 1 - Monte Carlo error / multi-seed reruns

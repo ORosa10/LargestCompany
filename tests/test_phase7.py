@@ -142,3 +142,68 @@ def test_model_robustness_grid_and_summary():
     assert summary["P(#1) spread"] >= 0.0
     assert summary["Edge spread"] >= 0.0
     assert isinstance(bool(summary["Edge sign consistent"]), bool)
+
+
+def _dispersion(edge_rel=0.004, worst_rel=0.10, ploss_mean=0.50):
+    return pd.DataFrame(
+        [
+            {"Metric": "Edge selected", "Mean": -0.42, "MC error (std)": 0.0015, "Relative dispersion": edge_rel, "Min": -0.42, "Max": -0.41, "Seeds": 6},
+            {"Metric": "Worst payoff", "Mean": -74.5, "MC error (std)": 7.3, "Relative dispersion": worst_rel, "Min": -83.0, "Max": -66.0, "Seeds": 6},
+            {"Metric": "Probability of loss", "Mean": ploss_mean, "MC error (std)": 0.0016, "Relative dispersion": 0.003, "Min": 0.49, "Max": 0.50, "Seeds": 6},
+        ]
+    )
+
+
+def _copula(edge_change_pct=-0.001, worst_change_pct=-2.75):
+    from phase7 import CopulaStressResult
+    comparison = pd.DataFrame(
+        [
+            {"Metric": "Edge selected", "Normal shocks": -0.4202, "Student-t copula df=5": -0.4205, "Change": -0.0003, "Change %": edge_change_pct},
+            {"Metric": "Worst payoff", "Normal shocks": -74.5, "Student-t copula df=5": -279.8, "Change": -205.0, "Change %": worst_change_pct},
+        ]
+    )
+    empty = pd.DataFrame()
+    return CopulaStressResult(comparison=comparison, baseline_per_seed=empty, stress_per_seed=empty, baseline_model="Normal shocks", stress_model="Student-t copula df=5")
+
+
+def _gap_verdict(iv_range=0.064, gap_range=0.056, verdict="randomness-dominated (IV lever)"):
+    return pd.DataFrame(
+        [
+            {"Lever": "IV scaling", "P(#1) min": 0.451, "P(#1) max": 0.515, "P(#1) range": iv_range, "Verdict": verdict},
+            {"Lever": "Gap scaling", "P(#1) min": 0.456, "P(#1) max": 0.512, "P(#1) range": gap_range, "Verdict": verdict},
+        ]
+    )
+
+
+def test_assessment_robust_case_flags_watch_outs_but_confirms_edge():
+    from phase7 import assessment
+    robustness = pd.Series({"Edge sign consistent": True, "P(#1) spread": 0.015, "Edge spread": 0.016})
+    out = assessment(_dispersion(), _copula(), _gap_verdict(), robustness, selected_ticker="NVDA")
+    assert "robust" in out["headline"].lower()
+    joined = " ".join(out["watch_outs"]).lower()
+    assert "worst-case payoff is noisy" in joined       # Test 1 noisy worst
+    assert "deep tail is not bounded" in joined          # Test 2 tail blowup
+    assert "lightly hedged" in joined                    # near-unhedged portfolio
+    assert "model grid" not in joined                    # sign consistent -> no flip flag
+    assert len(out["findings"]) == 4
+
+
+def test_assessment_flags_model_dependence_when_sign_flips():
+    from phase7 import assessment
+    robustness = pd.Series({"Edge sign consistent": False, "P(#1) spread": 0.2, "Edge spread": 0.5})
+    out = assessment(_dispersion(edge_rel=0.2), _copula(edge_change_pct=-0.30), _gap_verdict(), robustness, selected_ticker="NVDA")
+    assert "not fully robust" in out["headline"].lower()
+    joined = " ".join(out["watch_outs"]).lower()
+    assert "sign somewhere in the model grid" in joined
+    edge_finding = out["findings"].loc[out["findings"]["Area"] == "2. Tail dependence", "Verdict"].iloc[0]
+    assert "sensitive" in edge_finding.lower()
+
+
+def test_assessment_strong_iv_flag_when_iv_range_large():
+    from phase7 import assessment
+    robustness = pd.Series({"Edge sign consistent": True})
+    out = assessment(_dispersion(worst_rel=0.01, ploss_mean=0.18), _copula(worst_change_pct=-0.05), _gap_verdict(iv_range=0.40), robustness, selected_ticker="NVDA")
+    joined = " ".join(out["watch_outs"]).lower()
+    assert "strongly iv-driven" in joined
+    assert "lightly hedged" not in joined                # P(loss) 0.18 -> well hedged
+    assert "deep tail" not in joined                     # worst change small

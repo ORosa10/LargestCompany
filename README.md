@@ -188,6 +188,11 @@ measures exactly the numbers the rest of the app produces.
    variants and shock models. An edge that keeps its sign across the grid is
    tradeable; one that flips is model-dependent.
 
+A **Summary** tab runs all four tests together and turns them into a plain-language
+verdict on whether the edge is a real signal, plus an explicit list of watch-outs
+(noisy worst case, unbounded deep tail, IV dependence, model dependence, or a
+lightly hedged portfolio).
+
 Test 4 (out-of-sample optimizer validation) is intentionally omitted while the
 workflow uses a manual portfolio rather than an automatic optimizer.
 

@@ -433,3 +433,131 @@ def robustness_summary(grid: pd.DataFrame) -> pd.Series:
             "Models": int(len(grid)),
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Plain-language synthesis of the four tests
+# ---------------------------------------------------------------------------
+def _dispersion_row(dispersion: pd.DataFrame, metric: str):
+    match = dispersion.loc[dispersion["Metric"] == metric]
+    return match.iloc[0] if not match.empty else None
+
+
+def _comparison_change(copula: "CopulaStressResult", metric: str) -> float:
+    comp = copula.comparison.set_index("Metric")
+    if metric in comp.index:
+        return float(comp.loc[metric, "Change %"])
+    return float("nan")
+
+
+def assessment(
+    dispersion: pd.DataFrame,
+    copula: "CopulaStressResult",
+    gap_verdict: pd.DataFrame,
+    robustness: pd.Series,
+    *,
+    selected_ticker: str,
+    converge_tolerance: float = 0.02,
+    worst_noise_tolerance: float = 0.05,
+    edge_robust_tolerance: float = 0.05,
+    tail_blowup_tolerance: float = 0.5,
+    hedge_ploss_tolerance: float = 0.40,
+    iv_dominance_tolerance: float = 0.10,
+) -> dict:
+    """Synthesize the four Phase 7 tests into a verdict, findings, and watch-outs.
+
+    Pure function over the already-computed test outputs, so the page just
+    renders what it returns.
+    """
+
+    findings: list[dict] = []
+    watch_outs: list[str] = []
+
+    edge_row = _dispersion_row(dispersion, "Edge selected")
+    worst_row = _dispersion_row(dispersion, "Worst payoff")
+    ploss_row = _dispersion_row(dispersion, "Probability of loss")
+
+    # Test 1 - convergence
+    converged = edge_row is not None and float(edge_row["Relative dispersion"]) < converge_tolerance
+    findings.append(
+        {
+            "Area": "1. Monte Carlo error",
+            "Verdict": "Central metrics are converged; trust them."
+            if converged
+            else "Central metrics are NOT converged - raise the simulation count.",
+        }
+    )
+    if worst_row is not None and float(worst_row["Relative dispersion"]) > worst_noise_tolerance:
+        watch_outs.append(
+            f"Worst-case payoff is noisy (+/- {float(worst_row['MC error (std)']):.1f}, "
+            f"{float(worst_row['Relative dispersion']):.0%} relative). Size against Expected shortfall / P1, "
+            "or raise simulations for a firm worst case."
+        )
+
+    # Test 2 - tail dependence
+    edge_change = _comparison_change(copula, "Edge selected")
+    worst_change = _comparison_change(copula, "Worst payoff")
+    edge_robust = np.isfinite(edge_change) and abs(edge_change) < edge_robust_tolerance
+    findings.append(
+        {
+            "Area": "2. Tail dependence",
+            "Verdict": f"Edge is robust to joint crashes (change {edge_change:+.1%})."
+            if edge_robust
+            else f"Edge is sensitive to tail dependence (change {edge_change:+.1%}).",
+        }
+    )
+    if np.isfinite(worst_change) and worst_change < -tail_blowup_tolerance:
+        watch_outs.append(
+            f"Deep tail is not bounded: worst-case worsens {worst_change:+.0%} under the Student-t copula. "
+            "Short optionality is exposed to joint moves - verify on the fully hedged structure."
+        )
+
+    # Test 3 - gap vs randomness
+    verdict_text = str(gap_verdict["Verdict"].iloc[0]) if not gap_verdict.empty else "n/a"
+    iv_range = float(gap_verdict.loc[gap_verdict["Lever"] == "IV scaling", "P(#1) range"].iloc[0]) if not gap_verdict.empty else float("nan")
+    gap_range = float(gap_verdict.loc[gap_verdict["Lever"] == "Gap scaling", "P(#1) range"].iloc[0]) if not gap_verdict.empty else float("nan")
+    findings.append(
+        {
+            "Area": "3. Gap vs randomness",
+            "Verdict": f"{verdict_text} (IV range {iv_range:.3f} vs gap range {gap_range:.3f}).",
+        }
+    )
+    if verdict_text.startswith("randomness") and np.isfinite(iv_range) and iv_range > iv_dominance_tolerance:
+        watch_outs.append(
+            "Outcome is strongly IV-driven; the edge leans on the implied-volatility assumption. "
+            "Get IV right before sizing up."
+        )
+
+    # Test 5 - model robustness
+    sign_consistent = bool(robustness.get("Edge sign consistent", False))
+    findings.append(
+        {
+            "Area": "5. Model robustness",
+            "Verdict": "Edge keeps its sign across every model - tradeable."
+            if sign_consistent
+            else "Edge flips sign across models - model-dependent, caution.",
+        }
+    )
+    if not sign_consistent:
+        watch_outs.append("Edge changes sign somewhere in the model grid: not robust to the model choice.")
+
+    # Portfolio hedge quality
+    if ploss_row is not None and float(ploss_row["Mean"]) > hedge_ploss_tolerance:
+        watch_outs.append(
+            f"This saved portfolio is lightly hedged (probability of loss {float(ploss_row['Mean']):.0%}); "
+            "the option legs are barely active. Re-run on the fully hedged Phase 5/6 structure before "
+            "trusting the tail metrics."
+        )
+
+    if converged and edge_robust and sign_consistent:
+        headline = (
+            f"Edge on {selected_ticker} is robust: it is converged, survives joint tail dependence, and holds "
+            "its sign across every plausible model. This looks like a real signal, not an artifact of assumptions."
+        )
+    else:
+        headline = f"Edge on {selected_ticker} is not fully robust - see the watch-outs below before trading."
+
+    if not watch_outs:
+        watch_outs.append("No material risk flags on these scenarios.")
+
+    return {"headline": headline, "findings": pd.DataFrame(findings), "watch_outs": watch_outs}
