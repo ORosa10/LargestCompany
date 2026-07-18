@@ -5,4 +5,4 @@ headless = true
 gatherUsageStats = false
 
 [theme]
-base = "dark"
+base = "light"
