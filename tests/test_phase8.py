@@ -8,9 +8,11 @@ from phase8 import (
     budget_scaling,
     breakeven_bands,
     capital_metrics,
+    capital_return_table,
     kelly_sizing,
     return_distribution,
     risk_metrics,
+    value_at_risk,
 )
 
 
@@ -72,7 +74,7 @@ def test_risk_metrics_definitions():
 def test_return_distribution_is_monotone():
     result = _result()
     dist = return_distribution(result, _portfolio())
-    assert list(dist.columns) == ["Percentile", "Profit", "Return on capital-at-risk"]
+    assert {"Percentile", "Profit", "Return on capital-at-risk"}.issubset(dist.columns)
     profits = dist["Profit"].to_numpy()
     assert np.all(np.diff(profits) >= -1e-6)
 
@@ -120,3 +122,37 @@ def test_breakeven_bands_structure():
     bands = breakeven_bands(result, _portfolio())
     for column in ["Breakeven selected ratio", "Breakeven stock price", "Direction"]:
         assert column in bands.columns
+
+
+def test_value_at_risk_is_monotone_in_confidence():
+    result = _result()
+    var5 = value_at_risk(result, _portfolio(), 0.05)
+    var1 = value_at_risk(result, _portfolio(), 0.01)
+    assert var1 >= var5 >= 0.0  # the 99% loss is at least as bad as the 95% loss
+
+
+def test_capital_return_table_structure_and_ordering():
+    result = _result()
+    table = capital_return_table(result, _portfolio())
+    assert list(table["Capital basis"]) == [
+        "Initial cash outlay",
+        "VaR 5% (95% worst loss)",
+        "VaR 1% (99% worst loss)",
+        "Expected shortfall 5% (CVaR)",
+        "Max loss (worst case)",
+    ]
+    lookup = table.set_index("Capital basis")
+    var5_cap = float(lookup.loc["VaR 5% (95% worst loss)", "Capital needed ($)"])
+    var1_cap = float(lookup.loc["VaR 1% (99% worst loss)", "Capital needed ($)"])
+    max_cap = float(lookup.loc["Max loss (worst case)", "Capital needed ($)"])
+    assert var5_cap <= var1_cap <= max_cap + 1e-9
+    # more conservative capital => lower return on capital
+    var5_roc = float(lookup.loc["VaR 5% (95% worst loss)", "Return on capital"])
+    max_roc = float(lookup.loc["Max loss (worst case)", "Return on capital"])
+    assert var5_roc >= max_roc - 1e-9
+
+
+def test_return_distribution_reports_both_return_columns():
+    result = _result()
+    dist = return_distribution(result, _portfolio())
+    assert list(dist.columns) == ["Percentile", "Profit", "Return on initial cash", "Return on capital-at-risk"]

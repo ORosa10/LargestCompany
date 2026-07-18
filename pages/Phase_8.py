@@ -21,9 +21,11 @@ from phase8 import (
     breakeven_bands,
     budget_scaling,
     capital_metrics,
+    capital_return_table,
     kelly_sizing,
     return_distribution,
     risk_metrics,
+    value_at_risk,
 )
 from simulation_store import load_phase_artifact, load_simulation_snapshot
 
@@ -91,18 +93,31 @@ capital_tab, roc_tab, profit_tab, sizing_tab, methodology = st.tabs(
 )
 
 with capital_tab:
-    st.subheader("Capital deployed and maximum loss")
+    st.subheader("Capital needed and risk-based losses")
+    var5 = value_at_risk(result, portfolio, 0.05)
+    var1 = value_at_risk(result, portfolio, 0.01)
     cols = st.columns(4)
     cols[0].metric("Net cash outlay", dollars(metrics["Net cash outlay"]))
-    cols[1].metric("Gross premium paid", dollars(metrics["Gross premium paid"]))
-    cols[2].metric("Max loss (capital at risk)", dollars(metrics["Max loss (capital at risk)"]))
-    cols[3].metric("Best case profit", dollars(metrics["Best case profit"]))
+    cols[1].metric("VaR 5% (95% worst loss)", dollars(var5))
+    cols[2].metric("VaR 1% (99% worst loss)", dollars(var1))
+    cols[3].metric("Max loss (worst case)", dollars(metrics["Max loss (capital at risk)"]))
     st.caption(
-        "Polymarket shares are fully collateralized (cost = shares x entry). Long "
-        "option legs are a debit, short legs a credit. Max loss is the worst "
-        "simulated net outcome, bounded by the spread construction."
+        "Capital you must reserve depends on how conservative you are: the cash you "
+        "actually pay, the VaR at 95%/99% (the loss you would not exceed at that "
+        "confidence), or the absolute worst simulated loss. Polymarket shares are "
+        "fully collateralized; long option legs are a debit, short legs a credit."
     )
-    st.dataframe(capital.rename("Amount ($)").reset_index().rename(columns={"index": "Component"}), width="stretch", hide_index=True)
+
+    st.subheader("Return on capital by capital basis")
+    st.caption("Expected profit divided by each capital-at-risk definition, from least to most conservative.")
+    cap_table = capital_return_table(result, portfolio)
+    cap_display = cap_table.copy()
+    cap_display["Capital needed ($)"] = cap_display["Capital needed ($)"].map(lambda v: dollars(v))
+    cap_display["Return on capital"] = cap_display["Return on capital"].map(lambda v: pct(v))
+    st.dataframe(cap_display, width="stretch", hide_index=True)
+
+    with st.expander("Capital components"):
+        st.dataframe(capital.rename("Amount ($)").reset_index().rename(columns={"index": "Component"}), width="stretch", hide_index=True)
 
 with roc_tab:
     st.subheader("Return on capital")

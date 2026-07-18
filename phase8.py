@@ -131,17 +131,64 @@ def risk_metrics(
     )
 
 
+def value_at_risk(result, portfolio: PortfolioSpec, probability: float = 0.05) -> float:
+    """Value at Risk: the loss (positive number) at the given tail probability."""
+
+    payoff = portfolio_scenarios(result, portfolio)["Total payoff"].astype(float)
+    loss = -float(payoff.quantile(probability))
+    return loss if np.isfinite(loss) else np.nan
+
+
+def capital_return_table(result, portfolio: PortfolioSpec) -> pd.DataFrame:
+    """Return on capital under several capital-at-risk definitions.
+
+    The capital you must reserve depends on how conservative you are: the cash
+    you actually pay, the VaR at 95%/99% (the loss you would not exceed at that
+    confidence), the expected shortfall (mean of the worst 5%), or the absolute
+    worst simulated loss. Return on capital = expected profit / that capital.
+    """
+
+    scenario = portfolio_scenarios(result, portfolio)
+    payoff = scenario["Total payoff"].astype(float)
+    expected = float(payoff.mean())
+    max_loss = max(-float(payoff.min()), 0.0)
+    cash = float(capital_metrics(portfolio)["Net cash outlay"])
+    cash = cash if cash > 0 else max_loss
+
+    def _var(probability: float) -> float:
+        loss = -float(payoff.quantile(probability))
+        return loss if loss > 0 else np.nan
+
+    tail = payoff[payoff <= payoff.quantile(0.05)]
+    expected_shortfall = -float(tail.mean()) if not tail.empty else np.nan
+
+    bases = [
+        ("Initial cash outlay", cash),
+        ("VaR 5% (95% worst loss)", _var(0.05)),
+        ("VaR 1% (99% worst loss)", _var(0.01)),
+        ("Expected shortfall 5% (CVaR)", expected_shortfall),
+        ("Max loss (worst case)", max_loss),
+    ]
+    rows = []
+    for name, amount in bases:
+        roc = expected / amount if (np.isfinite(amount) and amount > 0) else np.nan
+        rows.append({"Capital basis": name, "Capital needed ($)": amount, "Return on capital": roc})
+    return pd.DataFrame(rows)
+
+
 def return_distribution(
     result,
     portfolio: PortfolioSpec,
     *,
     quantiles=(0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99),
 ) -> pd.DataFrame:
-    """Percentiles of profit and of return-on-capital-at-risk."""
+    """Percentiles of profit, and return vs both max loss and initial cash."""
 
     scenario = portfolio_scenarios(result, portfolio)
     payoff = scenario["Total payoff"].astype(float)
     max_loss = max(-float(payoff.min()), 0.0)
+    cash = float(capital_metrics(portfolio)["Net cash outlay"])
+    cash = cash if cash > 0 else max_loss
     rows = []
     for q in quantiles:
         profit = float(payoff.quantile(q))
@@ -149,6 +196,7 @@ def return_distribution(
             {
                 "Percentile": f"P{int(round(q * 100))}",
                 "Profit": profit,
+                "Return on initial cash": (profit / cash) if cash > 0 else np.nan,
                 "Return on capital-at-risk": (profit / max_loss) if max_loss > 0 else np.nan,
             }
         )
