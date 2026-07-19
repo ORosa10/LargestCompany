@@ -343,6 +343,15 @@ tests/test_phase8.py            Phase 8 risk-management and sizing tests
 requirements.txt                Python dependencies
 ```
 
+## Saving Your Work Across Sessions
+
+The app stores each phase's artifacts on local disk (`~/.largestcompany`). In a
+fresh checkout - for example a brand-new Codespace - that disk starts empty. The
+**Session** page commits the current session into the repo (`saved_state/`), and
+a new checkout restores it automatically the first time a page loads. Local disk
+always takes precedence over the saved copy, so in-session work is never
+overwritten by an older save.
+
 ## Phase Roadmap
 
 Phase 1: probability engine.
