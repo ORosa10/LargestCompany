@@ -1,0 +1,15 @@
+{
+  "name": "LargestCompany (Streamlit)",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "forwardPorts": [8501],
+  "portsAttributes": {
+    "8501": {
+      "label": "LargestCompany app",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt",
+  "postAttachCommand": {
+    "start-app": "pkill -f 'streamlit run' 2>/dev/null; nohup streamlit run app.py --server.port 8501 --server.address 0.0.0.0 > /tmp/streamlit.log 2>&1 &"
+  }
+}
