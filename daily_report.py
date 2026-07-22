@@ -66,7 +66,9 @@ def fetch_market_data(tickers, fallback_caps, fallback_spots):
     try:
         from market_data import fetch_spot_prices
         spot_df = fetch_spot_prices(list(tickers))
-        spot_col = "spot" if "spot" in spot_df.columns else spot_df.columns[1]
+        spot_col = next((c for c in ["spot_price", "spot"] if c in spot_df.columns), None)
+        if spot_col is None:
+            raise KeyError("no spot column in fetch_spot_prices output")
         spots = {str(r["ticker"]): float(r[spot_col]) for _, r in spot_df.iterrows()}
         notes.append("spots: Yahoo live")
     except Exception as exc:  # noqa: BLE001
