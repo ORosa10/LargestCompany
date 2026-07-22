@@ -43,8 +43,22 @@ def test_run_produces_report_with_all_sections(monkeypatch):
 
 
 def test_build_legs_uses_contract_sizing():
-    legs = daily_report.build_legs("NVDA", 194.42, 0.39, 10 / 365.0, 0.04)
+    legs = daily_report.build_legs("NVDA", 194.42, 0.39, 10 / 365.0, 0.04, put_weight=2, call_weight=3)
     assert len(legs) == 4
-    # share-equivalent weight 2 or 3 divided by spot -> tiny contract quantity
+    # share-equivalent weight divided by spot -> tiny contract quantity
     assert (legs["Quantity"] < 1.0).all()
     assert set(legs["Position"]) == {"Long", "Short"}
+
+
+def test_weight_variants_are_the_four_requested():
+    assert set(daily_report.WEIGHT_VARIANTS) == {(1, 3), (2, 3), (1, 4), (2, 4)}
+
+
+def test_report_includes_structure_selection(monkeypatch):
+    def fake_fetch(tickers, fallback_caps, fallback_spots):
+        return dict(fallback_caps), dict(fallback_spots), "test fallback"
+    monkeypatch.setattr(daily_report, "fetch_market_data", fake_fetch)
+    report = daily_report.run(_inputs())
+    assert "## Structure selection" in report
+    for label in ["1/1/3/3", "2/2/3/3", "1/1/4/4", "2/2/4/4"]:
+        assert label in report

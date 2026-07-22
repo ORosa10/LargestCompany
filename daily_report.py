@@ -32,13 +32,17 @@ REPO = Path(__file__).resolve().parent
 INPUTS_PATH = REPO / "daily_inputs.json"
 REPORTS_DIR = REPO / "reports"
 
-# Fixed hedge: normalized strikes (spot=100) and share-equivalent weights.
-HEDGE_LEGS = [
-    {"Option type": "Put", "Position": "Long", "ratio": 0.80, "weight": 2.0},
-    {"Option type": "Put", "Position": "Short", "ratio": 1.00, "weight": 2.0},
-    {"Option type": "Call", "Position": "Long", "ratio": 0.90, "weight": 3.0},
-    {"Option type": "Call", "Position": "Short", "ratio": 1.05, "weight": 3.0},
+# Hedge template: normalized strikes (spot=100). Put legs share one weight, call
+# legs share another. The daily run sweeps weight variants and picks the best.
+HEDGE_TEMPLATE = [
+    {"Option type": "Put", "Position": "Long", "ratio": 0.80, "kind": "put"},
+    {"Option type": "Put", "Position": "Short", "ratio": 1.00, "kind": "put"},
+    {"Option type": "Call", "Position": "Long", "ratio": 0.90, "kind": "call"},
+    {"Option type": "Call", "Position": "Short", "ratio": 1.05, "kind": "call"},
 ]
+
+# (put_weight, call_weight) variants to compare each run.
+WEIGHT_VARIANTS = [(1, 3), (2, 3), (1, 4), (2, 4)]
 
 
 def _bs_premium(spot, strike, years, iv, rate, kind):
@@ -80,12 +84,13 @@ def fetch_market_data(tickers, fallback_caps, fallback_spots):
     return caps, spots, "; ".join(notes)
 
 
-def build_legs(ticker, spot, iv, years, rate):
+def build_legs(ticker, spot, iv, years, rate, put_weight, call_weight):
     rows = []
-    for leg in HEDGE_LEGS:
+    for leg in HEDGE_TEMPLATE:
+        weight = put_weight if leg["kind"] == "put" else call_weight
         strike = round(spot * leg["ratio"], 2)
         # Phase 5/6 sizing: share-equivalent weight -> listed contracts = weight / spot.
-        quantity = leg["weight"] / spot
+        quantity = weight / spot
         rows.append({
             "Instrument": f"{leg['Position']} {ticker} {leg['Option type']} {strike:.2f}",
             "Ticker": ticker, "Option type": leg["Option type"], "Position": leg["Position"],
@@ -93,6 +98,32 @@ def build_legs(ticker, spot, iv, years, rate):
             "Theoretical premium": _bs_premium(spot, strike, years, iv, rate, leg["Option type"]),
         })
     return pd.DataFrame(rows)
+
+
+def _make_portfolio(traded, spot, iv, years, rate, caps_series, inputs, put_weight, call_weight):
+    legs = build_legs(traded, spot, iv, years, rate, put_weight, call_weight)
+    return p7.PortfolioSpec(
+        option_legs=legs, current_market_caps=caps_series, spot_prices=pd.Series({traded: spot}),
+        selected_ticker=traded, polymarket_side=inputs["side"],
+        polymarket_entry_price=float(inputs["entry"]), polymarket_quantity=float(inputs.get("shares", 100.0)),
+        contract_multiplier=100.0, include_option_premiums=True,
+    )
+
+
+def _variant_stats(result, portfolio):
+    import numpy as np
+    pay = p7.portfolio_scenarios(result, portfolio)["Total payoff"].astype(float)
+    expected = float(pay.mean())
+    max_loss = max(-float(pay.min()), 0.0)
+    sd = float(pay.std(ddof=0))
+    return {
+        "expected": expected,
+        "max_loss": max_loss,
+        "sd": sd,
+        "p_loss": float((pay < 0).mean()),
+        "rocar": (expected / max_loss) if max_loss > 0 else float("nan"),
+        "ev_sd": (expected / sd) if sd > 0 else float("nan"),
+    }
 
 
 def run(inputs: dict) -> str:
@@ -128,15 +159,25 @@ def run(inputs: dict) -> str:
     )
     probs = result.results.set_index("Ticker")
     iv_atm = float(surf_inputs.set_index("Ticker").loc[traded, "Implied volatility"])
-
-    legs = build_legs(traded, spot, iv_atm, years, rate)
     caps_series = universe.set_index("Ticker")["Current market cap"].astype(float)
-    portfolio = p7.PortfolioSpec(
-        option_legs=legs, current_market_caps=caps_series, spot_prices=pd.Series({traded: spot}),
-        selected_ticker=traded, polymarket_side=inputs["side"],
-        polymarket_entry_price=float(inputs["entry"]), polymarket_quantity=float(inputs.get("shares", 100.0)),
-        contract_multiplier=100.0, include_option_premiums=True,
-    )
+
+    # Sweep weight variants (put/put/call/call) and pick the best by RoCaR.
+    variants_out = []
+    for pw, cw in WEIGHT_VARIANTS:
+        pf = _make_portfolio(traded, spot, iv_atm, years, rate, caps_series, inputs, pw, cw)
+        stt = _variant_stats(result, pf)
+        variants_out.append({"label": f"{pw}/{pw}/{cw}/{cw}", "portfolio": pf, **stt})
+    # RoCaR/EV-SD only rank sensibly when the base bet is +EV. Among +EV variants
+    # pick the highest RoCaR; if none are +EV, the trade is unfavorable regardless
+    # of structure, so just report the least-loss one.
+    positive = [v for v in variants_out if v["expected"] > 0]
+    if positive:
+        best = max(positive, key=lambda v: (v["rocar"] if v["rocar"] == v["rocar"] else float("-inf")))
+        select_note = "best by RoCaR among profitable variants"
+    else:
+        best = max(variants_out, key=lambda v: v["expected"])
+        select_note = "all variants are -EV (structure cannot fix a losing base bet); showing least-loss"
+    portfolio = best["portfolio"]
 
     seeds = list(range(seed, seed + 5))
     disp = p7.dispersion_summary(p7.multi_seed_dispersion(surf_inputs, corr, portfolio, days_to_target=days, simulations=sims, seeds=seeds))
@@ -169,7 +210,7 @@ def run(inputs: dict) -> str:
     L = []
     L.append(f"# LargestCompany daily report - {as_of.isoformat()}")
     L.append("")
-    L.append(f"Target {target.isoformat()} ({days} days) | traded {traded} {side} @ {portfolio.polymarket_entry_price:.2f} | {sims:,} sims")
+    L.append(f"Target {target.isoformat()} ({days} days) | traded {traded} {side} @ {portfolio.polymarket_entry_price:.2f} | best structure {best['label']} | {sims:,} sims")
     L.append(f"Data: {data_source}")
     L.append("")
     L.append(f"## Verdict: {verdict}")
@@ -188,6 +229,12 @@ def run(inputs: dict) -> str:
     L.append(f"- Return on capital-at-risk: {rocar:.1%}")
     L.append(f"- Loss ladder: VaR5% ${var5:,.2f} | VaR1% ${var1:,.2f} | worst ${max_loss:,.2f}")
     L.append(f"- P(profit) {float(rm['Probability of profit']):.1%} | P(loss) {float(rm['Probability of loss']):.1%}")
+    L.append("")
+    L.append("## Structure selection (put/put/call/call weights)")
+    L.append(f"Selection: {select_note}. Note: option legs are ~fairly priced, so weights reshape risk more than they move edge.")
+    for v in variants_out:
+        mark = " <- best" if v is best else ""
+        L.append(f"- {v['label']}: RoCaR {v['rocar']:+.1%} | EV/SD {v['ev_sd']:+.2f} | expected ${v['expected']:,.2f} | max loss ${v['max_loss']:,.2f} | P(loss) {v['p_loss']:.0%}{mark}")
     L.append("")
     L.append("## Sensitivity")
     for _, row in assessment["findings"].iterrows():
