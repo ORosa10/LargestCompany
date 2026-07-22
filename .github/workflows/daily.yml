@@ -5,6 +5,9 @@ on:
     # 08:00 UTC ~= 10:00 Europe/Prague (CEST). Shifts by 1h under winter time.
     - cron: "0 8 * * *"
   workflow_dispatch: {}
+  push:
+    paths:
+      - "daily_inputs.json"
 
 permissions:
   contents: write
