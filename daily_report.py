@@ -1,12 +1,20 @@
 """Headless daily pipeline: fetch data, run Phases 1-8, write a verdict report.
 
-Designed to run in GitHub Actions (which has open internet, so it fetches market
-caps and spot prices from Yahoo just like Phase 0). Polymarket prices and the
-traded structure come from ``daily_inputs.json`` (Polymarket cannot be fetched
-and is provided manually). If a live fetch fails, the values in
-``daily_inputs.json`` are used as a fallback so the run still completes.
+Runs in GitHub Actions (open internet -> live Yahoo data). Polymarket YES/NO
+prices come from daily_inputs.json (provided manually). The pipeline:
 
-No Streamlit. Writes ``reports/<date>.md`` and prints the report.
+1. Fetch market caps + spots (live). If missing and no manual value -> report says
+   data is unavailable and asks for it by hand (never fabricates from stale data).
+2. Run the IV-surface probability engine -> model P(ticker #1).
+3. Pick the Polymarket side automatically: the naked bet (YES vs NO) with the
+   higher expected value on the model. If YES wins, the option hedge is mirrored
+   around spot (Put<->Call, strike ratio -> 2 - ratio; spreads reverse and skew
+   lightly above spot).
+4. Sweep 4 weight variants and pick the best by an equal-weight composite of
+   EV/SD, return on capital-at-risk, return on ES5% capital, and P(win).
+5. Run the Phase 7 assessment and Phase 8 risk metrics on the winner.
+
+Writes reports/<date>.md and reports/latest.md.
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ from datetime import date
 from math import erf, exp, log, sqrt
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from iv_surface_model import (
@@ -32,17 +41,16 @@ REPO = Path(__file__).resolve().parent
 INPUTS_PATH = REPO / "daily_inputs.json"
 REPORTS_DIR = REPO / "reports"
 
-# Hedge template: normalized strikes (spot=100). Put legs share one weight, call
-# legs share another. The daily run sweeps weight variants and picks the best.
+# Hedge template for a NO bet: normalized strikes (spot=100). For a YES bet the
+# structure is mirrored around spot. Put legs share put_weight, calls call_weight.
 HEDGE_TEMPLATE = [
     {"Option type": "Put", "Position": "Long", "ratio": 0.80, "kind": "put"},
     {"Option type": "Put", "Position": "Short", "ratio": 1.00, "kind": "put"},
     {"Option type": "Call", "Position": "Long", "ratio": 0.90, "kind": "call"},
     {"Option type": "Call", "Position": "Short", "ratio": 1.05, "kind": "call"},
 ]
-
-# (put_weight, call_weight) variants to compare each run.
-WEIGHT_VARIANTS = [(1, 3), (2, 3), (1, 4), (2, 4)]
+WEIGHT_VARIANTS = [(1, 3), (2, 3), (1, 4), (2, 4)]  # (put_weight, call_weight)
+RATING_METRICS = ["ev_sd", "rocar", "roc_es5", "p_win"]  # equal weight, higher = better
 
 
 def _bs_premium(spot, strike, years, iv, rate, kind):
@@ -56,89 +64,111 @@ def _bs_premium(spot, strike, years, iv, rate, kind):
     return float(strike * exp(-rate * years) * ncdf(-d2) - spot * ncdf(-d1))
 
 
+def build_legs(ticker, spot, iv, years, rate, put_weight, call_weight, side="NO"):
+    """Build the 4 option legs. For a YES bet the structure is mirrored around
+    spot: Put<->Call and strike ratio -> 2 - ratio (weights follow the template
+    slot so the payoff is a true reflection)."""
+    rows = []
+    for leg in HEDGE_TEMPLATE:
+        weight = put_weight if leg["kind"] == "put" else call_weight
+        otype, ratio = leg["Option type"], leg["ratio"]
+        if str(side).upper() == "YES":
+            otype = "Call" if otype == "Put" else "Put"
+            ratio = 2.0 - ratio
+        strike = round(spot * ratio, 2)
+        quantity = weight / spot  # Phase 5/6 share-equivalent -> contracts
+        rows.append({
+            "Instrument": f"{leg['Position']} {ticker} {otype} {strike:.2f}",
+            "Ticker": ticker, "Option type": otype, "Position": leg["Position"],
+            "Quantity": quantity, "Strike": strike, "Spot": spot,
+            "Theoretical premium": _bs_premium(spot, strike, years, iv, rate, otype),
+        })
+    return pd.DataFrame(rows)
+
+
+def _make_portfolio(traded, spot, iv, years, rate, caps_series, side, entry, shares, put_weight, call_weight):
+    legs = build_legs(traded, spot, iv, years, rate, put_weight, call_weight, side)
+    return p7.PortfolioSpec(
+        option_legs=legs, current_market_caps=caps_series, spot_prices=pd.Series({traded: spot}),
+        selected_ticker=traded, polymarket_side=side, polymarket_entry_price=float(entry),
+        polymarket_quantity=float(shares), contract_multiplier=100.0, include_option_premiums=True,
+    )
+
+
+def _variant_stats(result, portfolio):
+    pay = p7.portfolio_scenarios(result, portfolio)["Total payoff"].astype(float)
+    expected = float(pay.mean())
+    max_loss = max(-float(pay.min()), 0.0)
+    sd = float(pay.std(ddof=0))
+    threshold = float(pay.quantile(0.05))
+    tail = pay[pay <= threshold]
+    es5 = -float(tail.mean()) if not tail.empty else np.nan  # positive loss magnitude
+    return {
+        "expected": expected, "max_loss": max_loss, "sd": sd,
+        "p_loss": float((pay < 0).mean()), "p_win": float((pay > 0).mean()),
+        "es5": es5,
+        "rocar": (expected / max_loss) if max_loss > 0 else np.nan,
+        "ev_sd": (expected / sd) if sd > 0 else np.nan,
+        "roc_es5": (expected / es5) if (np.isfinite(es5) and es5 > 0) else np.nan,
+    }
+
+
+def rate_variants(variants):
+    """Equal-weight composite score in [0,1] over the rating metrics (higher
+    better), min-max normalized across the variants."""
+    for metric in RATING_METRICS:
+        vals = np.array([v[metric] if np.isfinite(v[metric]) else np.nan for v in variants], dtype=float)
+        finite = vals[np.isfinite(vals)]
+        lo, hi = (finite.min(), finite.max()) if finite.size else (0.0, 0.0)
+        for v in variants:
+            x = v[metric]
+            if not np.isfinite(x):
+                v[f"n_{metric}"] = 0.0
+            elif hi > lo:
+                v[f"n_{metric}"] = (x - lo) / (hi - lo)
+            else:
+                v[f"n_{metric}"] = 0.5
+    for v in variants:
+        v["score"] = float(np.mean([v[f"n_{m}"] for m in RATING_METRICS]))
+    return max(variants, key=lambda v: v["score"])
+
+
 def fetch_market_data(tickers, manual_caps, manual_spots):
-    """Return (caps, spots, source, missing). Try Yahoo live; only use manual
-    values explicitly supplied for the day. Never uses stale defaults - any
-    ticker without a live or manual value is reported as missing so the report
-    can tell the user to provide it by hand.
-    """
-    caps, spots, notes, missing = {}, {}, [], []
-    live_caps = {}
+    """(caps, spots, source, missing). Live Yahoo; only explicit manual values
+    otherwise; never stale defaults. Missing tickers are reported."""
+    notes, missing = [], []
+    live_caps, live_spots = {}, {}
     try:
         from market_data import fetch_market_caps
-        cap_df = fetch_market_caps(list(tickers))
-        live_caps = {str(r["ticker"]): float(r["market_cap"]) for _, r in cap_df.iterrows()}
+        df = fetch_market_caps(list(tickers))
+        live_caps = {str(r["ticker"]): float(r["market_cap"]) for _, r in df.iterrows()}
     except Exception as exc:  # noqa: BLE001
         notes.append(f"caps fetch failed ({type(exc).__name__})")
-    live_spots = {}
     try:
         from market_data import fetch_spot_prices
-        spot_df = fetch_spot_prices(list(tickers))
-        spot_col = next((c for c in ["spot_price", "spot"] if c in spot_df.columns), None)
-        if spot_col is None:
+        df = fetch_spot_prices(list(tickers))
+        col = next((c for c in ["spot_price", "spot"] if c in df.columns), None)
+        if col is None:
             raise KeyError("no spot column")
-        live_spots = {str(r["ticker"]): float(r[spot_col]) for _, r in spot_df.iterrows()}
+        live_spots = {str(r["ticker"]): float(r[col]) for _, r in df.iterrows()}
     except Exception as exc:  # noqa: BLE001
         notes.append(f"spots fetch failed ({type(exc).__name__})")
-
+    caps, spots = {}, {}
     for t in tickers:
-        if t in live_caps and live_caps[t] > 0:
+        if live_caps.get(t, 0) > 0:
             caps[t] = live_caps[t]
         elif t in (manual_caps or {}):
             caps[t] = float(manual_caps[t])
         else:
             missing.append(f"{t} market cap")
-        if t in live_spots and live_spots[t] > 0:
+        if live_spots.get(t, 0) > 0:
             spots[t] = live_spots[t]
         elif t in (manual_spots or {}):
             spots[t] = float(manual_spots[t])
         else:
             missing.append(f"{t} spot")
-
-    src = "Yahoo live" if not notes else ("; ".join(notes) + "; used manual where provided")
-    return caps, spots, src, missing
-
-
-def build_legs(ticker, spot, iv, years, rate, put_weight, call_weight):
-    rows = []
-    for leg in HEDGE_TEMPLATE:
-        weight = put_weight if leg["kind"] == "put" else call_weight
-        strike = round(spot * leg["ratio"], 2)
-        # Phase 5/6 sizing: share-equivalent weight -> listed contracts = weight / spot.
-        quantity = weight / spot
-        rows.append({
-            "Instrument": f"{leg['Position']} {ticker} {leg['Option type']} {strike:.2f}",
-            "Ticker": ticker, "Option type": leg["Option type"], "Position": leg["Position"],
-            "Quantity": quantity, "Strike": strike, "Spot": spot,
-            "Theoretical premium": _bs_premium(spot, strike, years, iv, rate, leg["Option type"]),
-        })
-    return pd.DataFrame(rows)
-
-
-def _make_portfolio(traded, spot, iv, years, rate, caps_series, inputs, put_weight, call_weight):
-    legs = build_legs(traded, spot, iv, years, rate, put_weight, call_weight)
-    return p7.PortfolioSpec(
-        option_legs=legs, current_market_caps=caps_series, spot_prices=pd.Series({traded: spot}),
-        selected_ticker=traded, polymarket_side=inputs["side"],
-        polymarket_entry_price=float(inputs["entry"]), polymarket_quantity=float(inputs.get("shares", 100.0)),
-        contract_multiplier=100.0, include_option_premiums=True,
-    )
-
-
-def _variant_stats(result, portfolio):
-    import numpy as np
-    pay = p7.portfolio_scenarios(result, portfolio)["Total payoff"].astype(float)
-    expected = float(pay.mean())
-    max_loss = max(-float(pay.min()), 0.0)
-    sd = float(pay.std(ddof=0))
-    return {
-        "expected": expected,
-        "max_loss": max_loss,
-        "sd": sd,
-        "p_loss": float((pay < 0).mean()),
-        "rocar": (expected / max_loss) if max_loss > 0 else float("nan"),
-        "ev_sd": (expected / sd) if sd > 0 else float("nan"),
-    }
+    source = "Yahoo live" if not notes else "; ".join(notes) + "; manual where provided"
+    return caps, spots, source, missing
 
 
 def run(inputs: dict) -> str:
@@ -149,35 +179,26 @@ def run(inputs: dict) -> str:
     rate = float(inputs.get("risk_free_rate", 0.04))
     sims = int(inputs.get("simulations", 40000))
     seed = int(inputs.get("seed", 42))
+    shares = float(inputs.get("shares", 100.0))
 
-    # Support both the new schema (polymarket_yes map) and the old (universe list).
-    if "polymarket_yes" in inputs:
-        yes_prices = dict(inputs["polymarket_yes"])
-    else:
-        yes_prices = {r["Ticker"]: r["Polymarket YES price"] for r in inputs.get("universe", [])}
+    yes_prices = dict(inputs.get("polymarket_yes") or {r["Ticker"]: r["Polymarket YES price"] for r in inputs.get("universe", [])})
+    no_prices = dict(inputs.get("polymarket_no") or {})
     tickers = list(yes_prices.keys())
-    manual_caps = inputs.get("manual_market_caps") or {}
-    manual_spots = inputs.get("manual_spots") or {}
-
-    caps, spots, data_source, missing = fetch_market_data(tickers, manual_caps, manual_spots)
+    caps, spots, data_source, missing = fetch_market_data(tickers, inputs.get("manual_market_caps") or {}, inputs.get("manual_spots") or {})
 
     if missing:
         return (
-            f"# LargestCompany daily report - {as_of.isoformat()}\n\n"
-            f"## Data unavailable\n"
-            f"Could not get live data from Yahoo and no manual values were provided for: "
-            f"{', '.join(missing)}.\n\n"
-            f"Fetch status: {data_source}.\n\n"
-            f"No numbers were produced (nothing stale is used). To run today, provide the missing "
-            f"values manually: edit `daily_inputs.json` -> `manual_market_caps` and/or `manual_spots` "
-            f"(e.g. {{\"NVDA\": 4300000000000}}), commit, and re-run the workflow - or send them to Claude."
+            f"# LargestCompany daily report - {as_of.isoformat()}\n\n## Data unavailable\n"
+            f"Could not get live data from Yahoo and no manual values were provided for: {', '.join(missing)}.\n\n"
+            f"Fetch status: {data_source}.\n\nNo numbers were produced (nothing stale is used). "
+            f"To run today, provide the missing values manually: edit `daily_inputs.json` -> `manual_market_caps` "
+            f"and/or `manual_spots`, commit, and re-run - or send them to Claude."
         )
 
     universe = pd.DataFrame([
         {"Ticker": t, "Current market cap": caps[t], "Implied volatility": 0.30, "Polymarket YES price": yes_prices[t]}
         for t in tickers
     ])
-    # traded name = the market favourite (highest YES) unless overridden
     traded = inputs.get("traded_ticker") or max(yes_prices, key=yes_prices.get)
     spot = spots[traded]
 
@@ -188,25 +209,24 @@ def run(inputs: dict) -> str:
         surface_nodes=default_surface_nodes(), risk_free_rate=rate,
     )
     probs = result.results.set_index("Ticker")
+    model_p = float(probs.loc[traded, "Model probability"])
     iv_atm = float(surf_inputs.set_index("Ticker").loc[traded, "Implied volatility"])
     caps_series = universe.set_index("Ticker")["Current market cap"].astype(float)
 
-    # Sweep weight variants (put/put/call/call) and pick the best by RoCaR.
-    variants_out = []
+    # --- Side selection: naked bet with higher expected value on the model ---
+    yes_price = float(yes_prices[traded])
+    no_price = float(no_prices.get(traded, round(1.0 - yes_price, 4)))
+    yes_ev = model_p - yes_price
+    no_ev = (1.0 - model_p) - no_price
+    side = str(inputs.get("force_side") or ("YES" if yes_ev >= no_ev else "NO")).upper()
+    entry = yes_price if side == "YES" else no_price
+
+    # --- Sweep weight variants, rate, pick winner ---
+    variants = []
     for pw, cw in WEIGHT_VARIANTS:
-        pf = _make_portfolio(traded, spot, iv_atm, years, rate, caps_series, inputs, pw, cw)
-        stt = _variant_stats(result, pf)
-        variants_out.append({"label": f"{pw}/{pw}/{cw}/{cw}", "portfolio": pf, **stt})
-    # RoCaR/EV-SD only rank sensibly when the base bet is +EV. Among +EV variants
-    # pick the highest RoCaR; if none are +EV, the trade is unfavorable regardless
-    # of structure, so just report the least-loss one.
-    positive = [v for v in variants_out if v["expected"] > 0]
-    if positive:
-        best = max(positive, key=lambda v: (v["rocar"] if v["rocar"] == v["rocar"] else float("-inf")))
-        select_note = "best by RoCaR among profitable variants"
-    else:
-        best = max(variants_out, key=lambda v: v["expected"])
-        select_note = "all variants are -EV (structure cannot fix a losing base bet); showing least-loss"
+        pf = _make_portfolio(traded, spot, iv_atm, years, rate, caps_series, side, entry, shares, pw, cw)
+        variants.append({"label": f"{pw}/{pw}/{cw}/{cw}", "portfolio": pf, **_variant_stats(result, pf)})
+    best = rate_variants(variants)
     portfolio = best["portfolio"]
 
     seeds = list(range(seed, seed + 5))
@@ -215,41 +235,34 @@ def run(inputs: dict) -> str:
     ivs = p7.iv_scaling_scan(surf_inputs, corr, selected_ticker=traded, days_to_target=days, simulations=sims, seed=seed, factors=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
     gps = p7.gap_scaling_scan(surf_inputs, corr, selected_ticker=traded, days_to_target=days, simulations=sims, seed=seed, factors=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
     gv = p7.gap_vs_randomness(ivs, gps)
-    variants = {"Saved": corr, "Independent": p7.constant_correlation(tickers, 0.0), "High 0.8": p7.constant_correlation(tickers, 0.8)}
-    grid = p7.model_robustness(surf_inputs, variants, selected_ticker=traded, days_to_target=days, simulations=sims, seed=seed, shock_models=["Normal shocks", "Student-t copula df=5"])
+    variants_corr = {"Saved": corr, "Independent": p7.constant_correlation(tickers, 0.0), "High 0.8": p7.constant_correlation(tickers, 0.8)}
+    grid = p7.model_robustness(surf_inputs, variants_corr, selected_ticker=traded, days_to_target=days, simulations=sims, seed=seed, shock_models=["Normal shocks", "Student-t copula df=5"])
     assessment = p7.assessment(disp, cop, gv, p7.robustness_summary(grid), selected_ticker=traded)
 
     rm = p8.risk_metrics(result, portfolio)
     var5 = p8.value_at_risk(result, portfolio, 0.05)
     var1 = p8.value_at_risk(result, portfolio, 0.01)
-
-    model_p = float(probs.loc[traded, "Model probability"])
-    yes_price = float(probs.loc[traded, "Polymarket YES price"])
     expected = float(rm["Expected profit"])
     max_loss = float(rm["Max loss (capital at risk)"])
     rocar = float(rm["Return on capital-at-risk"])
     estimate_robust = "robust" in assessment["headline"].lower() and "not fully" not in assessment["headline"].lower()
-
-    # Edge on the side actually traded: model fair probability for that side minus its price.
-    side = portfolio.polymarket_side.upper()
-    model_side_prob = (1.0 - model_p) if side == "NO" else model_p
-    side_edge = model_side_prob - float(portfolio.polymarket_entry_price)
-
     verdict = "FAVORABLE" if expected > 0 else ("BREAKEVEN" if abs(expected) < 1e-6 else "UNFAVORABLE")
+    model_side_prob = (1.0 - model_p) if side == "NO" else model_p
 
     L = []
     L.append(f"# LargestCompany daily report - {as_of.isoformat()}")
     L.append("")
-    L.append(f"Target {target.isoformat()} ({days} days) | traded {traded} {side} @ {portfolio.polymarket_entry_price:.2f} | best structure {best['label']} | {sims:,} sims")
+    L.append(f"Target {target.isoformat()} ({days} days) | traded {traded} | side {side} @ {entry:.2f} | best structure {best['label']} | {sims:,} sims")
     L.append(f"Data: {data_source}")
     L.append("")
     L.append(f"## Verdict: {verdict}")
     L.append(f"- Expected profit ${expected:,.2f} on ${max_loss:,.2f} capital at risk (RoCaR {rocar:.1%}).")
-    L.append(f"- Your {side} edge: model P({traded} {'NOT #1' if side=='NO' else '#1'}) {model_side_prob:.1%} vs {side} price {float(portfolio.polymarket_entry_price):.0%} -> {side_edge:+.1%}.")
-    L.append(f"- Probability estimate is {'robust' if estimate_robust else 'NOT fully robust'} across the Phase 7 tests (this is about the estimate's stability, not trade direction).")
+    L.append(f"- Side auto-picked {side}: naked YES EV {yes_ev:+.1%} vs naked NO EV {no_ev:+.1%}.")
+    L.append(f"- Your {side} edge: model P({traded} {'#1' if side=='YES' else 'NOT #1'}) {model_side_prob:.1%} vs {side} price {entry:.0%} -> {model_side_prob - entry:+.1%}.")
+    L.append(f"- Probability estimate is {'robust' if estimate_robust else 'NOT fully robust'} (stability of the estimate, not trade direction).")
     L.append("")
     L.append("## Probability & edge")
-    L.append(f"- Model P({traded} #1) {model_p:.1%} vs Polymarket YES {yes_price:.1%}. A {side} bet wins when {traded} does {'NOT ' if side=='NO' else ''}finish #1.")
+    L.append(f"- Model P({traded} #1) {model_p:.1%} vs Polymarket YES {yes_price:.1%}.")
     for t in tickers:
         L.append(f"  - {t}: model {float(probs.loc[t,'Model probability']):.1%} | market YES {float(probs.loc[t,'Polymarket YES price']):.1%}")
     L.append("")
@@ -258,13 +271,16 @@ def run(inputs: dict) -> str:
     L.append(f"- Capital at risk (max loss): ${max_loss:,.2f} | net cash ${float(rm['Net cash outlay']):,.2f}")
     L.append(f"- Return on capital-at-risk: {rocar:.1%}")
     L.append(f"- Loss ladder: VaR5% ${var5:,.2f} | VaR1% ${var1:,.2f} | worst ${max_loss:,.2f}")
-    L.append(f"- P(profit) {float(rm['Probability of profit']):.1%} | P(loss) {float(rm['Probability of loss']):.1%}")
+    L.append(f"- P(win) {float(rm['Probability of profit']):.1%} | P(loss) {float(rm['Probability of loss']):.1%}")
     L.append("")
     L.append("## Structure selection (put/put/call/call weights)")
-    L.append(f"Selection: {select_note}. Note: option legs are ~fairly priced, so weights reshape risk more than they move edge.")
-    for v in variants_out:
+    L.append("Equal-weight composite score of EV/SD, RoCaR, RoC/ES5%, P(win) (0-1, higher=better). Options are ~fairly priced, so weights reshape risk more than edge.")
+    for v in sorted(variants, key=lambda x: x["score"], reverse=True):
         mark = " <- best" if v is best else ""
-        L.append(f"- {v['label']}: RoCaR {v['rocar']:+.1%} | EV/SD {v['ev_sd']:+.2f} | expected ${v['expected']:,.2f} | max loss ${v['max_loss']:,.2f} | P(loss) {v['p_loss']:.0%}{mark}")
+        L.append(
+            f"- {v['label']}: score {v['score']:.2f} | EV/SD {v['ev_sd']:+.2f} | RoCaR {v['rocar']:+.1%} | "
+            f"RoC/ES5% {v['roc_es5']:+.1%} | P(win) {v['p_win']:.0%} | exp ${v['expected']:,.2f} | maxloss ${v['max_loss']:,.2f}{mark}"
+        )
     L.append("")
     L.append("## Sensitivity")
     for _, row in assessment["findings"].iterrows():
