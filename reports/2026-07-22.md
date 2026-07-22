@@ -1,7 +1,7 @@
 # LargestCompany daily report - 2026-07-22
 
 Target 2026-07-31 (9 days) | traded NVDA NO @ 0.33 | 40,000 sims
-Data: caps: Yahoo live; spots: fallback (ValueError)
+Data: caps: Yahoo live; spots: Yahoo live
 
 ## Verdict: UNFAVORABLE
 - Expected profit $-9.65 on $96.43 capital at risk (RoCaR -10.0%).
