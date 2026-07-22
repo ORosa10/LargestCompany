@@ -7,10 +7,7 @@
   "risk_free_rate": 0.04,
   "simulations": 40000,
   "seed": 42,
-  "spots": {"NVDA": 194.42, "AAPL": 308.46, "GOOGL": 359.08},
-  "universe": [
-    {"Ticker": "NVDA", "Current market cap": 4300000000000, "Polymarket YES price": 0.68},
-    {"Ticker": "AAPL", "Current market cap": 3100000000000, "Polymarket YES price": 0.309},
-    {"Ticker": "GOOGL", "Current market cap": 2100000000000, "Polymarket YES price": 0.017}
-  ]
+  "polymarket_yes": {"NVDA": 0.68, "AAPL": 0.309, "GOOGL": 0.017},
+  "manual_market_caps": {},
+  "manual_spots": {}
 }

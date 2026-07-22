@@ -56,32 +56,47 @@ def _bs_premium(spot, strike, years, iv, rate, kind):
     return float(strike * exp(-rate * years) * ncdf(-d2) - spot * ncdf(-d1))
 
 
-def fetch_market_data(tickers, fallback_caps, fallback_spots):
-    """Return (caps, spots, source). Try Yahoo; fall back to provided values."""
-    caps, spots, notes = {}, {}, []
+def fetch_market_data(tickers, manual_caps, manual_spots):
+    """Return (caps, spots, source, missing). Try Yahoo live; only use manual
+    values explicitly supplied for the day. Never uses stale defaults - any
+    ticker without a live or manual value is reported as missing so the report
+    can tell the user to provide it by hand.
+    """
+    caps, spots, notes, missing = {}, {}, [], []
+    live_caps = {}
     try:
         from market_data import fetch_market_caps
         cap_df = fetch_market_caps(list(tickers))
-        caps = {str(r["ticker"]): float(r["market_cap"]) for _, r in cap_df.iterrows()}
-        notes.append("caps: Yahoo live")
+        live_caps = {str(r["ticker"]): float(r["market_cap"]) for _, r in cap_df.iterrows()}
     except Exception as exc:  # noqa: BLE001
-        caps = {t: float(fallback_caps[t]) for t in tickers}
-        notes.append(f"caps: fallback ({type(exc).__name__})")
+        notes.append(f"caps fetch failed ({type(exc).__name__})")
+    live_spots = {}
     try:
         from market_data import fetch_spot_prices
         spot_df = fetch_spot_prices(list(tickers))
         spot_col = next((c for c in ["spot_price", "spot"] if c in spot_df.columns), None)
         if spot_col is None:
-            raise KeyError("no spot column in fetch_spot_prices output")
-        spots = {str(r["ticker"]): float(r[spot_col]) for _, r in spot_df.iterrows()}
-        notes.append("spots: Yahoo live")
+            raise KeyError("no spot column")
+        live_spots = {str(r["ticker"]): float(r[spot_col]) for _, r in spot_df.iterrows()}
     except Exception as exc:  # noqa: BLE001
-        spots = {t: float(fallback_spots[t]) for t in tickers}
-        notes.append(f"spots: fallback ({type(exc).__name__})")
+        notes.append(f"spots fetch failed ({type(exc).__name__})")
+
     for t in tickers:
-        caps.setdefault(t, float(fallback_caps[t]))
-        spots.setdefault(t, float(fallback_spots[t]))
-    return caps, spots, "; ".join(notes)
+        if t in live_caps and live_caps[t] > 0:
+            caps[t] = live_caps[t]
+        elif t in (manual_caps or {}):
+            caps[t] = float(manual_caps[t])
+        else:
+            missing.append(f"{t} market cap")
+        if t in live_spots and live_spots[t] > 0:
+            spots[t] = live_spots[t]
+        elif t in (manual_spots or {}):
+            spots[t] = float(manual_spots[t])
+        else:
+            missing.append(f"{t} spot")
+
+    src = "Yahoo live" if not notes else ("; ".join(notes) + "; used manual where provided")
+    return caps, spots, src, missing
 
 
 def build_legs(ticker, spot, iv, years, rate, put_weight, call_weight):
@@ -135,13 +150,28 @@ def run(inputs: dict) -> str:
     sims = int(inputs.get("simulations", 40000))
     seed = int(inputs.get("seed", 42))
 
-    universe_rows = inputs["universe"]
-    tickers = [r["Ticker"] for r in universe_rows]
-    fallback_caps = {r["Ticker"]: r["Current market cap"] for r in universe_rows}
-    yes_prices = {r["Ticker"]: r["Polymarket YES price"] for r in universe_rows}
-    fallback_spots = inputs["spots"]
+    # Support both the new schema (polymarket_yes map) and the old (universe list).
+    if "polymarket_yes" in inputs:
+        yes_prices = dict(inputs["polymarket_yes"])
+    else:
+        yes_prices = {r["Ticker"]: r["Polymarket YES price"] for r in inputs.get("universe", [])}
+    tickers = list(yes_prices.keys())
+    manual_caps = inputs.get("manual_market_caps") or {}
+    manual_spots = inputs.get("manual_spots") or {}
 
-    caps, spots, data_source = fetch_market_data(tickers, fallback_caps, fallback_spots)
+    caps, spots, data_source, missing = fetch_market_data(tickers, manual_caps, manual_spots)
+
+    if missing:
+        return (
+            f"# LargestCompany daily report - {as_of.isoformat()}\n\n"
+            f"## Data unavailable\n"
+            f"Could not get live data from Yahoo and no manual values were provided for: "
+            f"{', '.join(missing)}.\n\n"
+            f"Fetch status: {data_source}.\n\n"
+            f"No numbers were produced (nothing stale is used). To run today, provide the missing "
+            f"values manually: edit `daily_inputs.json` -> `manual_market_caps` and/or `manual_spots` "
+            f"(e.g. {{\"NVDA\": 4300000000000}}), commit, and re-run the workflow - or send them to Claude."
+        )
 
     universe = pd.DataFrame([
         {"Ticker": t, "Current market cap": caps[t], "Implied volatility": 0.30, "Polymarket YES price": yes_prices[t]}
