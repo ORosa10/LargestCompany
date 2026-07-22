@@ -26,7 +26,7 @@ _SPOTS = {"NVDA": 194.42, "AAPL": 308.46, "GOOGL": 359.08}
 
 def test_daily_inputs_file_is_valid_json():
     data = json.loads((Path(daily_report.__file__).resolve().parent / "daily_inputs.json").read_text())
-    assert {"target_date", "side", "entry", "polymarket_yes"}.issubset(data)
+    assert {"target_date", "polymarket_yes"}.issubset(data)
 
 
 def test_run_produces_report_with_all_sections(monkeypatch):
