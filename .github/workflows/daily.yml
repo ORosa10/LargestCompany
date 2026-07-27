@@ -1,9 +1,8 @@
 name: Daily report
 
 on:
-  schedule:
-    # 08:00 UTC ~= 10:00 Europe/Prague (CEST). Shifts by 1h under winter time.
-    - cron: "0 8 * * *"
+  # Runs only when Polymarket prices are updated (a push to daily_inputs.json),
+  # or on manual dispatch. No blind daily cron - no prices, no report.
   workflow_dispatch: {}
   push:
     paths:
