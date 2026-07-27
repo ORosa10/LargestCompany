@@ -33,7 +33,7 @@ from iv_surface_model import (
     default_surface_nodes,
     run_surface_probability_engine,
 )
-from model import default_correlation_matrix
+from model import default_correlation_matrix, run_probability_engine
 import phase7 as p7
 import phase8 as p8
 
@@ -245,59 +245,96 @@ def run(inputs: dict) -> str:
     expected = float(rm["Expected profit"])
     max_loss = float(rm["Max loss (capital at risk)"])
     rocar = float(rm["Return on capital-at-risk"])
-    estimate_robust = "robust" in assessment["headline"].lower() and "not fully" not in assessment["headline"].lower()
-    if expected <= 0:
-        verdict, verdict_note = "UNFAVORABLE", "Negative expected value - skip this trade."
-    elif estimate_robust:
-        verdict, verdict_note = "FAVORABLE", "Positive edge that holds across the robustness tests."
-    else:
-        verdict, verdict_note = "MARGINAL / CAUTION", "Positive expected value, but the edge is not robust - do not size up."
     model_side_prob = (1.0 - model_p) if side == "NO" else model_p
+    edge = model_side_prob - entry  # edge on the traded side
+
+    # 3-tier grade by edge size on the traded side.
+    if edge <= 0.0:
+        verdict = "UNFAVORABLE"
+    elif edge <= 0.05:
+        verdict = "MARGINAL"
+    else:
+        verdict = "FAVORABLE"
+
+    # Fragility from the Phase 7 checks.
+    findings_text = " ".join(assessment["findings"]["Verdict"].astype(str)).lower()
+    sign_flip = "flips sign" in findings_text
+    not_converged = "not converged" in findings_text
+    tail_sensitive = "sensitive to tail" in findings_text
+    if sign_flip:
+        fragility = "HIGH - edge is model-dependent (flips sign across models)"
+    elif not_converged or tail_sensitive:
+        fragility = "MEDIUM - some assumptions move it (convergence / tail dependence)"
+    else:
+        fragility = "LOW - holds across the robustness tests"
+
+    # How the raw P(#1) shifts by marginal / tail model choice.
+    def _p_traded(res):
+        return float(res.results.set_index("Ticker").loc[traded, "Model probability"])
+    model_probs = {"IV surface + Gaussian copula": model_p}
+    try:
+        model_probs["ATM lognormal + Normal"] = _p_traded(run_probability_engine(
+            surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Normal shocks"))
+        model_probs["ATM lognormal + Student-t copula df=5"] = _p_traded(run_probability_engine(
+            surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Student-t copula df=5"))
+        model_probs["ATM lognormal + Student-t df=6 (fat marginals)"] = _p_traded(run_probability_engine(
+            surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Student-t df=6"))
+    except Exception:  # noqa: BLE001
+        pass
+    prob_lo, prob_hi = min(model_probs.values()), max(model_probs.values())
 
     def d(x):
         return f"${x:,.2f}"
 
+    var_worst = max_loss
+    roc_var5 = expected / var5 if var5 > 0 else float("nan")
+    roc_var1 = expected / var1 if var1 > 0 else float("nan")
+    roc_worst = expected / var_worst if var_worst > 0 else float("nan")
+
     L = []
     L.append(f"# LargestCompany daily report - {as_of.isoformat()}")
     L.append("")
-    L.append(f"## Verdict: {verdict}")
-    L.append(f"{verdict_note}")
+    L.append(f"## Verdict: {verdict}  (edge {edge:+.1%})")
+    L.append(f"- Target {target.isoformat()} ({days} days left) | traded {traded} | side auto-picked **{side}** @ {entry:.2f}")
+    L.append(f"- Fragility (Phase 7): **{fragility}**")
+    L.append(f"- Data: {data_source}")
     L.append("")
-    L.append("## Trade")
-    L.append("| Field | Value |")
+    L.append("## Edge: market vs simulation")
+    L.append("| | Value |")
     L.append("|---|---|")
-    L.append(f"| Target date | {target.isoformat()} ({days} days left) |")
-    L.append(f"| Traded name | {traded} |")
-    L.append(f"| Side (auto) | **{side}** @ {entry:.2f}  (naked YES EV {yes_ev:+.1%} vs NO EV {no_ev:+.1%}) |")
-    L.append(f"| Best structure | {best['label']} (put/put/call/call) |")
-    L.append(f"| Your {side} edge | model {model_side_prob:.1%} vs price {entry:.0%} -> **{model_side_prob - entry:+.1%}** |")
-    L.append(f"| Data | {data_source} |")
+    L.append(f"| Polymarket says ({side}) | {entry:.1%} |")
+    L.append(f"| Simulation says ({side} fair) | {model_side_prob:.1%} |")
+    L.append(f"| Edge (fair - price) | **{edge:+.1%}** |")
+    L.append(f"| Grade | **{verdict}** (>5% favorable, 0-5% marginal, <=0 unfavorable) |")
     L.append("")
-    L.append("## Probabilities: model vs market")
-    L.append("| Ticker | Model P(#1) | Market YES |")
-    L.append("|---|---|---|")
-    for t in tickers:
-        L.append(f"| {t} | {float(probs.loc[t,'Model probability']):.1%} | {float(probs.loc[t,'Polymarket YES price']):.1%} |")
-    L.append("")
-    L.append("## Money view")
+    L.append("## Best structure: " + best["label"] + " (put/put/call/call)")
     L.append("| Metric | Value |")
     L.append("|---|---|")
     L.append(f"| Expected profit | {d(expected)} |")
-    L.append(f"| Capital at risk (max loss) | {d(max_loss)} |")
-    L.append(f"| Net cash outlay | {d(float(rm['Net cash outlay']))} |")
-    L.append(f"| Return on capital-at-risk | {rocar:.1%} |")
-    L.append(f"| Loss ladder (VaR5% / VaR1% / worst) | {d(var5)} / {d(var1)} / {d(max_loss)} |")
-    L.append(f"| P(win) / P(loss) | {float(rm['Probability of profit']):.1%} / {float(rm['Probability of loss']):.1%} |")
+    L.append(f"| Payoff SD | {d(float(best['sd']))} |")
+    L.append(f"| VaR 5% | {d(var5)} |")
+    L.append(f"| VaR 1% | {d(var1)} |")
+    L.append(f"| Worst case | {d(var_worst)} |")
+    L.append(f"| Probability of profit | {float(rm['Probability of profit']):.1%} |")
+    L.append(f"| Return on VaR 5% | {roc_var5:.1%} |")
+    L.append(f"| Return on VaR 1% | {roc_var1:.1%} |")
+    L.append(f"| Return on worst case | {roc_worst:.1%} |")
+    L.append("")
+    L.append("## Probability by model (how fragile is the estimate)")
+    L.append(f"Estimate range across models: **{prob_lo:.1%} - {prob_hi:.1%}** (spread {prob_hi - prob_lo:.1%}). Fragility: {fragility}.")
+    L.append("| Model | P(" + traded + " #1) |")
+    L.append("|---|---|")
+    for name, val in model_probs.items():
+        L.append(f"| {name} | {val:.1%} |")
     L.append("")
     L.append("## Structure comparison (weights: put/put/call/call)")
-    L.append("Composite score = equal-weight of EV/SD, RoCaR, RoC/ES5%, P(win), normalized across variants.")
     L.append("| Weights | Score | EV/SD | RoCaR | RoC/ES5% | P(win) | Expected | Max loss |")
     L.append("|---|---|---|---|---|---|---|---|")
     for v in sorted(variants, key=lambda x: x["score"], reverse=True):
         star = " (best)" if v is best else ""
         L.append(f"| {v['label']}{star} | {v['score']:.2f} | {v['ev_sd']:+.2f} | {v['rocar']:+.1%} | {v['roc_es5']:+.1%} | {v['p_win']:.0%} | {d(v['expected'])} | {d(v['max_loss'])} |")
     L.append("")
-    L.append("## Sensitivity (Phase 7)")
+    L.append("## Sensitivity checks (Phase 7)")
     L.append("| Test | Verdict |")
     L.append("|---|---|")
     for _, row in assessment["findings"].iterrows():
