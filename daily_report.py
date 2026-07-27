@@ -320,13 +320,6 @@ def run(inputs: dict) -> str:
     L.append(f"| Return on VaR 1% | {roc_var1:.1%} |")
     L.append(f"| Return on worst case | {roc_worst:.1%} |")
     L.append("")
-    L.append("## Probability by model (how fragile is the estimate)")
-    L.append(f"Estimate range across models: **{prob_lo:.1%} - {prob_hi:.1%}** (spread {prob_hi - prob_lo:.1%}). Fragility: {fragility}.")
-    L.append("| Model | P(" + traded + " #1) |")
-    L.append("|---|---|")
-    for name, val in model_probs.items():
-        L.append(f"| {name} | {val:.1%} |")
-    L.append("")
     L.append("## Structure comparison (weights: put/put/call/call)")
     L.append("| Weights | Score | EV/SD | RoCaR | RoC/ES5% | P(win) | Expected | Max loss |")
     L.append("|---|---|---|---|---|---|---|---|")
@@ -334,11 +327,21 @@ def run(inputs: dict) -> str:
         star = " (best)" if v is best else ""
         L.append(f"| {v['label']}{star} | {v['score']:.2f} | {v['ev_sd']:+.2f} | {v['rocar']:+.1%} | {v['roc_es5']:+.1%} | {v['p_win']:.0%} | {d(v['expected'])} | {d(v['max_loss'])} |")
     L.append("")
-    L.append("## Sensitivity checks (Phase 7)")
-    L.append("| Test | Verdict |")
+    fmap = {str(r["Area"]).split(".")[0].strip(): str(r["Verdict"]) for _, r in assessment["findings"].iterrows()}
+    L.append("## Consistency check (across assumptions & simulation reruns)")
+    L.append(f"Overall fragility: **{fragility}**. P({traded} #1) ranges {prob_lo:.1%}-{prob_hi:.1%} across models (spread {prob_hi - prob_lo:.1%}).")
+    L.append("| Check | Result |")
     L.append("|---|---|")
-    for _, row in assessment["findings"].iterrows():
-        L.append(f"| {row['Area']} | {row['Verdict']} |")
+    L.append(f"| Across simulation reruns (seeds) | {fmap.get('1', 'n/a')} |")
+    L.append(f"| Across models & tails (IV surface / ATM / copula) | {fmap.get('5', 'n/a')} |")
+    L.append(f"| Tail dependence (joint crashes) | {fmap.get('2', 'n/a')} |")
+    L.append(f"| Dominant lever | {fmap.get('3', 'n/a')} |")
+    L.append("")
+    L.append(f"P({traded} #1) by model:")
+    L.append("| Model | P(#1) |")
+    L.append("|---|---|")
+    for name, val in model_probs.items():
+        L.append(f"| {name} | {val:.1%} |")
     L.append("")
     L.append("## Watch-outs")
     for w in assessment["watch_outs"]:
