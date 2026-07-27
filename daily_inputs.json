@@ -5,8 +5,8 @@
   "simulations": 40000,
   "seed": 42,
   "shares": 100.0,
-  "polymarket_yes": {"NVDA": 0.74, "AAPL": 0.257, "GOOGL": 0.019},
-  "polymarket_no": {"NVDA": 0.27, "AAPL": 0.746, "GOOGL": 0.982},
+  "polymarket_yes": {"NVDA": 0.77, "AAPL": 0.231, "GOOGL": 0.003},
+  "polymarket_no": {"NVDA": 0.24, "AAPL": 0.779, "GOOGL": 0.999},
   "manual_market_caps": {},
   "manual_spots": {}
 }
