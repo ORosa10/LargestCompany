@@ -246,45 +246,62 @@ def run(inputs: dict) -> str:
     max_loss = float(rm["Max loss (capital at risk)"])
     rocar = float(rm["Return on capital-at-risk"])
     estimate_robust = "robust" in assessment["headline"].lower() and "not fully" not in assessment["headline"].lower()
-    verdict = "FAVORABLE" if expected > 0 else ("BREAKEVEN" if abs(expected) < 1e-6 else "UNFAVORABLE")
+    if expected <= 0:
+        verdict, verdict_note = "UNFAVORABLE", "Negative expected value - skip this trade."
+    elif estimate_robust:
+        verdict, verdict_note = "FAVORABLE", "Positive edge that holds across the robustness tests."
+    else:
+        verdict, verdict_note = "MARGINAL / CAUTION", "Positive expected value, but the edge is not robust - do not size up."
     model_side_prob = (1.0 - model_p) if side == "NO" else model_p
+
+    def d(x):
+        return f"${x:,.2f}"
 
     L = []
     L.append(f"# LargestCompany daily report - {as_of.isoformat()}")
     L.append("")
-    L.append(f"Target {target.isoformat()} ({days} days) | traded {traded} | side {side} @ {entry:.2f} | best structure {best['label']} | {sims:,} sims")
-    L.append(f"Data: {data_source}")
-    L.append("")
     L.append(f"## Verdict: {verdict}")
-    L.append(f"- Expected profit ${expected:,.2f} on ${max_loss:,.2f} capital at risk (RoCaR {rocar:.1%}).")
-    L.append(f"- Side auto-picked {side}: naked YES EV {yes_ev:+.1%} vs naked NO EV {no_ev:+.1%}.")
-    L.append(f"- Your {side} edge: model P({traded} {'#1' if side=='YES' else 'NOT #1'}) {model_side_prob:.1%} vs {side} price {entry:.0%} -> {model_side_prob - entry:+.1%}.")
-    L.append(f"- Probability estimate is {'robust' if estimate_robust else 'NOT fully robust'} (stability of the estimate, not trade direction).")
+    L.append(f"{verdict_note}")
     L.append("")
-    L.append("## Probability & edge")
-    L.append(f"- Model P({traded} #1) {model_p:.1%} vs Polymarket YES {yes_price:.1%}.")
+    L.append("## Trade")
+    L.append("| Field | Value |")
+    L.append("|---|---|")
+    L.append(f"| Target date | {target.isoformat()} ({days} days left) |")
+    L.append(f"| Traded name | {traded} |")
+    L.append(f"| Side (auto) | **{side}** @ {entry:.2f}  (naked YES EV {yes_ev:+.1%} vs NO EV {no_ev:+.1%}) |")
+    L.append(f"| Best structure | {best['label']} (put/put/call/call) |")
+    L.append(f"| Your {side} edge | model {model_side_prob:.1%} vs price {entry:.0%} -> **{model_side_prob - entry:+.1%}** |")
+    L.append(f"| Data | {data_source} |")
+    L.append("")
+    L.append("## Probabilities: model vs market")
+    L.append("| Ticker | Model P(#1) | Market YES |")
+    L.append("|---|---|---|")
     for t in tickers:
-        L.append(f"  - {t}: model {float(probs.loc[t,'Model probability']):.1%} | market YES {float(probs.loc[t,'Polymarket YES price']):.1%}")
+        L.append(f"| {t} | {float(probs.loc[t,'Model probability']):.1%} | {float(probs.loc[t,'Polymarket YES price']):.1%} |")
     L.append("")
     L.append("## Money view")
-    L.append(f"- Expected profit: ${expected:,.2f}")
-    L.append(f"- Capital at risk (max loss): ${max_loss:,.2f} | net cash ${float(rm['Net cash outlay']):,.2f}")
-    L.append(f"- Return on capital-at-risk: {rocar:.1%}")
-    L.append(f"- Loss ladder: VaR5% ${var5:,.2f} | VaR1% ${var1:,.2f} | worst ${max_loss:,.2f}")
-    L.append(f"- P(win) {float(rm['Probability of profit']):.1%} | P(loss) {float(rm['Probability of loss']):.1%}")
+    L.append("| Metric | Value |")
+    L.append("|---|---|")
+    L.append(f"| Expected profit | {d(expected)} |")
+    L.append(f"| Capital at risk (max loss) | {d(max_loss)} |")
+    L.append(f"| Net cash outlay | {d(float(rm['Net cash outlay']))} |")
+    L.append(f"| Return on capital-at-risk | {rocar:.1%} |")
+    L.append(f"| Loss ladder (VaR5% / VaR1% / worst) | {d(var5)} / {d(var1)} / {d(max_loss)} |")
+    L.append(f"| P(win) / P(loss) | {float(rm['Probability of profit']):.1%} / {float(rm['Probability of loss']):.1%} |")
     L.append("")
-    L.append("## Structure selection (put/put/call/call weights)")
-    L.append("Equal-weight composite score of EV/SD, RoCaR, RoC/ES5%, P(win) (0-1, higher=better). Options are ~fairly priced, so weights reshape risk more than edge.")
+    L.append("## Structure comparison (weights: put/put/call/call)")
+    L.append("Composite score = equal-weight of EV/SD, RoCaR, RoC/ES5%, P(win), normalized across variants.")
+    L.append("| Weights | Score | EV/SD | RoCaR | RoC/ES5% | P(win) | Expected | Max loss |")
+    L.append("|---|---|---|---|---|---|---|---|")
     for v in sorted(variants, key=lambda x: x["score"], reverse=True):
-        mark = " <- best" if v is best else ""
-        L.append(
-            f"- {v['label']}: score {v['score']:.2f} | EV/SD {v['ev_sd']:+.2f} | RoCaR {v['rocar']:+.1%} | "
-            f"RoC/ES5% {v['roc_es5']:+.1%} | P(win) {v['p_win']:.0%} | exp ${v['expected']:,.2f} | maxloss ${v['max_loss']:,.2f}{mark}"
-        )
+        star = " (best)" if v is best else ""
+        L.append(f"| {v['label']}{star} | {v['score']:.2f} | {v['ev_sd']:+.2f} | {v['rocar']:+.1%} | {v['roc_es5']:+.1%} | {v['p_win']:.0%} | {d(v['expected'])} | {d(v['max_loss'])} |")
     L.append("")
-    L.append("## Sensitivity")
+    L.append("## Sensitivity (Phase 7)")
+    L.append("| Test | Verdict |")
+    L.append("|---|---|")
     for _, row in assessment["findings"].iterrows():
-        L.append(f"- {row['Area']}: {row['Verdict']}")
+        L.append(f"| {row['Area']} | {row['Verdict']} |")
     L.append("")
     L.append("## Watch-outs")
     for w in assessment["watch_outs"]:

@@ -34,9 +34,9 @@ def test_run_produces_report_with_all_sections(monkeypatch):
         return dict(_CAPS), dict(_SPOTS), "test", []
     monkeypatch.setattr(daily_report, "fetch_market_data", fake_fetch)
     report = daily_report.run(_inputs())
-    for section in ["## Verdict:", "## Probability & edge", "## Money view", "## Structure selection", "## Sensitivity", "## Watch-outs"]:
+    for section in ["## Verdict:", "## Trade", "## Probabilities", "## Money view", "## Structure comparison", "## Sensitivity", "## Watch-outs"]:
         assert section in report
-    assert any(v in report for v in ["FAVORABLE", "UNFAVORABLE", "BREAKEVEN"])
+    assert any(v in report for v in ["FAVORABLE", "UNFAVORABLE", "MARGINAL"])
 
 
 def test_missing_data_produces_failure_notice_no_numbers(monkeypatch):
@@ -69,3 +69,4 @@ def test_report_includes_structure_selection(monkeypatch):
     report = daily_report.run(_inputs())
     for label in ["1/1/3/3", "2/2/3/3", "1/1/4/4", "2/2/4/4"]:
         assert label in report
+    assert "## Structure comparison" in report
