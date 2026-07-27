@@ -50,7 +50,8 @@ HEDGE_TEMPLATE = [
     {"Option type": "Call", "Position": "Short", "ratio": 1.05, "kind": "call"},
 ]
 WEIGHT_VARIANTS = [(1, 3), (2, 3), (1, 4), (2, 4)]  # (put_weight, call_weight)
-RATING_METRICS = ["ev_sd", "rocar", "roc_es5", "p_win"]  # equal weight, higher = better
+# Four selection criteria, equal weight. "+" = higher better, "-" = lower better.
+RATING_METRICS = [("p_win", "+"), ("ev_sd", "+"), ("es5", "-"), ("roc_var5", "+")]
 
 
 def _bs_premium(spot, strike, years, iv, rate, kind):
@@ -102,34 +103,37 @@ def _variant_stats(result, portfolio):
     sd = float(pay.std(ddof=0))
     threshold = float(pay.quantile(0.05))
     tail = pay[pay <= threshold]
-    es5 = -float(tail.mean()) if not tail.empty else np.nan  # positive loss magnitude
+    es5 = -float(tail.mean()) if not tail.empty else np.nan  # CVaR 5% (positive loss)
+    var5 = -float(pay.quantile(0.05))                        # VaR 5% (positive loss)
     return {
         "expected": expected, "max_loss": max_loss, "sd": sd,
         "p_loss": float((pay < 0).mean()), "p_win": float((pay > 0).mean()),
-        "es5": es5,
+        "es5": es5, "var5": var5,
         "rocar": (expected / max_loss) if max_loss > 0 else np.nan,
         "ev_sd": (expected / sd) if sd > 0 else np.nan,
         "roc_es5": (expected / es5) if (np.isfinite(es5) and es5 > 0) else np.nan,
+        "roc_var5": (expected / var5) if (np.isfinite(var5) and var5 > 0) else np.nan,
     }
 
 
 def rate_variants(variants):
-    """Equal-weight composite score in [0,1] over the rating metrics (higher
-    better), min-max normalized across the variants."""
-    for metric in RATING_METRICS:
+    """Equal-weight composite in [0,1] over P(win), EV/SD, CVaR5% (lower better),
+    and return-on-VaR5%. Each min-max normalized across the variants."""
+    for metric, direction in RATING_METRICS:
         vals = np.array([v[metric] if np.isfinite(v[metric]) else np.nan for v in variants], dtype=float)
         finite = vals[np.isfinite(vals)]
         lo, hi = (finite.min(), finite.max()) if finite.size else (0.0, 0.0)
         for v in variants:
             x = v[metric]
             if not np.isfinite(x):
-                v[f"n_{metric}"] = 0.0
+                n = 0.0
             elif hi > lo:
-                v[f"n_{metric}"] = (x - lo) / (hi - lo)
+                n = (x - lo) / (hi - lo) if direction == "+" else (hi - x) / (hi - lo)
             else:
-                v[f"n_{metric}"] = 0.5
+                n = 0.5
+            v[f"n_{metric}"] = n
     for v in variants:
-        v["score"] = float(np.mean([v[f"n_{m}"] for m in RATING_METRICS]))
+        v["score"] = float(np.mean([v[f"n_{m}"] for m, _ in RATING_METRICS]))
     return max(variants, key=lambda v: v["score"])
 
 
@@ -321,11 +325,12 @@ def run(inputs: dict) -> str:
     L.append(f"| Return on worst case | {roc_worst:.1%} |")
     L.append("")
     L.append("## Structure comparison (weights: put/put/call/call)")
-    L.append("| Weights | Score | EV/SD | RoCaR | RoC/ES5% | P(win) | Expected | Max loss |")
-    L.append("|---|---|---|---|---|---|---|---|")
+    L.append("Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.")
+    L.append("| Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |")
+    L.append("|---|---|---|---|---|---|---|")
     for v in sorted(variants, key=lambda x: x["score"], reverse=True):
         star = " (best)" if v is best else ""
-        L.append(f"| {v['label']}{star} | {v['score']:.2f} | {v['ev_sd']:+.2f} | {v['rocar']:+.1%} | {v['roc_es5']:+.1%} | {v['p_win']:.0%} | {d(v['expected'])} | {d(v['max_loss'])} |")
+        L.append(f"| {v['label']}{star} | {v['score']:.2f} | {v['p_win']:.0%} | {v['ev_sd']:+.2f} | {d(v['es5'])} | {v['roc_var5']:+.1%} | {d(v['expected'])} |")
     L.append("")
     fmap = {str(r["Area"]).split(".")[0].strip(): str(r["Verdict"]) for _, r in assessment["findings"].iterrows()}
     L.append("## Consistency check (across assumptions & simulation reruns)")
