@@ -1,39 +1,55 @@
 # LargestCompany daily report - 2026-07-27
 
-Target 2026-07-31 (4 days) | traded NVDA | side NO @ 0.24 | best structure 1/1/3/3 | 40,000 sims
-Data: Yahoo live
+## Verdict: MARGINAL  (edge +2.5%)
+- Target 2026-07-31 (4 days left) | traded NVDA | side auto-picked **NO** @ 0.24
+- Fragility (Phase 7): **HIGH - edge is model-dependent (flips sign across models)**
+- Data: Yahoo live
 
-## Verdict: FAVORABLE
-- Expected profit $2.47 on $64.27 capital at risk (RoCaR 3.8%).
-- Side auto-picked NO: naked YES EV -3.5% vs naked NO EV +2.5%.
-- Your NO edge: model P(NVDA NOT #1) 26.5% vs NO price 24% -> +2.5%.
-- Probability estimate is NOT fully robust (stability of the estimate, not trade direction).
+## Edge: market vs simulation
+| | Value |
+|---|---|
+| Polymarket says (NO) | 24.0% |
+| Simulation says (NO fair) | 26.5% |
+| Edge (fair - price) | **+2.5%** |
+| Grade | **MARGINAL** (>5% favorable, 0-5% marginal, <=0 unfavorable) |
 
-## Probability & edge
-- Model P(NVDA #1) 73.5% vs Polymarket YES 77.0%.
-  - NVDA: model 73.5% | market YES 77.0%
-  - AAPL: model 26.5% | market YES 23.1%
-  - GOOGL: model 0.0% | market YES 0.3%
+## Best structure: 1/1/3/3 (put/put/call/call)
+| Metric | Value |
+|---|---|
+| Expected profit | $2.47 |
+| Payoff SD | $37.94 |
+| VaR 5% | $36.47 |
+| VaR 1% | $45.88 |
+| Worst case | $64.27 |
+| Probability of profit | 26.5% |
+| Return on VaR 5% | 6.8% |
+| Return on VaR 1% | 5.4% |
+| Return on worst case | 3.8% |
 
-## Money view
-- Expected profit: $2.47
-- Capital at risk (max loss): $64.27 | net cash $51.80
-- Return on capital-at-risk: 3.8%
-- Loss ladder: VaR5% $36.47 | VaR1% $45.88 | worst $64.27
-- P(win) 26.5% | P(loss) 73.5%
+## Structure comparison (weights: put/put/call/call)
+| Weights | Score | EV/SD | RoCaR | RoC/ES5% | P(win) | Expected | Max loss |
+|---|---|---|---|---|---|---|---|
+| 1/1/3/3 (best) | 0.62 | +0.07 | +3.8% | +5.9% | 27% | $2.47 | $64.27 |
+| 1/1/4/4 | 0.60 | +0.07 | +3.3% | +5.3% | 27% | $2.47 | $74.07 |
+| 2/2/3/3 | 0.37 | +0.07 | +3.2% | +5.3% | 27% | $2.43 | $75.14 |
+| 2/2/4/4 | 0.35 | +0.07 | +2.9% | +4.8% | 27% | $2.43 | $84.94 |
 
-## Structure selection (put/put/call/call weights)
-Equal-weight composite score of EV/SD, RoCaR, RoC/ES5%, P(win) (0-1, higher=better). Options are ~fairly priced, so weights reshape risk more than edge.
-- 1/1/3/3: score 0.62 | EV/SD +0.07 | RoCaR +3.8% | RoC/ES5% +5.9% | P(win) 27% | exp $2.47 | maxloss $64.27 <- best
-- 1/1/4/4: score 0.60 | EV/SD +0.07 | RoCaR +3.3% | RoC/ES5% +5.3% | P(win) 27% | exp $2.47 | maxloss $74.07
-- 2/2/3/3: score 0.37 | EV/SD +0.07 | RoCaR +3.2% | RoC/ES5% +5.3% | P(win) 27% | exp $2.43 | maxloss $75.14
-- 2/2/4/4: score 0.35 | EV/SD +0.07 | RoCaR +2.9% | RoC/ES5% +4.8% | P(win) 27% | exp $2.43 | maxloss $84.94
+## Consistency check (across assumptions & simulation reruns)
+Overall fragility: **HIGH - edge is model-dependent (flips sign across models)**. P(NVDA #1) ranges 72.9%-76.8% across models (spread 3.8%).
+| Check | Result |
+|---|---|
+| Across simulation reruns (seeds) | Central metrics are NOT converged - raise the simulation count. |
+| Across models & tails (IV surface / ATM / copula) | Edge flips sign across models - model-dependent, caution. |
+| Tail dependence (joint crashes) | Edge is sensitive to tail dependence (change +97.7%). |
+| Dominant lever | randomness-dominated (IV lever) (IV range 0.280 vs gap range 0.275). |
 
-## Sensitivity
-- 1. Monte Carlo error: Central metrics are NOT converged - raise the simulation count.
-- 2. Tail dependence: Edge is sensitive to tail dependence (change +97.7%).
-- 3. Gap vs randomness: randomness-dominated (IV lever) (IV range 0.280 vs gap range 0.275).
-- 5. Model robustness: Edge flips sign across models - model-dependent, caution.
+P(NVDA #1) by model:
+| Model | P(#1) |
+|---|---|
+| IV surface + Gaussian copula | 73.5% |
+| ATM lognormal + Normal | 72.9% |
+| ATM lognormal + Student-t copula df=5 | 76.8% |
+| ATM lognormal + Student-t df=6 (fat marginals) | 75.1% |
 
 ## Watch-outs
 - Outcome is strongly IV-driven; the edge leans on the implied-volatility assumption. Get IV right before sizing up.
