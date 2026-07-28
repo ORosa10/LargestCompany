@@ -31,6 +31,7 @@ from iv_surface_model import (
     SURFACE_EXPIRY,
     apply_surface_atm_ivs,
     default_surface_nodes,
+    market_for,
     run_surface_probability_engine,
 )
 from model import default_correlation_matrix, run_probability_engine
@@ -176,9 +177,14 @@ def fetch_market_data(tickers, manual_caps, manual_spots):
 
 
 def run(inputs: dict) -> str:
-    target = date.fromisoformat(inputs["target_date"])
+    resolution_iso = inputs["target_date"]
+    target = date.fromisoformat(resolution_iso)
     as_of = date.fromisoformat(inputs.get("as_of", date.today().isoformat()))
-    days = max((target - as_of).days, 1)
+    market = market_for(resolution_iso)
+    option_expiry = date.fromisoformat(market["option_expiry"])
+    # Horizon runs to the option expiry (where the IV lives and options settle);
+    # the Polymarket resolution can be a few days later - a small basis.
+    days = max((option_expiry - as_of).days, 1)
     years = days / 365.0
     rate = float(inputs.get("risk_free_rate", 0.04))
     sims = int(inputs.get("simulations", 40000))
@@ -207,10 +213,10 @@ def run(inputs: dict) -> str:
     spot = spots[traded]
 
     corr = default_correlation_matrix(tickers)
-    surf_inputs = apply_surface_atm_ivs(universe.copy())
+    surf_inputs = apply_surface_atm_ivs(universe.copy(), resolution=resolution_iso)
     result, _ = run_surface_probability_engine(
         surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed,
-        surface_nodes=default_surface_nodes(), risk_free_rate=rate,
+        surface_nodes=default_surface_nodes(resolution=resolution_iso), risk_free_rate=rate,
     )
     probs = result.results.set_index("Ticker")
     model_p = float(probs.loc[traded, "Model probability"])
@@ -299,7 +305,7 @@ def run(inputs: dict) -> str:
     L.append(f"# LargestCompany daily report - {as_of.isoformat()}")
     L.append("")
     L.append(f"## Verdict: {verdict}  (edge {edge:+.1%})")
-    L.append(f"- Target {target.isoformat()} ({days} days left) | traded {traded} | side auto-picked **{side}** @ {entry:.2f}")
+    L.append(f"- Resolution {target.isoformat()} | option expiry {option_expiry.isoformat()} ({days} days) | traded {traded} | side auto-picked **{side}** @ {entry:.2f}")
     L.append(f"- Fragility (Phase 7): **{fragility}**")
     L.append(f"- Data: {data_source}")
     L.append("")

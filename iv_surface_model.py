@@ -70,9 +70,49 @@ _SURFACE_NODES = {
 }
 
 
-def default_surface_nodes() -> pd.DataFrame:
+_JULY_ATM = {"NVDA": 0.39, "AAPL": 0.285, "GOOGL": 0.40}
+
+# August 2026 market: Polymarket resolves 2026-08-31 (Monday); options expire on
+# the nearest listed Friday 2026-08-28. Smiles read from OptionCharts for the
+# 2026-08-28 expiry, OTM wings only, stale deep-put spikes removed (as in July).
+_AUGUST_NODES = {
+    "AAPL": {"spot": 338.78, "nodes": [
+        (170, 1.20, "Put"), (190, 0.98, "Put"), (195, 0.63, "Put"), (200, 0.61, "Put"),
+        (210, 0.60, "Put"), (220, 0.57, "Put"), (240, 0.50, "Put"), (260, 0.44, "Put"),
+        (280, 0.40, "Put"), (300, 0.34, "Put"), (320, 0.31, "Put"), (340, 0.29, "ATM"),
+        (360, 0.30, "Call"), (380, 0.33, "Call"), (390, 0.36, "Call"), (400, 0.40, "Call"),
+    ]},
+    "NVDA": {"spot": 194.65, "nodes": [
+        (100, 0.92, "Put"), (120, 0.72, "Put"), (130, 0.70, "Put"), (140, 0.62, "Put"),
+        (150, 0.59, "Put"), (160, 0.57, "Put"), (170, 0.51, "Put"), (180, 0.49, "Put"),
+        (190, 0.47, "Put"), (195, 0.47, "ATM"), (210, 0.44, "Call"), (220, 0.43, "Call"),
+        (240, 0.44, "Call"), (260, 0.48, "Call"), (280, 0.52, "Call"), (290, 0.55, "Call"),
+    ]},
+    "GOOGL": {"spot": 336.16, "nodes": [
+        (210, 0.56, "Put"), (240, 0.48, "Put"), (260, 0.42, "Put"), (280, 0.37, "Put"),
+        (300, 0.33, "Put"), (320, 0.31, "Put"), (330, 0.31, "ATM"), (350, 0.30, "Call"),
+        (375, 0.30, "Call"), (400, 0.34, "Call"), (425, 0.38, "Call"), (450, 0.45, "Call"),
+        (475, 0.52, "Call"), (485, 0.55, "Call"),
+    ]},
+}
+_AUGUST_ATM = {"AAPL": 0.29, "NVDA": 0.47, "GOOGL": 0.31}
+
+# Registry keyed by Polymarket resolution date (end of month). option_expiry is
+# the listed Friday the user trades; it can differ from the resolution date.
+MARKETS = {
+    "2026-07-31": {"as_of": SURFACE_AS_OF, "option_expiry": "2026-07-31", "nodes": _SURFACE_NODES, "atm": _JULY_ATM},
+    "2026-08-31": {"as_of": "2026-07-27", "option_expiry": "2026-08-28", "nodes": _AUGUST_NODES, "atm": _AUGUST_ATM},
+}
+
+
+def market_for(resolution: str) -> dict:
+    return MARKETS.get(str(resolution), MARKETS[SURFACE_EXPIRY])
+
+
+def default_surface_nodes(resolution: str = SURFACE_EXPIRY) -> pd.DataFrame:
+    market = market_for(resolution)
     rows = []
-    for ticker, definition in _SURFACE_NODES.items():
+    for ticker, definition in market["nodes"].items():
         spot = float(definition["spot"])
         for strike, iv, wing in definition["nodes"]:
             rows.append(
@@ -83,16 +123,16 @@ def default_surface_nodes() -> pd.DataFrame:
                     "Moneyness": float(strike) / spot,
                     "IV": float(iv),
                     "Wing": wing,
-                    "As of": SURFACE_AS_OF,
-                    "Expiry": SURFACE_EXPIRY,
+                    "As of": market["as_of"],
+                    "Expiry": market["option_expiry"],
                 }
             )
     return pd.DataFrame(rows)
 
 
-def apply_surface_atm_ivs(company_inputs: pd.DataFrame) -> pd.DataFrame:
+def apply_surface_atm_ivs(company_inputs: pd.DataFrame, resolution: str = SURFACE_EXPIRY) -> pd.DataFrame:
     updated = company_inputs.copy()
-    atm = {"NVDA": 0.39, "AAPL": 0.285, "GOOGL": 0.40}
+    atm = market_for(resolution)["atm"]
     mapped = updated["Ticker"].map(atm)
     updated.loc[mapped.notna(), "Implied volatility"] = mapped[mapped.notna()]
     return updated

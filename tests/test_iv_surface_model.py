@@ -73,3 +73,26 @@ def test_surface_engine_returns_one_winner_per_path():
         "ATM lognormal fallback",
     }
     assert diagnostics.set_index("Ticker").loc["NVDA", "ATM IV"] > 0
+
+
+def test_august_market_registered_and_distinct():
+    import pandas as pd
+    from iv_surface_model import MARKETS, market_for, default_surface_nodes, apply_surface_atm_ivs
+    assert "2026-08-31" in MARKETS
+    aug = market_for("2026-08-31")
+    assert aug["option_expiry"] == "2026-08-28"  # Friday, not the Monday month-end
+    nodes = default_surface_nodes("2026-08-31")
+    assert set(nodes["Ticker"]) == {"AAPL", "NVDA", "GOOGL"}
+    assert (nodes["Expiry"] == "2026-08-28").all()
+    # ATM IVs applied per the August market
+    inp = pd.DataFrame([{"Ticker": t, "Current market cap": 1e12, "Implied volatility": 0.30, "Polymarket YES price": 0.3}
+                        for t in ["AAPL", "NVDA", "GOOGL"]])
+    out = apply_surface_atm_ivs(inp, resolution="2026-08-31").set_index("Ticker")["Implied volatility"]
+    assert abs(out["NVDA"] - 0.47) < 1e-9 and abs(out["AAPL"] - 0.29) < 1e-9
+
+
+def test_july_still_default_and_unchanged():
+    from iv_surface_model import default_surface_nodes, SURFACE_EXPIRY
+    assert SURFACE_EXPIRY == "2026-07-31"
+    nodes = default_surface_nodes()  # no arg -> July default
+    assert (nodes["Expiry"] == "2026-07-31").all()

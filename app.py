@@ -9,9 +9,11 @@ import streamlit as st
 from event_universe import JULY_2026_EVENT_PRICES, apply_event_prices
 from implied_forwards import apply_implied_forwards, estimate_implied_forwards
 from iv_surface_model import (
+    MARKETS,
     SURFACE_EXPIRY,
     apply_surface_atm_ivs,
     default_surface_nodes,
+    market_for,
     run_surface_probability_engine,
 )
 from phase1_ui_patches import apply_phase1_ui_patches
@@ -120,7 +122,7 @@ source = source.replace(
 )
 source = source.replace(
     '            result = run_engine(simulation_inputs, corr, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed), shock_model=shock_model)',
-    '            if probability_model == "IV surface marginals":\n                if target_date.isoformat() != SURFACE_EXPIRY:\n                    raise ValueError(f"Calibrated surfaces are for {SURFACE_EXPIRY}. Choose that target date or use ATM lognormal.")\n                simulation_inputs = apply_surface_atm_ivs(simulation_inputs)\n                result, surface_diagnostics = run_surface_probability_engine(\n                    simulation_inputs, corr, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed),\n                    surface_nodes=default_surface_nodes(), risk_free_rate=float(forward_risk_free_rate),\n                )\n                probability_model_label = "IV surface risk-neutral marginals + Gaussian copula"\n            else:\n                result = run_engine(simulation_inputs, corr, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed), shock_model=shock_model)\n                surface_diagnostics = None\n                probability_model_label = f"ATM lognormal + {shock_model}"',
+    '            if probability_model == "IV surface marginals":\n                if target_date.isoformat() not in MARKETS:\n                    raise ValueError(f"Calibrated surfaces exist for {sorted(MARKETS)}. Choose one of those target dates or use ATM lognormal.")\n                simulation_inputs = apply_surface_atm_ivs(simulation_inputs, resolution=target_date.isoformat())\n                result, surface_diagnostics = run_surface_probability_engine(\n                    simulation_inputs, corr, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed),\n                    surface_nodes=default_surface_nodes(resolution=target_date.isoformat()), risk_free_rate=float(forward_risk_free_rate),\n                )\n                probability_model_label = "IV surface risk-neutral marginals + Gaussian copula"\n            else:\n                result = run_engine(simulation_inputs, corr, days_to_target=int(days_to_target), simulations=int(simulations), seed=int(seed), shock_model=shock_model)\n                surface_diagnostics = None\n                probability_model_label = f"ATM lognormal + {shock_model}"',
 )
 source = source.replace(
     '            st.session_state.last_iv_estimates = iv_estimates\n            st.session_state.last_sources = {"Market cap": market_cap_label, "IV": iv_label, "Polymarket": "Manual inputs", "Shock distribution": shock_model}',
