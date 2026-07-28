@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from simulation_store import save_session_to_repo, saved_session_files
+import shutil
+from simulation_store import REPO_STATE_DIR, STORE_DIR, save_session_to_repo, saved_session_files
 
 st.set_page_config(page_title="Session", layout="wide")
 st.title("Session: save & restore your work")
@@ -48,3 +49,16 @@ st.caption(
     "precedence over the saved copy, so your latest in-session work is never "
     "overwritten by an older save."
 )
+
+
+st.divider()
+st.subheader("Load today's setup (full preset)")
+st.write("Pull the option structure the morning run picked (Phase 6 candidate) into this session, so Phase 6/7/8 open on today's setup. Overwrites the local candidate.")
+if st.button("Load today's setup"):
+    src = REPO_STATE_DIR / "phase6_execution_candidate.pkl"
+    if src.exists():
+        STORE_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, STORE_DIR / "phase6_execution_candidate.pkl")
+        st.success("Loaded today's option structure. Run Phase 1 (already preset), then open Phase 6/7/8.")
+    else:
+        st.warning("No saved setup in the repo yet. The morning run creates it, or push once from daily_inputs.json.")

@@ -70,3 +70,17 @@ def test_report_includes_structure_selection(monkeypatch):
     for label in ["1/1/3/3", "2/2/3/3", "1/1/4/4", "2/2/4/4"]:
         assert label in report
     assert "## Structure comparison" in report
+
+
+def test_run_saves_phase6_candidate(monkeypatch, tmp_path):
+    import pickle
+    monkeypatch.setattr(daily_report, "SAVED_STATE", tmp_path / "saved_state")
+    def fake_fetch(tickers, manual_caps, manual_spots):
+        return dict(_CAPS), dict(_SPOTS), "test", []
+    monkeypatch.setattr(daily_report, "fetch_market_data", fake_fetch)
+    daily_report.run(_inputs())
+    cand_path = tmp_path / "saved_state" / "phase6_execution_candidate.pkl"
+    assert cand_path.exists()
+    cand = pickle.load(cand_path.open("rb"))
+    assert {"mapped_legs", "polymarket", "spots", "contract_multiplier"}.issubset(cand)
+    assert len(cand["mapped_legs"]) == 4

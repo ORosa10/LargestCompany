@@ -20,6 +20,7 @@ Writes reports/<date>.md and reports/latest.md.
 from __future__ import annotations
 
 import json
+import pickle
 from datetime import date
 from math import erf, exp, log, sqrt
 from pathlib import Path
@@ -41,6 +42,7 @@ import phase8 as p8
 REPO = Path(__file__).resolve().parent
 INPUTS_PATH = REPO / "daily_inputs.json"
 REPORTS_DIR = REPO / "reports"
+SAVED_STATE = REPO / "saved_state"  # repo-persistence dir the app restores from
 
 # Hedge template for a NO bet: normalized strikes (spot=100). For a YES bet the
 # structure is mirrored around spot. Put legs share put_weight, calls call_weight.
@@ -256,6 +258,25 @@ def run(inputs: dict) -> str:
         variants.append({"label": f"{pw}/{pw}/{cw}/{cw}", "portfolio": pf, **_variant_stats(result, pf)})
     best = rate_variants(variants)
     portfolio = best["portfolio"]
+
+    # Save the winning option structure so the Streamlit app can open with the
+    # full setup (Phase 6/7/8) pre-loaded - the "full preset". Small artifact
+    # (legs + config), committed to saved_state/ for the app to restore.
+    try:
+        SAVED_STATE.mkdir(exist_ok=True)
+        candidate = {
+            "mapped_legs": portfolio.option_legs.copy(),
+            "polymarket": {"selected_ticker": traded, "side": side, "entry": float(entry), "shares": shares},
+            "spots": {traded: float(spot)},
+            "contract_multiplier": 100.0,
+            "run_metadata": {"target_date": resolution_iso, "option_expiry": market["option_expiry"], "source": "daily_report"},
+            "saved_at": as_of.isoformat(),
+            "weights": best["label"],
+        }
+        with (SAVED_STATE / "phase6_execution_candidate.pkl").open("wb") as fh:
+            pickle.dump(candidate, fh)
+    except Exception:  # noqa: BLE001
+        pass
 
     seeds = list(range(seed, seed + 5))
     disp = p7.dispersion_summary(p7.multi_seed_dispersion(surf_inputs, corr, portfolio, days_to_target=days, simulations=sims, seeds=seeds))
