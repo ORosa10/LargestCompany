@@ -209,6 +209,24 @@ def run(inputs: dict) -> str:
         {"Ticker": t, "Current market cap": caps[t], "Implied volatility": 0.30, "Polymarket YES price": yes_prices[t]}
         for t in tickers
     ])
+
+    # Save the morning market snapshot so the Streamlit app can offer "morning
+    # Yahoo data" as an alternative to a fresh live fetch.
+    try:
+        REPORTS_DIR.mkdir(exist_ok=True)
+        (REPORTS_DIR / "market_snapshot.json").write_text(json.dumps({
+            "as_of": as_of.isoformat(),
+            "resolution": resolution_iso,
+            "option_expiry": market["option_expiry"],
+            "source": data_source,
+            "market_caps": caps,
+            "spots": spots,
+            "polymarket_yes": yes_prices,
+            "polymarket_no": no_prices,
+        }, indent=2))
+    except Exception:  # noqa: BLE001
+        pass
+
     traded = inputs.get("traded_ticker") or max(yes_prices, key=yes_prices.get)
     spot = spots[traded]
 
