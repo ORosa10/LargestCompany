@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pandas as pd
 
 
@@ -48,3 +51,21 @@ def apply_event_prices(
     price_map = visible.set_index("Ticker")["Polymarket YES price"]
     universe["Polymarket YES price"] = universe["Ticker"].map(price_map).fillna(0.0)
     return universe, visible, unknown
+
+
+def load_preset() -> dict:
+    """Read that day's daily_inputs.json (the automated setup) to preconfigure
+    the Streamlit app. Returns {'target_date': str|None, 'event_prices': DataFrame|None}.
+    Falls back to empty on any error so the app keeps its built-in defaults."""
+    path = Path(__file__).resolve().parent / "daily_inputs.json"
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {"target_date": None, "event_prices": None}
+    yes = data.get("polymarket_yes") or {}
+    event_prices = None
+    if yes:
+        event_prices = pd.DataFrame(
+            {"Ticker": list(yes.keys()), "Polymarket YES price": [float(v) for v in yes.values()]}
+        )
+    return {"target_date": data.get("target_date"), "event_prices": event_prices}

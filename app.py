@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from event_universe import JULY_2026_EVENT_PRICES, apply_event_prices
+from event_universe import JULY_2026_EVENT_PRICES, apply_event_prices, load_preset
 from implied_forwards import apply_implied_forwards, estimate_implied_forwards
 from iv_surface_model import (
     MARKETS,
@@ -34,7 +34,7 @@ source = source.replace(
 )
 source = source.replace(
     '    target_date = st.date_input("Target date / maturity", value=today + timedelta(days=365), min_value=today + timedelta(days=1))',
-    '    default_target = date(2026, 7, 31) if today < date(2026, 7, 31) else today + timedelta(days=365)\n    target_date = st.date_input("Target date / maturity", value=default_target, min_value=today + timedelta(days=1))',
+    '    _preset = load_preset()\n    default_target = date(2026, 7, 31) if today < date(2026, 7, 31) else today + timedelta(days=365)\n    if _preset.get("target_date"):\n        try:\n            _pt = date.fromisoformat(str(_preset["target_date"]))\n            if _pt > today:\n                default_target = _pt\n        except Exception:\n            pass\n    target_date = st.date_input("Target date / maturity", value=default_target, min_value=today + timedelta(days=1))',
 )
 source = source.replace(
     '    market_cap_source = st.selectbox("Market cap source", ["Yahoo Finance current market cap", "Manual market cap inputs"], index=0)\n',

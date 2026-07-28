@@ -44,3 +44,12 @@ def test_unknown_event_ticker_is_reported_not_added():
     assert updated["Ticker"].tolist() == ["NVDA"]
     assert visible["Ticker"].tolist() == ["NVDA"]
     assert unknown == ["UNKNOWN"]
+
+
+def test_load_preset_reads_daily_inputs():
+    from event_universe import load_preset
+    preset = load_preset()
+    assert set(preset) == {"target_date", "event_prices"}
+    if preset["event_prices"] is not None:
+        assert list(preset["event_prices"].columns) == ["Ticker", "Polymarket YES price"]
+        assert len(preset["event_prices"]) >= 1

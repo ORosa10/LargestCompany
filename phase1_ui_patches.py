@@ -64,7 +64,8 @@ def apply_phase1_ui_patches(source: str) -> str:
         st.subheader("Polymarket outcomes")
         st.write("Only this compact list is compared with Polymarket. Deleting a row sets its market price to zero, but the company remains in the Monte Carlo universe and correlation matrix.")
         if "surface_event_prices" not in st.session_state:
-            st.session_state.surface_event_prices = JULY_2026_EVENT_PRICES.copy()
+            _preset_ep = load_preset().get("event_prices")
+            st.session_state.surface_event_prices = _preset_ep.copy() if _preset_ep is not None else JULY_2026_EVENT_PRICES.copy()
         edited_event_prices = st.data_editor(
             st.session_state.surface_event_prices,
             num_rows="dynamic",
