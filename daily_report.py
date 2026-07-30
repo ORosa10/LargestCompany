@@ -229,9 +229,6 @@ def run(inputs: dict) -> str:
     except Exception:  # noqa: BLE001
         pass
 
-    traded = inputs.get("traded_ticker") or max(yes_prices, key=yes_prices.get)
-    spot = spots[traded]
-
     corr = default_correlation_matrix(tickers)
     surf_inputs = apply_surface_atm_ivs(universe.copy(), resolution=resolution_iso)
     result, _ = run_surface_probability_engine(
@@ -239,17 +236,30 @@ def run(inputs: dict) -> str:
         surface_nodes=default_surface_nodes(resolution=resolution_iso), risk_free_rate=rate,
     )
     probs = result.results.set_index("Ticker")
-    model_p = float(probs.loc[traded, "Model probability"])
-    iv_atm = float(surf_inputs.set_index("Ticker").loc[traded, "Implied volatility"])
     caps_series = universe.set_index("Ticker")["Current market cap"].astype(float)
 
-    # --- Side selection: naked bet with higher expected value on the model ---
-    yes_price = float(yes_prices[traded])
-    no_price = float(no_prices.get(traded, round(1.0 - yes_price, 4)))
-    yes_ev = model_p - yes_price
-    no_ev = (1.0 - model_p) - no_price
-    side = str(inputs.get("force_side") or ("YES" if yes_ev >= no_ev else "NO")).upper()
-    entry = yes_price if side == "YES" else no_price
+    # --- Candidates: YES and NO edge for every ticker (edge = model fair - price) ---
+    candidates = []
+    for t in tickers:
+        mp = float(probs.loc[t, "Model probability"])
+        yp = float(yes_prices[t])
+        np_ = float(no_prices.get(t, round(1.0 - yp, 4)))
+        candidates.append({"ticker": t, "side": "YES", "model_side": mp, "price": yp, "edge": mp - yp})
+        candidates.append({"ticker": t, "side": "NO", "model_side": 1.0 - mp, "price": np_, "edge": (1.0 - mp) - np_})
+    best_yes = max((c for c in candidates if c["side"] == "YES"), key=lambda c: c["edge"])
+    best_no = max((c for c in candidates if c["side"] == "NO"), key=lambda c: c["edge"])
+
+    # --- Primary trade: max edge overall, unless explicitly overridden ---
+    if inputs.get("traded_ticker") and inputs.get("force_side"):
+        primary = next(c for c in candidates if c["ticker"] == inputs["traded_ticker"] and c["side"] == str(inputs["force_side"]).upper())
+    elif inputs.get("traded_ticker"):
+        primary = max((c for c in candidates if c["ticker"] == inputs["traded_ticker"]), key=lambda c: c["edge"])
+    else:
+        primary = max(candidates, key=lambda c: c["edge"])
+    traded, side, entry = primary["ticker"], primary["side"], float(primary["price"])
+    spot = spots[traded]
+    model_p = float(probs.loc[traded, "Model probability"])
+    iv_atm = float(surf_inputs.set_index("Ticker").loc[traded, "Implied volatility"])
 
     # --- Sweep weight variants, rate, pick winner ---
     variants = []
@@ -355,6 +365,15 @@ def run(inputs: dict) -> str:
     L.append(f"| Simulation says ({side} fair) | {model_side_prob:.1%} |")
     L.append(f"| Edge (fair - price) | **{edge:+.1%}** |")
     L.append(f"| Grade | **{verdict}** (>5% favorable, 0-5% marginal, <=0 unfavorable) |")
+    L.append("")
+    L.append("## Trade candidates (best edge per side)")
+    L.append("| | Ticker | Model fair | Price | Edge |")
+    L.append("|---|---|---|---|---|")
+    yes_mark = " (traded)" if (side == "YES" and traded == best_yes["ticker"]) else ""
+    no_mark = " (traded)" if (side == "NO" and traded == best_no["ticker"]) else ""
+    L.append(f"| Best YES{yes_mark} | {best_yes['ticker']} | {best_yes['model_side']:.1%} | {best_yes['price']:.0%} | {best_yes['edge']:+.1%} |")
+    L.append(f"| Best NO{no_mark} | {best_no['ticker']} | {best_no['model_side']:.1%} | {best_no['price']:.0%} | {best_no['edge']:+.1%} |")
+    L.append(f"Traded = max edge: **{traded} {side}** ({edge:+.1%}). NO is more robust to an unmodeled surprise winner; YES is more direct but optimistic given the 3-name universe.")
     L.append("")
     L.append("## Best structure: " + best["label"] + " (put/put/call/call)")
     L.append("| Metric | Value |")
