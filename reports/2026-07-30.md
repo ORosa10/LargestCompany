@@ -13,6 +13,13 @@
 | Edge (fair - price) | **+17.2%** |
 | Grade | **FAVORABLE** (>5% favorable, 0-5% marginal, <=0 unfavorable) |
 
+## Trade candidates (best edge per side)
+| | Ticker | Model fair | Price | Edge |
+|---|---|---|---|---|
+| Best YES (traded) | AAPL | 75.2% | 58% | +17.2% |
+| Best NO | NVDA | 76.6% | 61% | +15.6% |
+Traded = max edge: **AAPL YES** (+17.2%). NO is more robust to an unmodeled surprise winner; YES is more direct but optimistic given the 3-name universe.
+
 ## Best structure: 1/1/3/3 (put/put/call/call)
 | Metric | Value |
 |---|---|
