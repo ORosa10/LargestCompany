@@ -5,6 +5,12 @@
 - Fragility (Phase 7): **MEDIUM - some assumptions move it (convergence / tail dependence)**
 - Data: Yahoo live
 
+## Summary
+- Expected profit **$15.05** on $101.65 capital at risk (RoCaR 14.8%).
+- Side auto-picked **YES**: naked YES EV +17.2% vs naked NO EV -19.2% (traded = higher EV).
+- Your YES edge: model P(AAPL #1) 75.2% vs YES price 58% -> +17.2%.
+- Robustness: probability estimate is NOT fully robust (stability of the estimate, not the trade direction).
+
 ## Edge: market vs simulation
 | | Value |
 |---|---|
@@ -19,6 +25,14 @@
 | Best YES (traded) | AAPL | 75.2% | 58% | +17.2% |
 | Best NO | NVDA | 76.6% | 61% | +15.6% |
 Traded = max edge: **AAPL YES** (+17.2%). NO is more robust to an unmodeled surprise winner; YES is more direct but optimistic given the 3-name universe.
+
+## Probability by name (model vs market)
+| Ticker | Model P(#1) | Market YES | Market NO | YES edge | NO edge |
+|---|---|---|---|---|---|
+| AAPL * | 75.2% | 58% | 44% | +17.2% | -19.2% |
+| NVDA | 23.4% | 40% | 61% | -16.6% | +15.6% |
+| GOOGL | 1.4% | 4% | 97% | -2.6% | +1.7% |
+* = traded name.
 
 ## Best structure: 1/1/3/3 (put/put/call/call)
 | Metric | Value |
