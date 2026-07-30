@@ -6,7 +6,7 @@
 - Data: Yahoo live
 
 ## Summary
-- Expected profit **$17.19** on $99.50 capital at risk (RoCaR 17.3%).
+- Expected profit **$14.01** on $102.68 capital at risk (RoCaR 13.6%).
 - Side auto-picked **YES**: naked YES EV +17.2% vs naked NO EV -19.2% (traded = higher EV).
 - Your YES edge: model P(AAPL #1) 75.2% vs YES price 58% -> +17.2%.
 - Robustness: probability estimate is NOT fully robust (stability of the estimate, not the trade direction).
@@ -41,24 +41,24 @@ Edge +17.2% | Verdict FAVORABLE | Fragility MEDIUM
 ## Best structure: 1/1/3/3 (put/put/call/call)
 | Metric | Value |
 |---|---|
-| Expected profit | $17.19 |
+| Expected profit | $14.01 |
 | Payoff SD | $43.77 |
-| VaR 5% | $66.36 |
-| VaR 1% | $92.03 |
-| Worst case | $99.50 |
-| Probability of profit | 75.2% |
-| Return on VaR 5% | 25.9% |
-| Return on VaR 1% | 18.7% |
-| Return on worst case | 17.3% |
+| VaR 5% | $69.54 |
+| VaR 1% | $95.21 |
+| Worst case | $102.68 |
+| Probability of profit | 74.1% |
+| Return on VaR 5% | 20.1% |
+| Return on VaR 1% | 14.7% |
+| Return on worst case | 13.6% |
 
 ## Structure comparison (weights: put/put/call/call)
 Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.
 | Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |
 |---|---|---|---|---|---|---|
-| 1/1/3/3 (best) | 1.00 | 75% | +0.39 | $81.66 | +25.9% | $17.19 |
-| 2/2/3/3 | 0.56 | 67% | +0.38 | $86.84 | +25.7% | $17.19 |
-| 1/1/4/4 | 0.37 | 67% | +0.38 | $87.82 | +24.9% | $17.19 |
-| 2/2/4/4 | 0.00 | 63% | +0.36 | $93.00 | +24.7% | $17.19 |
+| 1/1/3/3 (best) | 1.00 | 74% | +0.32 | $84.84 | +20.1% | $14.01 |
+| 2/2/3/3 | 0.48 | 64% | +0.29 | $90.70 | +18.8% | $13.33 |
+| 1/1/4/4 | 0.36 | 64% | +0.29 | $91.83 | +18.1% | $13.18 |
+| 2/2/4/4 | 0.00 | 62% | +0.26 | $97.69 | +16.8% | $12.50 |
 
 ## Consistency check (across assumptions & simulation reruns)
 Overall fragility: **MEDIUM - some assumptions move it (convergence / tail dependence)**. P(AAPL #1) ranges 74.6%-78.0% across models (spread 3.3%).
@@ -84,27 +84,27 @@ P(AAPL #1) by model:
 # Best NO trade: NVDA NO @ 0.61
 Edge +15.6% | Verdict FAVORABLE | Fragility MEDIUM
 
-## Best structure: 2/2/3/3 (put/put/call/call)
+## Best structure: 1/1/3/3 (put/put/call/call)
 | Metric | Value |
 |---|---|
-| Expected profit | $15.64 |
-| Payoff SD | $41.29 |
-| VaR 5% | $32.75 |
-| VaR 1% | $90.59 |
-| Worst case | $117.74 |
-| Probability of profit | 58.3% |
-| Return on VaR 5% | 47.7% |
-| Return on VaR 1% | 17.3% |
-| Return on worst case | 13.3% |
+| Expected profit | $15.83 |
+| Payoff SD | $39.23 |
+| VaR 5% | $37.27 |
+| VaR 1% | $86.54 |
+| Worst case | $102.27 |
+| Probability of profit | 66.2% |
+| Return on VaR 5% | 42.5% |
+| Return on VaR 1% | 18.3% |
+| Return on worst case | 15.5% |
 
 ## Structure comparison (weights: put/put/call/call)
 Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.
 | Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |
 |---|---|---|---|---|---|---|
-| 2/2/3/3 (best) | 0.55 | 58% | +0.38 | $56.74 | +47.7% | $15.64 |
-| 1/1/3/3 | 0.50 | 66% | +0.40 | $61.21 | +41.7% | $15.63 |
-| 1/1/4/4 | 0.37 | 56% | +0.38 | $60.15 | +50.1% | $15.64 |
-| 2/2/4/4 | 0.29 | 54% | +0.36 | $60.57 | +59.0% | $15.64 |
+| 1/1/3/3 (best) | 0.75 | 66% | +0.40 | $46.36 | +42.5% | $15.83 |
+| 1/1/4/4 | 0.34 | 56% | +0.39 | $59.92 | +51.4% | $15.91 |
+| 2/2/3/3 | 0.29 | 58% | +0.38 | $60.73 | +48.5% | $15.81 |
+| 2/2/4/4 | 0.26 | 54% | +0.37 | $60.16 | +60.5% | $15.88 |
 
 ## Consistency check (across assumptions & simulation reruns)
 Overall fragility: **MEDIUM - some assumptions move it (convergence / tail dependence)**. P(NVDA #1) ranges 20.9%-24.5% across models (spread 3.6%).
@@ -124,4 +124,4 @@ P(NVDA #1) by model:
 | ATM lognormal + Student-t df=6 (fat marginals) | 21.6% |
 
 ## Watch-outs
-- This saved portfolio is lightly hedged (probability of loss 45%); the option legs are barely active. Re-run on the fully hedged Phase 5/6 structure before trusting the tail metrics.
+- No material risk flags on these scenarios.
