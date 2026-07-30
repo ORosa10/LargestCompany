@@ -6,7 +6,7 @@
 - Data: Yahoo live
 
 ## Summary
-- Expected profit **$15.05** on $101.65 capital at risk (RoCaR 14.8%).
+- Expected profit **$17.19** on $99.50 capital at risk (RoCaR 17.3%).
 - Side auto-picked **YES**: naked YES EV +17.2% vs naked NO EV -19.2% (traded = higher EV).
 - Your YES edge: model P(AAPL #1) 75.2% vs YES price 58% -> +17.2%.
 - Robustness: probability estimate is NOT fully robust (stability of the estimate, not the trade direction).
@@ -41,24 +41,24 @@ Edge +17.2% | Verdict FAVORABLE | Fragility MEDIUM
 ## Best structure: 1/1/3/3 (put/put/call/call)
 | Metric | Value |
 |---|---|
-| Expected profit | $15.05 |
+| Expected profit | $17.19 |
 | Payoff SD | $43.77 |
-| VaR 5% | $68.51 |
-| VaR 1% | $94.18 |
-| Worst case | $101.65 |
-| Probability of profit | 74.2% |
-| Return on VaR 5% | 22.0% |
-| Return on VaR 1% | 16.0% |
-| Return on worst case | 14.8% |
+| VaR 5% | $66.36 |
+| VaR 1% | $92.03 |
+| Worst case | $99.50 |
+| Probability of profit | 75.2% |
+| Return on VaR 5% | 25.9% |
+| Return on VaR 1% | 18.7% |
+| Return on worst case | 17.3% |
 
 ## Structure comparison (weights: put/put/call/call)
 Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.
 | Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |
 |---|---|---|---|---|---|---|
-| 1/1/3/3 (best) | 1.00 | 74% | +0.34 | $83.80 | +22.0% | $15.05 |
-| 2/2/3/3 | 0.54 | 65% | +0.33 | $89.28 | +21.3% | $14.75 |
-| 1/1/4/4 | 0.32 | 64% | +0.32 | $90.58 | +20.1% | $14.43 |
-| 2/2/4/4 | 0.00 | 62% | +0.30 | $96.05 | +19.5% | $14.13 |
+| 1/1/3/3 (best) | 1.00 | 75% | +0.39 | $81.66 | +25.9% | $17.19 |
+| 2/2/3/3 | 0.56 | 67% | +0.38 | $86.84 | +25.7% | $17.19 |
+| 1/1/4/4 | 0.37 | 67% | +0.38 | $87.82 | +24.9% | $17.19 |
+| 2/2/4/4 | 0.00 | 63% | +0.36 | $93.00 | +24.7% | $17.19 |
 
 ## Consistency check (across assumptions & simulation reruns)
 Overall fragility: **MEDIUM - some assumptions move it (convergence / tail dependence)**. P(AAPL #1) ranges 74.6%-78.0% across models (spread 3.3%).
@@ -84,27 +84,27 @@ P(AAPL #1) by model:
 # Best NO trade: NVDA NO @ 0.61
 Edge +15.6% | Verdict FAVORABLE | Fragility MEDIUM
 
-## Best structure: 1/1/3/3 (put/put/call/call)
+## Best structure: 2/2/3/3 (put/put/call/call)
 | Metric | Value |
 |---|---|
-| Expected profit | $16.95 |
-| Payoff SD | $39.23 |
-| VaR 5% | $36.16 |
-| VaR 1% | $85.43 |
-| Worst case | $101.15 |
-| Probability of profit | 67.5% |
-| Return on VaR 5% | 46.9% |
-| Return on VaR 1% | 19.8% |
-| Return on worst case | 16.8% |
+| Expected profit | $15.64 |
+| Payoff SD | $41.29 |
+| VaR 5% | $32.75 |
+| VaR 1% | $90.59 |
+| Worst case | $117.74 |
+| Probability of profit | 58.3% |
+| Return on VaR 5% | 47.7% |
+| Return on VaR 1% | 17.3% |
+| Return on worst case | 13.3% |
 
 ## Structure comparison (weights: put/put/call/call)
 Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.
 | Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |
 |---|---|---|---|---|---|---|
-| 1/1/3/3 (best) | 0.75 | 68% | +0.43 | $56.47 | +46.9% | $16.95 |
-| 2/2/3/3 | 0.42 | 60% | +0.41 | $58.01 | +54.8% | $17.13 |
-| 1/1/4/4 | 0.37 | 57% | +0.43 | $59.84 | +58.7% | $17.32 |
-| 2/2/4/4 | 0.28 | 55% | +0.40 | $59.45 | +71.1% | $17.51 |
+| 2/2/3/3 (best) | 0.55 | 58% | +0.38 | $56.74 | +47.7% | $15.64 |
+| 1/1/3/3 | 0.50 | 66% | +0.40 | $61.21 | +41.7% | $15.63 |
+| 1/1/4/4 | 0.37 | 56% | +0.38 | $60.15 | +50.1% | $15.64 |
+| 2/2/4/4 | 0.29 | 54% | +0.36 | $60.57 | +59.0% | $15.64 |
 
 ## Consistency check (across assumptions & simulation reruns)
 Overall fragility: **MEDIUM - some assumptions move it (convergence / tail dependence)**. P(NVDA #1) ranges 20.9%-24.5% across models (spread 3.6%).
@@ -124,4 +124,4 @@ P(NVDA #1) by model:
 | ATM lognormal + Student-t df=6 (fat marginals) | 21.6% |
 
 ## Watch-outs
-- No material risk flags on these scenarios.
+- This saved portfolio is lightly hedged (probability of loss 45%); the option legs are barely active. Re-run on the fully hedged Phase 5/6 structure before trusting the tail metrics.
