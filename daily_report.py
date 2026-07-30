@@ -317,10 +317,9 @@ def run(inputs: dict) -> str:
         iv_c = float(iv_by_ticker.loc[tk])
         tk_nodes = _surface_nodes_all[_surface_nodes_all["Ticker"] == tk]
         fr = float(surf_inputs.set_index("Ticker").loc[tk, "Forward / spot"]) if "Forward / spot" in surf_inputs.columns else 1.0
-        tprices = (result.terminal_market_caps[tk].astype(float) / float(caps_series.loc[tk]) * sp).to_numpy()
         vlist = []
         for pw, cw in WEIGHT_VARIANTS:
-            pf = _make_portfolio(tk, sp, iv_c, years, rate, caps_series, sd, ent, shares, pw, cw, ticker_nodes=tk_nodes, forward_ratio=fr, price_samples=tprices)
+            pf = _make_portfolio(tk, sp, iv_c, years, rate, caps_series, sd, ent, shares, pw, cw, ticker_nodes=tk_nodes, forward_ratio=fr)
             vlist.append({"label": f"{pw}/{pw}/{cw}/{cw}", "portfolio": pf, **_variant_stats(result, pf)})
         bestv = rate_variants(vlist)
         pf = bestv["portfolio"]
