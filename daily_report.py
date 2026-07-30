@@ -261,96 +261,102 @@ def run(inputs: dict) -> str:
     model_p = float(probs.loc[traded, "Model probability"])
     iv_atm = float(surf_inputs.set_index("Ticker").loc[traded, "Implied volatility"])
 
-    # --- Sweep weight variants, rate, pick winner ---
-    variants = []
-    for pw, cw in WEIGHT_VARIANTS:
-        pf = _make_portfolio(traded, spot, iv_atm, years, rate, caps_series, side, entry, shares, pw, cw)
-        variants.append({"label": f"{pw}/{pw}/{cw}/{cw}", "portfolio": pf, **_variant_stats(result, pf)})
-    best = rate_variants(variants)
-    portfolio = best["portfolio"]
+    def d(x):
+        return f"${x:,.2f}"
 
-    # Save the winning option structure so the Streamlit app can open with the
-    # full setup (Phase 6/7/8) pre-loaded - the "full preset". Small artifact
-    # (legs + config), committed to saved_state/ for the app to restore.
+    iv_by_ticker = surf_inputs.set_index("Ticker")["Implied volatility"].astype(float)
+
+    def _analyze(cand):
+        """Full weight sweep + Phase 7/8 for one candidate (ticker+side)."""
+        tk, sd, ent = cand["ticker"], cand["side"], float(cand["price"])
+        sp = float(spots[tk])
+        mp = float(probs.loc[tk, "Model probability"])
+        iv_c = float(iv_by_ticker.loc[tk])
+        vlist = []
+        for pw, cw in WEIGHT_VARIANTS:
+            pf = _make_portfolio(tk, sp, iv_c, years, rate, caps_series, sd, ent, shares, pw, cw)
+            vlist.append({"label": f"{pw}/{pw}/{cw}/{cw}", "portfolio": pf, **_variant_stats(result, pf)})
+        bestv = rate_variants(vlist)
+        pf = bestv["portfolio"]
+        seeds = list(range(seed, seed + 5))
+        disp = p7.dispersion_summary(p7.multi_seed_dispersion(surf_inputs, corr, pf, days_to_target=days, simulations=sims, seeds=seeds))
+        cop = p7.copula_tail_stress(surf_inputs, corr, pf, days_to_target=days, simulations=sims, seeds=seeds)
+        ivs = p7.iv_scaling_scan(surf_inputs, corr, selected_ticker=tk, days_to_target=days, simulations=sims, seed=seed, factors=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
+        gps = p7.gap_scaling_scan(surf_inputs, corr, selected_ticker=tk, days_to_target=days, simulations=sims, seed=seed, factors=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
+        gv = p7.gap_vs_randomness(ivs, gps)
+        variants_corr = {"Saved": corr, "Independent": p7.constant_correlation(tickers, 0.0), "High 0.8": p7.constant_correlation(tickers, 0.8)}
+        grid = p7.model_robustness(surf_inputs, variants_corr, selected_ticker=tk, days_to_target=days, simulations=sims, seed=seed, shock_models=["Normal shocks", "Student-t copula df=5"])
+        asmt = p7.assessment(disp, cop, gv, p7.robustness_summary(grid), selected_ticker=tk)
+        rm = p8.risk_metrics(result, pf)
+        v5 = p8.value_at_risk(result, pf, 0.05)
+        v1 = p8.value_at_risk(result, pf, 0.01)
+        exp = float(rm["Expected profit"])
+        mloss = float(rm["Max loss (capital at risk)"])
+        rcar = float(rm["Return on capital-at-risk"])
+        msp = (1.0 - mp) if sd == "NO" else mp
+        edg = msp - ent
+        vd = "UNFAVORABLE" if edg <= 0.0 else ("MARGINAL" if edg <= 0.05 else "FAVORABLE")
+        ftext = " ".join(asmt["findings"]["Verdict"].astype(str)).lower()
+        if "flips sign" in ftext:
+            frag = "HIGH - edge is model-dependent (flips sign across models)"
+        elif ("not converged" in ftext) or ("sensitive to tail" in ftext):
+            frag = "MEDIUM - some assumptions move it (convergence / tail dependence)"
+        else:
+            frag = "LOW - holds across the robustness tests"
+
+        def _pt(res):
+            return float(res.results.set_index("Ticker").loc[tk, "Model probability"])
+        mprobs = {"IV surface + Gaussian copula": mp}
+        try:
+            mprobs["ATM lognormal + Normal"] = _pt(run_probability_engine(surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Normal shocks"))
+            mprobs["ATM lognormal + Student-t copula df=5"] = _pt(run_probability_engine(surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Student-t copula df=5"))
+            mprobs["ATM lognormal + Student-t df=6 (fat marginals)"] = _pt(run_probability_engine(surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Student-t df=6"))
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "ticker": tk, "side": sd, "entry": ent, "spot": sp, "model_p": mp,
+            "model_side_prob": msp, "edge": edg, "verdict": vd, "fragility": frag,
+            "best": bestv, "variants": vlist, "portfolio": pf, "assessment": asmt,
+            "rm": rm, "var5": v5, "var1": v1, "expected": exp, "max_loss": mloss,
+            "rocar": rcar, "model_probs": mprobs,
+            "prob_lo": min(mprobs.values()), "prob_hi": max(mprobs.values()),
+        }
+
+    _cache = {}
+
+    def analyze(cand):
+        key = (cand["ticker"], cand["side"])
+        if key not in _cache:
+            _cache[key] = _analyze(cand)
+        return _cache[key]
+
+    primary_A = analyze(primary)
+    yes_A = analyze(best_yes)
+    no_A = analyze(best_no)
+
+    # Save the primary (max-edge) structure as the app preset - unchanged.
     try:
         SAVED_STATE.mkdir(exist_ok=True)
         candidate = {
-            "mapped_legs": portfolio.option_legs.copy(),
-            "polymarket": {"selected_ticker": traded, "side": side, "entry": float(entry), "shares": shares},
-            "spots": {traded: float(spot)},
+            "mapped_legs": primary_A["portfolio"].option_legs.copy(),
+            "polymarket": {"selected_ticker": primary_A["ticker"], "side": primary_A["side"], "entry": float(primary_A["entry"]), "shares": shares},
+            "spots": {primary_A["ticker"]: float(primary_A["spot"])},
             "contract_multiplier": 100.0,
             "run_metadata": {"target_date": resolution_iso, "option_expiry": market["option_expiry"], "source": "daily_report"},
             "saved_at": as_of.isoformat(),
-            "weights": best["label"],
+            "weights": primary_A["best"]["label"],
         }
         with (SAVED_STATE / "phase6_execution_candidate.pkl").open("wb") as fh:
             pickle.dump(candidate, fh)
     except Exception:  # noqa: BLE001
         pass
 
-    seeds = list(range(seed, seed + 5))
-    disp = p7.dispersion_summary(p7.multi_seed_dispersion(surf_inputs, corr, portfolio, days_to_target=days, simulations=sims, seeds=seeds))
-    cop = p7.copula_tail_stress(surf_inputs, corr, portfolio, days_to_target=days, simulations=sims, seeds=seeds)
-    ivs = p7.iv_scaling_scan(surf_inputs, corr, selected_ticker=traded, days_to_target=days, simulations=sims, seed=seed, factors=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
-    gps = p7.gap_scaling_scan(surf_inputs, corr, selected_ticker=traded, days_to_target=days, simulations=sims, seed=seed, factors=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
-    gv = p7.gap_vs_randomness(ivs, gps)
-    variants_corr = {"Saved": corr, "Independent": p7.constant_correlation(tickers, 0.0), "High 0.8": p7.constant_correlation(tickers, 0.8)}
-    grid = p7.model_robustness(surf_inputs, variants_corr, selected_ticker=traded, days_to_target=days, simulations=sims, seed=seed, shock_models=["Normal shocks", "Student-t copula df=5"])
-    assessment = p7.assessment(disp, cop, gv, p7.robustness_summary(grid), selected_ticker=traded)
-
-    rm = p8.risk_metrics(result, portfolio)
-    var5 = p8.value_at_risk(result, portfolio, 0.05)
-    var1 = p8.value_at_risk(result, portfolio, 0.01)
-    expected = float(rm["Expected profit"])
-    max_loss = float(rm["Max loss (capital at risk)"])
-    rocar = float(rm["Return on capital-at-risk"])
-    model_side_prob = (1.0 - model_p) if side == "NO" else model_p
-    edge = model_side_prob - entry  # edge on the traded side
-
-    # 3-tier grade by edge size on the traded side.
-    if edge <= 0.0:
-        verdict = "UNFAVORABLE"
-    elif edge <= 0.05:
-        verdict = "MARGINAL"
-    else:
-        verdict = "FAVORABLE"
-
-    # Fragility from the Phase 7 checks.
-    findings_text = " ".join(assessment["findings"]["Verdict"].astype(str)).lower()
-    sign_flip = "flips sign" in findings_text
-    not_converged = "not converged" in findings_text
-    tail_sensitive = "sensitive to tail" in findings_text
-    if sign_flip:
-        fragility = "HIGH - edge is model-dependent (flips sign across models)"
-    elif not_converged or tail_sensitive:
-        fragility = "MEDIUM - some assumptions move it (convergence / tail dependence)"
-    else:
-        fragility = "LOW - holds across the robustness tests"
-
-    # How the raw P(#1) shifts by marginal / tail model choice.
-    def _p_traded(res):
-        return float(res.results.set_index("Ticker").loc[traded, "Model probability"])
-    model_probs = {"IV surface + Gaussian copula": model_p}
-    try:
-        model_probs["ATM lognormal + Normal"] = _p_traded(run_probability_engine(
-            surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Normal shocks"))
-        model_probs["ATM lognormal + Student-t copula df=5"] = _p_traded(run_probability_engine(
-            surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Student-t copula df=5"))
-        model_probs["ATM lognormal + Student-t df=6 (fat marginals)"] = _p_traded(run_probability_engine(
-            surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Student-t df=6"))
-    except Exception:  # noqa: BLE001
-        pass
-    prob_lo, prob_hi = min(model_probs.values()), max(model_probs.values())
-
-    def d(x):
-        return f"${x:,.2f}"
-
-    var_worst = max_loss
-    roc_var5 = expected / var5 if var5 > 0 else float("nan")
-    roc_var1 = expected / var1 if var1 > 0 else float("nan")
-    roc_worst = expected / var_worst if var_worst > 0 else float("nan")
-
-    # Plain-language summary inputs (restored).
+    # Top of report keyed to the primary (traded) trade.
+    traded = primary_A["ticker"]; side = primary_A["side"]; entry = primary_A["entry"]
+    model_p = primary_A["model_p"]; model_side_prob = primary_A["model_side_prob"]
+    edge = primary_A["edge"]; verdict = primary_A["verdict"]; fragility = primary_A["fragility"]
+    expected = primary_A["expected"]; max_loss = primary_A["max_loss"]; rocar = primary_A["rocar"]
+    side_word = "#1" if side == "YES" else "NOT #1"
     traded_yes = next(c for c in candidates if c["ticker"] == traded and c["side"] == "YES")
     traded_no = next(c for c in candidates if c["ticker"] == traded and c["side"] == "NO")
     naked_yes, naked_no = traded_yes["edge"], traded_no["edge"]
@@ -360,7 +366,6 @@ def run(inputs: dict) -> str:
         rob_note = "edge is model-dependent (flips sign across models) - treat the direction as uncertain."
     else:
         rob_note = "probability estimate is NOT fully robust (stability of the estimate, not the trade direction)."
-    side_word = "#1" if side == "YES" else "NOT #1"
 
     L = []
     L.append(f"# LargestCompany daily report - {as_of.isoformat()}")
@@ -391,7 +396,7 @@ def run(inputs: dict) -> str:
     no_mark = " (traded)" if (side == "NO" and traded == best_no["ticker"]) else ""
     L.append(f"| Best YES{yes_mark} | {best_yes['ticker']} | {best_yes['model_side']:.1%} | {best_yes['price']:.0%} | {best_yes['edge']:+.1%} |")
     L.append(f"| Best NO{no_mark} | {best_no['ticker']} | {best_no['model_side']:.1%} | {best_no['price']:.0%} | {best_no['edge']:+.1%} |")
-    L.append(f"Traded = max edge: **{traded} {side}** ({edge:+.1%}). NO is more robust to an unmodeled surprise winner; YES is more direct but optimistic given the 3-name universe.")
+    L.append(f"Traded = max edge: **{traded} {side}** ({edge:+.1%}). Both sides get a full risk block below. NO is more robust to an unmodeled surprise winner; YES is more direct but optimistic given the 3-name universe.")
     L.append("")
     L.append("## Probability by name (model vs market)")
     L.append("| Ticker | Model P(#1) | Market YES | Market NO | YES edge | NO edge |")
@@ -409,47 +414,65 @@ def run(inputs: dict) -> str:
             L.append(f"| {t}{star_t} | {mp_t:.1%} | {yp_t:.0%} | {float(np_t):.0%} | {yes_edge_t:+.1%} | {no_edge_t:+.1%} |")
     L.append("* = traded name.")
     L.append("")
-    L.append("## Best structure: " + best["label"] + " (put/put/call/call)")
-    L.append("| Metric | Value |")
-    L.append("|---|---|")
-    L.append(f"| Expected profit | {d(expected)} |")
-    L.append(f"| Payoff SD | {d(float(best['sd']))} |")
-    L.append(f"| VaR 5% | {d(var5)} |")
-    L.append(f"| VaR 1% | {d(var1)} |")
-    L.append(f"| Worst case | {d(var_worst)} |")
-    L.append(f"| Probability of profit | {float(rm['Probability of profit']):.1%} |")
-    L.append(f"| Return on VaR 5% | {roc_var5:.1%} |")
-    L.append(f"| Return on VaR 1% | {roc_var1:.1%} |")
-    L.append(f"| Return on worst case | {roc_worst:.1%} |")
-    L.append("")
-    L.append("## Structure comparison (weights: put/put/call/call)")
-    L.append("Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.")
-    L.append("| Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |")
-    L.append("|---|---|---|---|---|---|---|")
-    for v in sorted(variants, key=lambda x: x["score"], reverse=True):
-        star = " (best)" if v is best else ""
-        L.append(f"| {v['label']}{star} | {v['score']:.2f} | {v['p_win']:.0%} | {v['ev_sd']:+.2f} | {d(v['es5'])} | {v['roc_var5']:+.1%} | {d(v['expected'])} |")
-    L.append("")
-    fmap = {str(r["Area"]).split(".")[0].strip(): str(r["Verdict"]) for _, r in assessment["findings"].iterrows()}
-    L.append("## Consistency check (across assumptions & simulation reruns)")
-    L.append(f"Overall fragility: **{fragility}**. P({traded} #1) ranges {prob_lo:.1%}-{prob_hi:.1%} across models (spread {prob_hi - prob_lo:.1%}).")
-    L.append("| Check | Result |")
-    L.append("|---|---|")
-    L.append(f"| Across simulation reruns (seeds) | {fmap.get('1', 'n/a')} |")
-    L.append(f"| Across models & tails (IV surface / ATM / copula) | {fmap.get('5', 'n/a')} |")
-    L.append(f"| Tail dependence (joint crashes) | {fmap.get('2', 'n/a')} |")
-    L.append(f"| Dominant lever | {fmap.get('3', 'n/a')} |")
-    L.append("")
-    L.append(f"P({traded} #1) by model:")
-    L.append("| Model | P(#1) |")
-    L.append("|---|---|")
-    for name, val in model_probs.items():
-        L.append(f"| {name} | {val:.1%} |")
-    L.append("")
-    L.append("## Watch-outs")
-    for w in assessment["watch_outs"]:
-        L.append(f"- {w}")
-    return "\n".join(L)
+
+    def render_block(A, label):
+        is_primary = (A["ticker"] == traded and A["side"] == side)
+        tag = " (traded / app preset)" if is_primary else ""
+        best = A["best"]; rm = A["rm"]; variants = A["variants"]
+        var5 = A["var5"]; var1 = A["var1"]; var_worst = A["max_loss"]
+        exp = A["expected"]
+        rv5 = exp / var5 if var5 > 0 else float("nan")
+        rv1 = exp / var1 if var1 > 0 else float("nan")
+        rvw = exp / var_worst if var_worst > 0 else float("nan")
+        L.append("---")
+        L.append(f"# {label} trade: {A['ticker']} {A['side']} @ {A['entry']:.2f}{tag}")
+        L.append(f"Edge {A['edge']:+.1%} | Verdict {A['verdict']} | Fragility {A['fragility'].split(' - ')[0]}")
+        L.append("")
+        L.append(f"## Best structure: {best['label']} (put/put/call/call)")
+        L.append("| Metric | Value |")
+        L.append("|---|---|")
+        L.append(f"| Expected profit | {d(exp)} |")
+        L.append(f"| Payoff SD | {d(float(best['sd']))} |")
+        L.append(f"| VaR 5% | {d(var5)} |")
+        L.append(f"| VaR 1% | {d(var1)} |")
+        L.append(f"| Worst case | {d(var_worst)} |")
+        L.append(f"| Probability of profit | {float(rm['Probability of profit']):.1%} |")
+        L.append(f"| Return on VaR 5% | {rv5:.1%} |")
+        L.append(f"| Return on VaR 1% | {rv1:.1%} |")
+        L.append(f"| Return on worst case | {rvw:.1%} |")
+        L.append("")
+        L.append("## Structure comparison (weights: put/put/call/call)")
+        L.append("Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.")
+        L.append("| Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |")
+        L.append("|---|---|---|---|---|---|---|")
+        for v in sorted(variants, key=lambda x: x["score"], reverse=True):
+            star = " (best)" if v is best else ""
+            L.append(f"| {v['label']}{star} | {v['score']:.2f} | {v['p_win']:.0%} | {v['ev_sd']:+.2f} | {d(v['es5'])} | {v['roc_var5']:+.1%} | {d(v['expected'])} |")
+        L.append("")
+        fmap = {str(r["Area"]).split(".")[0].strip(): str(r["Verdict"]) for _, r in A["assessment"]["findings"].iterrows()}
+        L.append("## Consistency check (across assumptions & simulation reruns)")
+        L.append(f"Overall fragility: **{A['fragility']}**. P({A['ticker']} #1) ranges {A['prob_lo']:.1%}-{A['prob_hi']:.1%} across models (spread {A['prob_hi'] - A['prob_lo']:.1%}).")
+        L.append("| Check | Result |")
+        L.append("|---|---|")
+        L.append(f"| Across simulation reruns (seeds) | {fmap.get('1', 'n/a')} |")
+        L.append(f"| Across models & tails (IV surface / ATM / copula) | {fmap.get('5', 'n/a')} |")
+        L.append(f"| Tail dependence (joint crashes) | {fmap.get('2', 'n/a')} |")
+        L.append(f"| Dominant lever | {fmap.get('3', 'n/a')} |")
+        L.append("")
+        L.append(f"P({A['ticker']} #1) by model:")
+        L.append("| Model | P(#1) |")
+        L.append("|---|---|")
+        for name, val in A["model_probs"].items():
+            L.append(f"| {name} | {val:.1%} |")
+        L.append("")
+        L.append("## Watch-outs")
+        for w in A["assessment"]["watch_outs"]:
+            L.append(f"- {w}")
+        L.append("")
+
+    render_block(yes_A, "Best YES")
+    render_block(no_A, "Best NO")
+    return "\n".join(L).rstrip() + "\n"
 
 
 def main() -> str:
