@@ -350,6 +350,18 @@ def run(inputs: dict) -> str:
     roc_var1 = expected / var1 if var1 > 0 else float("nan")
     roc_worst = expected / var_worst if var_worst > 0 else float("nan")
 
+    # Plain-language summary inputs (restored).
+    traded_yes = next(c for c in candidates if c["ticker"] == traded and c["side"] == "YES")
+    traded_no = next(c for c in candidates if c["ticker"] == traded and c["side"] == "NO")
+    naked_yes, naked_no = traded_yes["edge"], traded_no["edge"]
+    if fragility.startswith("LOW"):
+        rob_note = "estimate is robust across the Phase 7 tests."
+    elif fragility.startswith("HIGH"):
+        rob_note = "edge is model-dependent (flips sign across models) - treat the direction as uncertain."
+    else:
+        rob_note = "probability estimate is NOT fully robust (stability of the estimate, not the trade direction)."
+    side_word = "#1" if side == "YES" else "NOT #1"
+
     L = []
     L.append(f"# LargestCompany daily report - {as_of.isoformat()}")
     L.append("")
@@ -357,6 +369,12 @@ def run(inputs: dict) -> str:
     L.append(f"- Resolution {target.isoformat()} | option expiry {option_expiry.isoformat()} ({days} days) | traded {traded} | side auto-picked **{side}** @ {entry:.2f}")
     L.append(f"- Fragility (Phase 7): **{fragility}**")
     L.append(f"- Data: {data_source}")
+    L.append("")
+    L.append("## Summary")
+    L.append(f"- Expected profit **{d(expected)}** on {d(max_loss)} capital at risk (RoCaR {rocar:.1%}).")
+    L.append(f"- Side auto-picked **{side}**: naked YES EV {naked_yes:+.1%} vs naked NO EV {naked_no:+.1%} (traded = higher EV).")
+    L.append(f"- Your {side} edge: model P({traded} {side_word}) {model_side_prob:.1%} vs {side} price {entry:.0%} -> {edge:+.1%}.")
+    L.append(f"- Robustness: {rob_note}")
     L.append("")
     L.append("## Edge: market vs simulation")
     L.append("| | Value |")
@@ -374,6 +392,22 @@ def run(inputs: dict) -> str:
     L.append(f"| Best YES{yes_mark} | {best_yes['ticker']} | {best_yes['model_side']:.1%} | {best_yes['price']:.0%} | {best_yes['edge']:+.1%} |")
     L.append(f"| Best NO{no_mark} | {best_no['ticker']} | {best_no['model_side']:.1%} | {best_no['price']:.0%} | {best_no['edge']:+.1%} |")
     L.append(f"Traded = max edge: **{traded} {side}** ({edge:+.1%}). NO is more robust to an unmodeled surprise winner; YES is more direct but optimistic given the 3-name universe.")
+    L.append("")
+    L.append("## Probability by name (model vs market)")
+    L.append("| Ticker | Model P(#1) | Market YES | Market NO | YES edge | NO edge |")
+    L.append("|---|---|---|---|---|---|")
+    for t in tickers:
+        mp_t = float(probs.loc[t, "Model probability"])
+        yp_t = float(yes_prices[t])
+        np_t = no_prices.get(t)
+        yes_edge_t = mp_t - yp_t
+        star_t = " *" if t == traded else ""
+        if np_t is None:
+            L.append(f"| {t}{star_t} | {mp_t:.1%} | {yp_t:.0%} | n/a | {yes_edge_t:+.1%} | n/a |")
+        else:
+            no_edge_t = (1.0 - mp_t) - float(np_t)
+            L.append(f"| {t}{star_t} | {mp_t:.1%} | {yp_t:.0%} | {float(np_t):.0%} | {yes_edge_t:+.1%} | {no_edge_t:+.1%} |")
+    L.append("* = traded name.")
     L.append("")
     L.append("## Best structure: " + best["label"] + " (put/put/call/call)")
     L.append("| Metric | Value |")
