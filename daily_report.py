@@ -30,9 +30,11 @@ import pandas as pd
 
 from iv_surface_model import (
     SURFACE_EXPIRY,
+    _interpolated_iv,
     apply_surface_atm_ivs,
     default_surface_nodes,
     market_for,
+    normal_cdf_approx,
     run_surface_probability_engine,
 )
 from model import default_correlation_matrix, run_probability_engine
@@ -68,7 +70,40 @@ def _bs_premium(spot, strike, years, iv, rate, kind):
     return float(strike * exp(-rate * years) * ncdf(-d2) - spot * ncdf(-d1))
 
 
-def build_legs(ticker, spot, iv, years, rate, put_weight, call_weight, side="NO"):
+def _surface_premium(ticker_nodes, spot, strike, years, rate, forward_ratio, kind):
+    """Premium priced off the IV surface: skew IV at the leg strike, with the
+    same forward and discount build_surface_marginal uses - so the option is
+    valued at the model's own risk-neutral price and adds ~0 EV in the sim."""
+    if years <= 0:
+        return float(max(spot - strike, 0.0) if kind == "Call" else max(strike - spot, 0.0))
+    m = strike / spot
+    iv = float(_interpolated_iv(ticker_nodes, np.array([m], dtype=float))[0])
+    if iv <= 0:
+        return float(max(spot - strike, 0.0) if kind == "Call" else max(strike - spot, 0.0))
+    disc = exp(-rate * years)
+    rt = sqrt(years)
+    F = float(forward_ratio)
+    d1 = (log(F / m) + 0.5 * iv * iv * years) / (iv * rt)
+    d2 = d1 - iv * rt
+    N = lambda z: float(normal_cdf_approx(np.array([z], dtype=float))[0])
+    if kind == "Call":
+        ratio_price = disc * (F * N(d1) - m * N(d2))
+    else:
+        ratio_price = disc * (m * N(-d2) - F * N(-d1))
+    return float(max(ratio_price, 0.0) * spot)
+
+
+def _sample_premium(price_samples, strike, kind):
+    """Model-fair premium = mean intrinsic value over the simulated terminal
+    prices (the surface-implied distribution). Premium nets undiscounted vs
+    the same terminal payoff, so each leg contributes ~0 EV by construction -
+    options only reshape risk, never manufacture edge."""
+    s = np.asarray(price_samples, dtype=float)
+    intrinsic = np.maximum(s - strike, 0.0) if kind == "Call" else np.maximum(strike - s, 0.0)
+    return float(intrinsic.mean())
+
+
+def build_legs(ticker, spot, iv, years, rate, put_weight, call_weight, side="NO", ticker_nodes=None, forward_ratio=1.0, price_samples=None):
     """Build the 4 option legs. For a YES bet the structure is mirrored around
     spot: Put<->Call and strike ratio -> 2 - ratio (weights follow the template
     slot so the payoff is a true reflection)."""
@@ -81,17 +116,23 @@ def build_legs(ticker, spot, iv, years, rate, put_weight, call_weight, side="NO"
             ratio = 2.0 - ratio
         strike = round(spot * ratio, 2)
         quantity = weight / spot  # Phase 5/6 share-equivalent -> contracts
+        if price_samples is not None:
+            prem = _sample_premium(price_samples, strike, otype)
+        elif ticker_nodes is not None and len(ticker_nodes) > 0:
+            prem = _surface_premium(ticker_nodes, spot, strike, years, rate, forward_ratio, otype)
+        else:
+            prem = _bs_premium(spot, strike, years, iv, rate, otype)
         rows.append({
             "Instrument": f"{leg['Position']} {ticker} {otype} {strike:.2f}",
             "Ticker": ticker, "Option type": otype, "Position": leg["Position"],
             "Quantity": quantity, "Strike": strike, "Spot": spot,
-            "Theoretical premium": _bs_premium(spot, strike, years, iv, rate, otype),
+            "Theoretical premium": prem,
         })
     return pd.DataFrame(rows)
 
 
-def _make_portfolio(traded, spot, iv, years, rate, caps_series, side, entry, shares, put_weight, call_weight):
-    legs = build_legs(traded, spot, iv, years, rate, put_weight, call_weight, side)
+def _make_portfolio(traded, spot, iv, years, rate, caps_series, side, entry, shares, put_weight, call_weight, ticker_nodes=None, forward_ratio=1.0, price_samples=None):
+    legs = build_legs(traded, spot, iv, years, rate, put_weight, call_weight, side, ticker_nodes, forward_ratio, price_samples)
     return p7.PortfolioSpec(
         option_legs=legs, current_market_caps=caps_series, spot_prices=pd.Series({traded: spot}),
         selected_ticker=traded, polymarket_side=side, polymarket_entry_price=float(entry),
@@ -261,6 +302,8 @@ def run(inputs: dict) -> str:
     model_p = float(probs.loc[traded, "Model probability"])
     iv_atm = float(surf_inputs.set_index("Ticker").loc[traded, "Implied volatility"])
 
+    _surface_nodes_all = default_surface_nodes(resolution=resolution_iso)
+
     def d(x):
         return f"${x:,.2f}"
 
@@ -272,9 +315,12 @@ def run(inputs: dict) -> str:
         sp = float(spots[tk])
         mp = float(probs.loc[tk, "Model probability"])
         iv_c = float(iv_by_ticker.loc[tk])
+        tk_nodes = _surface_nodes_all[_surface_nodes_all["Ticker"] == tk]
+        fr = float(surf_inputs.set_index("Ticker").loc[tk, "Forward / spot"]) if "Forward / spot" in surf_inputs.columns else 1.0
+        tprices = (result.terminal_market_caps[tk].astype(float) / float(caps_series.loc[tk]) * sp).to_numpy()
         vlist = []
         for pw, cw in WEIGHT_VARIANTS:
-            pf = _make_portfolio(tk, sp, iv_c, years, rate, caps_series, sd, ent, shares, pw, cw)
+            pf = _make_portfolio(tk, sp, iv_c, years, rate, caps_series, sd, ent, shares, pw, cw, ticker_nodes=tk_nodes, forward_ratio=fr, price_samples=tprices)
             vlist.append({"label": f"{pw}/{pw}/{cw}/{cw}", "portfolio": pf, **_variant_stats(result, pf)})
         bestv = rate_variants(vlist)
         pf = bestv["portfolio"]
