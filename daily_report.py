@@ -290,18 +290,7 @@ def run(inputs: dict) -> str:
     best_yes = max((c for c in candidates if c["side"] == "YES"), key=lambda c: c["edge"])
     best_no = max((c for c in candidates if c["side"] == "NO"), key=lambda c: c["edge"])
 
-    # --- Primary trade: max edge overall, unless explicitly overridden ---
-    if inputs.get("traded_ticker") and inputs.get("force_side"):
-        primary = next(c for c in candidates if c["ticker"] == inputs["traded_ticker"] and c["side"] == str(inputs["force_side"]).upper())
-    elif inputs.get("traded_ticker"):
-        primary = max((c for c in candidates if c["ticker"] == inputs["traded_ticker"]), key=lambda c: c["edge"])
-    else:
-        primary = max(candidates, key=lambda c: c["edge"])
-    traded, side, entry = primary["ticker"], primary["side"], float(primary["price"])
-    spot = spots[traded]
-    model_p = float(probs.loc[traded, "Model probability"])
-    iv_atm = float(surf_inputs.set_index("Ticker").loc[traded, "Implied volatility"])
-
+    # Primary trade is chosen AFTER both sides are analyzed - see below (max composite).
     _surface_nodes_all = default_surface_nodes(resolution=resolution_iso)
 
     def d(x):
@@ -375,9 +364,37 @@ def run(inputs: dict) -> str:
             _cache[key] = _analyze(cand)
         return _cache[key]
 
-    primary_A = analyze(primary)
     yes_A = analyze(best_yes)
     no_A = analyze(best_no)
+
+    # Trade-level composite over each side's BEST structure, using the same four
+    # criteria as the structure sweep: P(win), EV/SD, CVaR5% (lower better) and
+    # RoC/VaR5%. Computed always (shown in the report); it drives the default pick.
+    _sides = [yes_A, no_A]
+    for metric, direction in RATING_METRICS:
+        vals = np.array([A["best"][metric] for A in _sides], dtype=float)
+        finite = vals[np.isfinite(vals)]
+        lo, hi = (finite.min(), finite.max()) if finite.size else (0.0, 0.0)
+        for A in _sides:
+            x = A["best"][metric]
+            if not np.isfinite(x):
+                n = 0.0
+            elif hi > lo:
+                n = (x - lo) / (hi - lo) if direction == "+" else (hi - x) / (hi - lo)
+            else:
+                n = 0.5
+            A.setdefault("_ncomp", {})[metric] = n
+    for A in _sides:
+        A["trade_composite"] = float(np.mean([A["_ncomp"][m] for m, _ in RATING_METRICS]))
+
+    # --- Primary trade selection: overrides win, else higher composite ---
+    if inputs.get("traded_ticker") and inputs.get("force_side"):
+        primary = next(c for c in candidates if c["ticker"] == inputs["traded_ticker"] and c["side"] == str(inputs["force_side"]).upper())
+    elif inputs.get("traded_ticker"):
+        primary = max((c for c in candidates if c["ticker"] == inputs["traded_ticker"]), key=lambda c: c["edge"])
+    else:
+        primary = best_yes if yes_A["trade_composite"] >= no_A["trade_composite"] else best_no
+    primary_A = analyze(primary)
 
     # Save the primary (max-edge) structure as the app preset - unchanged.
     try:
@@ -422,7 +439,7 @@ def run(inputs: dict) -> str:
     L.append("")
     L.append("## Summary")
     L.append(f"- Expected profit **{d(expected)}** on {d(max_loss)} capital at risk (RoCaR {rocar:.1%}).")
-    L.append(f"- Side auto-picked **{side}**: naked YES EV {naked_yes:+.1%} vs naked NO EV {naked_no:+.1%} (traded = higher EV).")
+    L.append(f"- Side auto-picked **{side}** by composite (P(win), EV/SD, CVaR5%, RoC/VaR5%); naked YES EV {naked_yes:+.1%} vs naked NO EV {naked_no:+.1%}.")
     L.append(f"- Your {side} edge: model P({traded} {side_word}) {model_side_prob:.1%} vs {side} price {entry:.0%} -> {edge:+.1%}.")
     L.append(f"- Robustness: {rob_note}")
     L.append("")
@@ -435,13 +452,13 @@ def run(inputs: dict) -> str:
     L.append(f"| Grade | **{verdict}** (>5% favorable, 0-5% marginal, <=0 unfavorable) |")
     L.append("")
     L.append("## Trade candidates (best edge per side)")
-    L.append("| | Ticker | Model fair | Price | Edge |")
-    L.append("|---|---|---|---|---|")
+    L.append("| | Ticker | Model fair | Price | Edge | Composite |")
+    L.append("|---|---|---|---|---|---|")
     yes_mark = " (traded)" if (side == "YES" and traded == best_yes["ticker"]) else ""
     no_mark = " (traded)" if (side == "NO" and traded == best_no["ticker"]) else ""
-    L.append(f"| Best YES{yes_mark} | {best_yes['ticker']} | {best_yes['model_side']:.1%} | {best_yes['price']:.0%} | {best_yes['edge']:+.1%} |")
-    L.append(f"| Best NO{no_mark} | {best_no['ticker']} | {best_no['model_side']:.1%} | {best_no['price']:.0%} | {best_no['edge']:+.1%} |")
-    L.append(f"Traded = max edge: **{traded} {side}** ({edge:+.1%}). Both sides get a full risk block below. NO is more robust to an unmodeled surprise winner; YES is more direct but optimistic given the 3-name universe.")
+    L.append(f"| Best YES{yes_mark} | {best_yes['ticker']} | {best_yes['model_side']:.1%} | {best_yes['price']:.0%} | {best_yes['edge']:+.1%} | {yes_A['trade_composite']:.2f} |")
+    L.append(f"| Best NO{no_mark} | {best_no['ticker']} | {best_no['model_side']:.1%} | {best_no['price']:.0%} | {best_no['edge']:+.1%} | {no_A['trade_composite']:.2f} |")
+    L.append(f"Default = max composite: **{traded} {side}** (composite {primary_A['trade_composite']:.2f}, edge {edge:+.1%}). Composite = P(win), EV/SD, CVaR5%, RoC/VaR5% - risk-adjusted, not raw edge. Both sides get a full risk block below.")
     L.append("")
     L.append("## Probability by name (model vs market)")
     L.append("| Ticker | Model P(#1) | Market YES | Market NO | YES edge | NO edge |")
