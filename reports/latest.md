@@ -1,41 +1,41 @@
 # LargestCompany daily report - 2026-07-30
 
-## Verdict: FAVORABLE  (edge +17.2%)
-- Resolution 2026-08-31 | option expiry 2026-08-28 (29 days) | traded AAPL | side auto-picked **YES** @ 0.58
+## Verdict: FAVORABLE  (edge +15.6%)
+- Resolution 2026-08-31 | option expiry 2026-08-28 (29 days) | traded NVDA | side auto-picked **NO** @ 0.61
 - Fragility (Phase 7): **MEDIUM - some assumptions move it (convergence / tail dependence)**
 - Data: Yahoo live
 
 ## Summary
-- Expected profit **$14.01** on $102.68 capital at risk (RoCaR 13.6%).
-- Side auto-picked **YES**: naked YES EV +17.2% vs naked NO EV -19.2% (traded = higher EV).
-- Your YES edge: model P(AAPL #1) 75.2% vs YES price 58% -> +17.2%.
+- Expected profit **$15.83** on $102.27 capital at risk (RoCaR 15.5%).
+- Side auto-picked **NO** by composite (P(win), EV/SD, CVaR5%, RoC/VaR5%); naked YES EV -16.6% vs naked NO EV +15.6%.
+- Your NO edge: model P(NVDA NOT #1) 76.6% vs NO price 61% -> +15.6%.
 - Robustness: probability estimate is NOT fully robust (stability of the estimate, not the trade direction).
 
 ## Edge: market vs simulation
 | | Value |
 |---|---|
-| Polymarket says (YES) | 58.0% |
-| Simulation says (YES fair) | 75.2% |
-| Edge (fair - price) | **+17.2%** |
+| Polymarket says (NO) | 61.0% |
+| Simulation says (NO fair) | 76.6% |
+| Edge (fair - price) | **+15.6%** |
 | Grade | **FAVORABLE** (>5% favorable, 0-5% marginal, <=0 unfavorable) |
 
 ## Trade candidates (best edge per side)
-| | Ticker | Model fair | Price | Edge |
-|---|---|---|---|---|
-| Best YES (traded) | AAPL | 75.2% | 58% | +17.2% |
-| Best NO | NVDA | 76.6% | 61% | +15.6% |
-Traded = max edge: **AAPL YES** (+17.2%). Both sides get a full risk block below. NO is more robust to an unmodeled surprise winner; YES is more direct but optimistic given the 3-name universe.
+| | Ticker | Model fair | Price | Edge | Composite |
+|---|---|---|---|---|---|
+| Best YES | AAPL | 75.2% | 58% | +17.2% | 0.25 |
+| Best NO (traded) | NVDA | 76.6% | 61% | +15.6% | 0.75 |
+Default = max composite: **NVDA NO** (composite 0.75, edge +15.6%). Composite = P(win), EV/SD, CVaR5%, RoC/VaR5% - risk-adjusted, not raw edge. Both sides get a full risk block below.
 
 ## Probability by name (model vs market)
 | Ticker | Model P(#1) | Market YES | Market NO | YES edge | NO edge |
 |---|---|---|---|---|---|
-| AAPL * | 75.2% | 58% | 44% | +17.2% | -19.2% |
-| NVDA | 23.4% | 40% | 61% | -16.6% | +15.6% |
+| AAPL | 75.2% | 58% | 44% | +17.2% | -19.2% |
+| NVDA * | 23.4% | 40% | 61% | -16.6% | +15.6% |
 | GOOGL | 1.4% | 4% | 97% | -2.6% | +1.7% |
 * = traded name.
 
 ---
-# Best YES trade: AAPL YES @ 0.58 (traded / app preset)
+# Best YES trade: AAPL YES @ 0.58
 Edge +17.2% | Verdict FAVORABLE | Fragility MEDIUM
 
 ## Best structure: 1/1/3/3 (put/put/call/call)
@@ -81,7 +81,7 @@ P(AAPL #1) by model:
 - No material risk flags on these scenarios.
 
 ---
-# Best NO trade: NVDA NO @ 0.61
+# Best NO trade: NVDA NO @ 0.61 (traded / app preset)
 Edge +15.6% | Verdict FAVORABLE | Fragility MEDIUM
 
 ## Best structure: 1/1/3/3 (put/put/call/call)
