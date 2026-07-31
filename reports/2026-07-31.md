@@ -10,6 +10,7 @@
 - Side auto-picked **NO** by composite (P(win), EV/SD, CVaR5%, RoC/VaR5%); naked YES EV -27.1% vs naked NO EV +25.1%.
 - Your NO edge: model P(NVDA NOT #1) 64.1% vs NO price 39% -> +25.1%.
 - Robustness: probability estimate is NOT fully robust (stability of the estimate, not the trade direction).
+- Current market caps (Yahoo, model ranks by these): AAPL $4.90T, NVDA $4.72T, GOOGL $4.08T.
 
 ## Edge: market vs simulation
 | | Value |
