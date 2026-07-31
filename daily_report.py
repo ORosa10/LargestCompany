@@ -442,6 +442,8 @@ def run(inputs: dict) -> str:
     L.append(f"- Side auto-picked **{side}** by composite (P(win), EV/SD, CVaR5%, RoC/VaR5%); naked YES EV {naked_yes:+.1%} vs naked NO EV {naked_no:+.1%}.")
     L.append(f"- Your {side} edge: model P({traded} {side_word}) {model_side_prob:.1%} vs {side} price {entry:.0%} -> {edge:+.1%}.")
     L.append(f"- Robustness: {rob_note}")
+    cap_str = ", ".join(f"{t} ${caps[t] / 1e12:.2f}T" for t in sorted(caps, key=lambda x: -caps[x]))
+    L.append(f"- Current market caps (Yahoo, model ranks by these): {cap_str}.")
     L.append("")
     L.append("## Edge: market vs simulation")
     L.append("| | Value |")
