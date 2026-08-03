@@ -4,23 +4,23 @@
   "option_expiry": "2026-08-28",
   "source": "Yahoo live",
   "market_caps": {
-    "NVDA": 4862365925376.0,
-    "AAPL": 4537070911488.0,
-    "GOOGL": 4355446800384.0
+    "NVDA": 4977657380864.0,
+    "AAPL": 4486399524864.0,
+    "GOOGL": 4491565858816.0
   },
   "spots": {
-    "NVDA": 200.75,
-    "AAPL": 308.9100036621094,
-    "GOOGL": 356.1300048828125
+    "NVDA": 205.5,
+    "AAPL": 305.4599914550781,
+    "GOOGL": 367.17999267578125
   },
   "polymarket_yes": {
-    "NVDA": 0.63,
-    "AAPL": 0.33,
-    "GOOGL": 0.067
+    "NVDA": 0.72,
+    "AAPL": 0.15,
+    "GOOGL": 0.156
   },
   "polymarket_no": {
-    "NVDA": 0.39,
-    "AAPL": 0.68,
-    "GOOGL": 0.957
+    "NVDA": 0.3,
+    "AAPL": 0.86,
+    "GOOGL": 0.849
   }
 }
