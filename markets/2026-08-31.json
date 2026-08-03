@@ -49,6 +49,32 @@
         "MSFT": 68600
       },
       "note": "NVIDIA rebounded above Apple by 31 Jul; MSFT shown for volume only (no odds captured)."
+    },
+    {
+      "date": "2026-08-03",
+      "captured": "2026-08-03T16:30",
+      "yes": {
+        "NVDA": 0.72,
+        "GOOGL": 0.156,
+        "AAPL": 0.15,
+        "MSFT": 0.002,
+        "TSLA": 0.002
+      },
+      "no": {
+        "NVDA": 0.3,
+        "GOOGL": 0.849,
+        "AAPL": 0.86,
+        "MSFT": 0.999,
+        "TSLA": 0.999
+      },
+      "volume_usd": {
+        "NVDA": 203200,
+        "GOOGL": 140300,
+        "AAPL": 139600,
+        "MSFT": 119500,
+        "TSLA": 93500
+      },
+      "note": "NVIDIA extended its lead (Yes 72c); MSFT and TSLA now listed on the board. Model universe stays NVDA/AAPL/GOOGL."
     }
   ]
 }
