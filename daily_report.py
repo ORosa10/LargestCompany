@@ -219,6 +219,47 @@ def fetch_market_data(tickers, manual_caps, manual_spots):
     return caps, spots, source, missing
 
 
+def upcoming_earnings(tickers, as_of, resolution):
+    """Best-effort earnings dates for each ticker between as_of and resolution.
+    Network-dependent (Yahoo). Returns {ticker: [date, ...]} and NEVER raises -
+    on any failure it returns {} so the report is never blocked."""
+    out = {}
+    try:
+        import yfinance as yf
+        from market_data import yahoo_symbol
+    except Exception:
+        return out
+    for t in tickers:
+        found = []
+        try:
+            yft = yf.Ticker(yahoo_symbol(t))
+            try:
+                df = yft.get_earnings_dates(limit=16)
+            except Exception:
+                df = None
+            if df is not None and len(df):
+                for ts in df.index:
+                    try:
+                        dd = ts.date()
+                    except Exception:
+                        continue
+                    if as_of <= dd <= resolution:
+                        found.append(dd)
+            if not found:
+                cal = getattr(yft, "calendar", None)
+                ed = cal.get("Earnings Date") if isinstance(cal, dict) else None
+                if ed:
+                    for d0 in (ed if isinstance(ed, (list, tuple)) else [ed]):
+                        dd = d0.date() if hasattr(d0, "date") else d0
+                        if isinstance(dd, date) and as_of <= dd <= resolution:
+                            found.append(dd)
+        except Exception:
+            pass
+        if found:
+            out[t] = sorted(set(found))
+    return out
+
+
 def run(inputs: dict) -> str:
     resolution_iso = inputs["target_date"]
     target = date.fromisoformat(resolution_iso)
@@ -429,6 +470,8 @@ def run(inputs: dict) -> str:
     else:
         rob_note = "probability estimate is NOT fully robust (stability of the estimate, not the trade direction)."
 
+    earnings = upcoming_earnings(tickers, as_of, target) if inputs.get("check_earnings", True) else {}
+
     L = []
     L.append(f"# LargestCompany daily report - {as_of.isoformat()}")
     L.append("")
@@ -444,6 +487,15 @@ def run(inputs: dict) -> str:
     L.append(f"- Robustness: {rob_note}")
     cap_str = ", ".join(f"{t} ${caps[t] / 1e12:.2f}T" for t in sorted(caps, key=lambda x: -caps[x]))
     L.append(f"- Current market caps (Yahoo, model ranks by these): {cap_str}.")
+    L.append("")
+    L.append("## Earnings before resolution (data caveat)")
+    if earnings:
+        for t in tickers:
+            if t in earnings:
+                L.append(f"- **{t}** reports: {', '.join(dd.isoformat() for dd in earnings[t])}")
+        L.append("Heads-up: Yahoo spot/caps use the last **regular** close, so on/after these dates the after-hours earnings move is not yet in the ranking - treat P(#1) and edge as stale for up to a session around them.")
+    else:
+        L.append(f"- No scheduled NVDA/AAPL/GOOGL earnings detected between {as_of.isoformat()} and {target.isoformat()} (or the calendar was unavailable).")
     L.append("")
     L.append("## Edge: market vs simulation")
     L.append("| | Value |")

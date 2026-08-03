@@ -17,6 +17,7 @@ def _inputs():
         "polymarket_yes": {"NVDA": 0.68, "AAPL": 0.309, "GOOGL": 0.017},
         "manual_market_caps": {},
         "manual_spots": {},
+        "check_earnings": False,
     }
 
 
@@ -84,3 +85,25 @@ def test_run_saves_phase6_candidate(monkeypatch, tmp_path):
     cand = pickle.load(cand_path.open("rb"))
     assert {"mapped_legs", "polymarket", "spots", "contract_multiplier"}.issubset(cand)
     assert len(cand["mapped_legs"]) == 4
+
+
+def test_earnings_caveat_section(monkeypatch):
+    import datetime
+    def fake_fetch(tickers, manual_caps, manual_spots):
+        return dict(_CAPS), dict(_SPOTS), "test", []
+    monkeypatch.setattr(daily_report, "fetch_market_data", fake_fetch)
+    monkeypatch.setattr(daily_report, "upcoming_earnings", lambda t, a, r: {"AAPL": [datetime.date(2026, 7, 30)]})
+    inp = _inputs(); inp["check_earnings"] = True
+    report = daily_report.run(inp)
+    assert "## Earnings before resolution" in report
+    assert "AAPL** reports: 2026-07-30" in report
+
+
+def test_earnings_caveat_none(monkeypatch):
+    def fake_fetch(tickers, manual_caps, manual_spots):
+        return dict(_CAPS), dict(_SPOTS), "test", []
+    monkeypatch.setattr(daily_report, "fetch_market_data", fake_fetch)
+    monkeypatch.setattr(daily_report, "upcoming_earnings", lambda t, a, r: {})
+    inp = _inputs(); inp["check_earnings"] = True
+    report = daily_report.run(inp)
+    assert "No scheduled NVDA/AAPL/GOOGL earnings" in report
