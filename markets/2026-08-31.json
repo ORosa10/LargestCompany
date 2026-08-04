@@ -75,6 +75,28 @@
         "TSLA": 93500
       },
       "note": "NVIDIA extended its lead (Yes 72c); MSFT and TSLA now listed on the board. Model universe stays NVDA/AAPL/GOOGL."
+    },
+    {
+      "date": "2026-08-03",
+      "captured": "2026-08-03 (time not shown)",
+      "yes": {
+        "NVDA": 0.79,
+        "GOOGL": 0.104,
+        "AAPL": 0.1,
+        "AMZN": 0.005
+      },
+      "no": {
+        "NVDA": 0.22,
+        "GOOGL": 0.897,
+        "AAPL": 0.91
+      },
+      "volume_usd": {
+        "NVDA": 229022,
+        "GOOGL": 156914,
+        "AAPL": 153386,
+        "total_market": 1044422
+      },
+      "note": "NVDA 79% (up 11%); Alphabet & Apple both 10% (down 22%); Amazon <1%. Board now lists Amazon."
     }
   ]
 }
