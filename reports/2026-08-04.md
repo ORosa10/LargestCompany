@@ -1,16 +1,16 @@
 # LargestCompany daily report - 2026-08-04
 
-## Verdict: FAVORABLE  (edge +5.4%)
+## Verdict: MARGINAL  (edge +3.9%)
 - Resolution 2026-08-31 | option expiry 2026-08-28 (24 days) | traded GOOGL | side auto-picked **YES** @ 0.10
-- Fragility (Phase 7): **HIGH - edge is model-dependent (flips sign across models)**
+- Fragility (Phase 7): **MEDIUM - edge holds except the crisis corner (high corr + joint crashes)**
 - Data: Yahoo live
 
 ## Summary
-- Expected profit **$5.39** on $54.87 capital at risk (RoCaR 9.8%).
-- Side auto-picked **YES** by composite (P(win), EV/SD, CVaR5%, RoC/VaR5%); naked YES EV +5.4% vs naked NO EV -5.5%.
-- Your YES edge: model P(GOOGL #1) 15.8% vs YES price 10% -> +5.4%.
-- Robustness: edge is model-dependent (flips sign across models) - treat the direction as uncertain.
-- Current market caps (Yahoo, model ranks by these): NVDA $5.01T, GOOGL $4.57T, AAPL $4.43T.
+- Expected profit **$3.80** on $54.87 capital at risk (RoCaR 6.9%).
+- Side auto-picked **YES** by composite (P(win), EV/SD, CVaR5%, RoC/VaR5%); naked YES EV +3.9% vs naked NO EV -4.0%.
+- Your YES edge: model P(GOOGL #1) 14.3% vs YES price 10% -> +3.9%.
+- Robustness: probability estimate is NOT fully robust (stability of the estimate, not the trade direction).
+- Current market caps (Yahoo, model ranks by these): NVDA $5.09T, GOOGL $4.59T, AAPL $4.45T.
 
 ## Earnings before resolution (data caveat)
 - **NVDA** reports: 2026-08-26
@@ -20,116 +20,124 @@ Heads-up: Yahoo spot/caps use the last **regular** close, so on/after these date
 | | Value |
 |---|---|
 | Polymarket says (YES) | 10.4% |
-| Simulation says (YES fair) | 15.8% |
-| Edge (fair - price) | **+5.4%** |
-| Grade | **FAVORABLE** (>5% favorable, 0-5% marginal, <=0 unfavorable) |
+| Simulation says (YES fair) | 14.3% |
+| Edge (fair - price) | **+3.9%** |
+| Grade | **MARGINAL** (>5% favorable, 0-5% marginal, <=0 unfavorable) |
 
 ## Trade candidates (best edge per side)
 | | Ticker | Model fair | Price | Edge | Composite |
 |---|---|---|---|---|---|
-| Best YES (traded) | GOOGL | 15.8% | 10% | +5.4% | 0.75 |
-| Best NO | NVDA | 24.6% | 22% | +2.6% | 0.25 |
-Default = max composite: **GOOGL YES** (composite 0.75, edge +5.4%). Composite = P(win), EV/SD, CVaR5%, RoC/VaR5% - risk-adjusted, not raw edge. Both sides get a full risk block below.
+| Best YES (traded) | GOOGL | 14.3% | 10% | +3.9% | 0.50 |
+| Best NO | AAPL | 92.5% | 91% | +1.5% | 0.50 |
+Default = max composite: **GOOGL YES** (composite 0.50, edge +3.9%). Composite = P(win), EV/SD, CVaR5%, RoC/VaR5% - risk-adjusted, not raw edge. Both sides get a full risk block below.
 
 ## Probability by name (model vs market)
 | Ticker | Model P(#1) | Market YES | Market NO | YES edge | NO edge |
 |---|---|---|---|---|---|
-| NVDA | 75.4% | 79% | 22% | -3.6% | +2.6% |
-| AAPL | 8.8% | 10% | 91% | -1.2% | +0.2% |
-| GOOGL * | 15.8% | 10% | 90% | +5.4% | -5.5% |
+| NVDA | 78.3% | 79% | 22% | -0.7% | -0.3% |
+| AAPL | 7.5% | 10% | 91% | -2.5% | +1.5% |
+| GOOGL * | 14.3% | 10% | 90% | +3.9% | -4.0% |
 * = traded name.
 
 ---
 # Best YES trade: GOOGL YES @ 0.10 (traded / app preset)
-Edge +5.4% | Verdict FAVORABLE | Fragility HIGH
+Edge +3.9% | Verdict MARGINAL | Fragility MEDIUM
 
 ## Best structure: 1/1/3/3 (put/put/call/call)
 | Metric | Value |
 |---|---|
-| Expected profit | $5.39 |
-| Payoff SD | $38.37 |
-| VaR 5% | $46.48 |
-| VaR 1% | $52.47 |
+| Expected profit | $3.80 |
+| Payoff SD | $37.31 |
+| VaR 5% | $46.49 |
+| VaR 1% | $52.71 |
 | Worst case | $54.87 |
-| Probability of profit | 54.4% |
-| Return on VaR 5% | 11.6% |
-| Return on VaR 1% | 10.3% |
-| Return on worst case | 9.8% |
+| Probability of profit | 53.1% |
+| Return on VaR 5% | 8.2% |
+| Return on VaR 1% | 7.2% |
+| Return on worst case | 6.9% |
 
 ## Structure comparison (weights: put/put/call/call)
 Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.
 | Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |
 |---|---|---|---|---|---|---|
-| 1/1/3/3 (best) | 0.75 | 54% | +0.14 | $49.28 | +11.6% | $5.39 |
-| 2/2/3/3 | 0.53 | 58% | +0.13 | $60.65 | +9.7% | $5.34 |
-| 1/1/4/4 | 0.46 | 56% | +0.13 | $58.46 | +9.7% | $5.39 |
-| 2/2/4/4 | 0.25 | 60% | +0.13 | $69.82 | +8.3% | $5.34 |
+| 1/1/3/3 (best) | 0.75 | 53% | +0.10 | $49.45 | +8.2% | $3.80 |
+| 2/2/3/3 | 0.52 | 57% | +0.10 | $60.98 | +6.8% | $3.76 |
+| 1/1/4/4 | 0.46 | 55% | +0.10 | $58.63 | +6.8% | $3.80 |
+| 2/2/4/4 | 0.25 | 58% | +0.09 | $70.15 | +5.8% | $3.75 |
 
-## Consistency check (across assumptions & simulation reruns)
-Overall fragility: **HIGH - edge is model-dependent (flips sign across models)**. P(GOOGL #1) ranges 14.6%-17.6% across models (spread 3.0%).
-| Check | Result |
-|---|---|
-| Across simulation reruns (seeds) | Central metrics are converged; trust them. |
-| Across models & tails (IV surface / ATM / copula) | Edge flips sign across models - model-dependent, caution. |
-| Tail dependence (joint crashes) | Edge is sensitive to tail dependence (change -41.5%). |
-| Dominant lever | randomness-dominated (IV lever) (IV range 0.219 vs gap range 0.209). |
+## Sensitivity & stress
+Base edge (surface + est. correlation + Gaussian copula): **+3.9%**. Fragility: **MEDIUM - edge holds except the crisis corner (high corr + joint crashes)**. Dominant lever: **correlation**. Edge across the realistic stress band: -2.2% to +5.5%.
+Simulation reruns (seeds): Central metrics are NOT converged - raise the simulation count.
 
-P(GOOGL #1) by model:
-| Model | P(#1) |
-|---|---|
-| IV surface + Gaussian copula | 15.8% |
-| ATM lognormal + Normal | 17.6% |
-| ATM lognormal + Student-t copula df=5 | 14.6% |
-| ATM lognormal + Student-t df=6 (fat marginals) | 16.2% |
+**Volatility / marginals** (correlation = est., Gaussian copula; changes only how each name moves):
+| Marginal model | P(#1) | Edge | delta vs base |
+|---|---|---|---|
+| IV surface (base) | 14.3% | +3.9% | base |
+| ATM lognormal + Normal | 15.6% | +5.2% | +1.3 pp |
+| ATM + Student-t df=6 (fat marginals) | 14.1% | +3.7% | -0.1 pp |
+| ATM + Student-t df=10 | 15.0% | +4.6% | +0.8 pp |
+
+**Correlation x tail copula** (marginals = surface; base cell marked):
+| correlation \ tail | Gaussian | Student-t df=5 |
+|---|---|---|
+| 0.3 (calm) | +5.5% (+1.6) | +4.6% (+0.7) |
+| ~est (Saved) | +3.9% (base) | +3.0% (-0.9) |
+| 0.8 (crisis) | -2.2% (-6.1) | -2.0% (-5.9) |
+
+Reading: down = more correlation, right = joint crashes (tail dependence). () = edge change in pp vs base.
 
 ## Watch-outs
 - Outcome is strongly IV-driven; the edge leans on the implied-volatility assumption. Get IV right before sizing up.
 - Edge changes sign somewhere in the model grid: not robust to the model choice.
-- This saved portfolio is lightly hedged (probability of loss 43%); the option legs are barely active. Re-run on the fully hedged Phase 5/6 structure before trusting the tail metrics.
+- This saved portfolio is lightly hedged (probability of loss 45%); the option legs are barely active. Re-run on the fully hedged Phase 5/6 structure before trusting the tail metrics.
 
 ---
-# Best NO trade: NVDA NO @ 0.22
-Edge +2.6% | Verdict MARGINAL | Fragility HIGH
+# Best NO trade: AAPL NO @ 0.91
+Edge +1.5% | Verdict MARGINAL | Fragility LOW
 
 ## Best structure: 1/1/4/4 (put/put/call/call)
 | Metric | Value |
 |---|---|
-| Expected profit | $2.86 |
-| Payoff SD | $33.06 |
-| VaR 5% | $59.94 |
-| VaR 1% | $65.04 |
-| Worst case | $72.54 |
-| Probability of profit | 65.6% |
-| Return on VaR 5% | 4.8% |
-| Return on VaR 1% | 4.4% |
-| Return on worst case | 3.9% |
+| Expected profit | $3.66 |
+| Payoff SD | $33.57 |
+| VaR 5% | $64.73 |
+| VaR 1% | $105.42 |
+| Worst case | $142.01 |
+| Probability of profit | 64.0% |
+| Return on VaR 5% | 5.6% |
+| Return on VaR 1% | 3.5% |
+| Return on worst case | 2.6% |
 
 ## Structure comparison (weights: put/put/call/call)
 Score = equal-weight of P(win), EV/SD, CVaR5% (lower better), return-on-VaR5%.
 | Weights | Score | P(win) | EV/SD | CVaR5% | RoC/VaR5% | Expected |
 |---|---|---|---|---|---|---|
-| 1/1/4/4 (best) | 0.61 | 66% | +0.09 | $64.67 | +4.8% | $2.86 |
-| 2/2/3/3 | 0.55 | 66% | +0.09 | $63.79 | +4.9% | $2.76 |
-| 1/1/3/3 | 0.50 | 61% | +0.08 | $55.96 | +5.4% | $2.79 |
-| 2/2/4/4 | 0.32 | 69% | +0.09 | $72.50 | +4.4% | $2.83 |
+| 1/1/4/4 (best) | 0.67 | 64% | +0.11 | $79.60 | +5.6% | $3.66 |
+| 2/2/4/4 | 0.55 | 64% | +0.11 | $83.73 | +6.4% | $3.93 |
+| 2/2/3/3 | 0.44 | 66% | +0.10 | $82.58 | +5.1% | $3.46 |
+| 1/1/3/3 | 0.25 | 66% | +0.10 | $85.81 | +4.5% | $3.19 |
 
-## Consistency check (across assumptions & simulation reruns)
-Overall fragility: **HIGH - edge is model-dependent (flips sign across models)**. P(NVDA #1) ranges 74.0%-78.7% across models (spread 4.7%).
-| Check | Result |
-|---|---|
-| Across simulation reruns (seeds) | Central metrics are NOT converged - raise the simulation count. |
-| Across models & tails (IV surface / ATM / copula) | Edge flips sign across models - model-dependent, caution. |
-| Tail dependence (joint crashes) | Edge is sensitive to tail dependence (change +95.8%). |
-| Dominant lever | randomness-dominated (IV lever) (IV range 0.401 vs gap range 0.384). |
+## Sensitivity & stress
+Base edge (surface + est. correlation + Gaussian copula): **+1.5%**. Fragility: **LOW - edge holds across the realistic stress band**. Dominant lever: **correlation**. Edge across the realistic stress band: +0.3% to +5.7%.
+Simulation reruns (seeds): Central metrics are NOT converged - raise the simulation count.
 
-P(NVDA #1) by model:
-| Model | P(#1) |
-|---|---|
-| IV surface + Gaussian copula | 75.4% |
-| ATM lognormal + Normal | 74.0% |
-| ATM lognormal + Student-t copula df=5 | 78.7% |
-| ATM lognormal + Student-t df=6 (fat marginals) | 76.5% |
+**Volatility / marginals** (correlation = est., Gaussian copula; changes only how each name moves):
+| Marginal model | P(#1) | Edge | delta vs base |
+|---|---|---|---|
+| IV surface (base) | 7.5% | +1.5% | base |
+| ATM lognormal + Normal | 7.0% | +2.0% | +0.5 pp |
+| ATM + Student-t df=6 (fat marginals) | 6.1% | +2.9% | +1.3 pp |
+| ATM + Student-t df=10 | 6.6% | +2.4% | +0.9 pp |
+
+**Correlation x tail copula** (marginals = surface; base cell marked):
+| correlation \ tail | Gaussian | Student-t df=5 |
+|---|---|---|
+| 0.3 (calm) | +0.3% (-1.2) | +0.7% (-0.8) |
+| ~est (Saved) | +1.5% (base) | +1.9% (+0.4) |
+| 0.8 (crisis) | +5.6% (+4.1) | +5.7% (+4.2) |
+
+Reading: down = more correlation, right = joint crashes (tail dependence). () = edge change in pp vs base.
 
 ## Watch-outs
 - Outcome is strongly IV-driven; the edge leans on the implied-volatility assumption. Get IV right before sizing up.
-- Edge changes sign somewhere in the model grid: not robust to the model choice.
+- This saved portfolio is lightly hedged (probability of loss 41%); the option legs are barely active. Re-run on the fully hedged Phase 5/6 structure before trusting the tail metrics.
