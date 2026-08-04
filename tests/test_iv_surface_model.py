@@ -96,3 +96,36 @@ def test_july_still_default_and_unchanged():
     assert SURFACE_EXPIRY == "2026-07-31"
     nodes = default_surface_nodes()  # no arg -> July default
     assert (nodes["Expiry"] == "2026-07-31").all()
+
+
+def test_tail_df_preserves_margins_and_shifts_probability():
+    """Student-t copula (tail_df) keeps unit-sum surface marginals but moves P(#1)
+    versus the Gaussian copula (tail dependence changes the ranking odds)."""
+    import pandas as pd
+    from iv_surface_model import (
+        apply_surface_atm_ivs,
+        default_surface_nodes,
+        run_surface_probability_engine,
+    )
+    from model import default_correlation_matrix
+
+    tickers = ["NVDA", "AAPL", "GOOGL"]
+    caps = {"NVDA": 4.70e12, "AAPL": 4.89e12, "GOOGL": 4.05e12}
+    uni = pd.DataFrame([
+        {"Ticker": t, "Current market cap": caps[t], "Implied volatility": 0.30,
+         "Polymarket YES price": 0.33} for t in tickers
+    ])
+    surf = apply_surface_atm_ivs(uni.copy(), resolution="2026-08-31")
+    corr = default_correlation_matrix(tickers)
+    nodes = default_surface_nodes(resolution="2026-08-31")
+    kw = dict(days_to_target=24, simulations=20000, seed=42, surface_nodes=nodes)
+
+    g, _ = run_surface_probability_engine(surf, corr, tail_df=None, **kw)
+    t, _ = run_surface_probability_engine(surf, corr, tail_df=5, **kw)
+    pg = g.results.set_index("Ticker")["Model probability"]
+    pt = t.results.set_index("Ticker")["Model probability"]
+
+    assert abs(float(pg.sum()) - 1.0) < 1e-6
+    assert abs(float(pt.sum()) - 1.0) < 1e-6
+    # tail dependence should move at least one probability meaningfully
+    assert max(abs(float(pt[k]) - float(pg[k])) for k in tickers) > 0.002

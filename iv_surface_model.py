@@ -241,8 +241,12 @@ def run_surface_probability_engine(
     seed: int,
     surface_nodes: pd.DataFrame | None = None,
     risk_free_rate: float = 0.04,
+    tail_df: int | None = None,
 ) -> tuple[SimulationResult, pd.DataFrame]:
-    """Run Gaussian-copula simulation with surface marginals where available."""
+    """Run surface-marginal simulation. Dependence is a Gaussian copula by
+    default; pass ``tail_df`` (e.g. 5) to switch to a Student-t copula with that
+    many degrees of freedom - extreme moves then arrive jointly (tail
+    dependence) while each marginal stays pinned to its IV surface."""
     if days_to_target <= 0 or simulations <= 0:
         raise ValueError("days_to_target and simulations must be positive.")
     clean_inputs = validate_company_inputs(company_inputs)
@@ -251,7 +255,16 @@ def run_surface_probability_engine(
     cholesky, chol_warnings = cholesky_with_jitter(cleaned_corr.to_numpy(dtype=float))
     rng = np.random.default_rng(int(seed))
     correlated_normals = rng.standard_normal((int(simulations), len(tickers))) @ cholesky.T
-    uniforms = normal_cdf_approx(correlated_normals)
+    if tail_df:
+        # Student-t copula: divide the correlated normals by one shared
+        # chi-square per simulation, then map through the univariate t CDF so
+        # margins stay Uniform (surface marginals preserved) but extremes co-move.
+        from scipy.stats import t as _student_t
+        mixing = rng.chisquare(int(tail_df), size=(int(simulations), 1))
+        t_values = correlated_normals * np.sqrt(float(tail_df) / mixing)
+        uniforms = _student_t.cdf(t_values, df=int(tail_df))
+    else:
+        uniforms = normal_cdf_approx(correlated_normals)
     years = days_to_target / 365.0
 
     caps_0 = clean_inputs["Current market cap"].to_numpy(dtype=float)

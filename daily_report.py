@@ -260,6 +260,62 @@ def upcoming_earnings(tickers, as_of, resolution):
     return out
 
 
+def sensitivity(surf_inputs, corr, tickers, traded, side, entry, *, days, sims, seed, nodes):
+    """Two sensitivity views for one trade, all on the SURFACE engine so the
+    base cell equals the headline. Table 1 varies the marginal/volatility model
+    (corr and copula held at base); Table 2 varies correlation x tail copula
+    (marginals held at surface). Returns edges on the traded side + a fragility
+    verdict derived from the realistic correlation band (0.3..0.8)."""
+    def side_edge(p):
+        return ((1.0 - p) if side == "NO" else p) - float(entry)
+    def p_of(res):
+        return float(res.results.set_index("Ticker").loc[traded, "Model probability"])
+
+    base_res, _ = run_surface_probability_engine(surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, surface_nodes=nodes, tail_df=None)
+    base_p = p_of(base_res); base_edge = side_edge(base_p)
+
+    marginals = [{"model": "IV surface (base)", "p1": base_p, "edge": base_edge, "delta": 0.0}]
+    for label, sm in [("ATM lognormal + Normal", "Normal shocks"),
+                      ("ATM + Student-t df=6 (fat marginals)", "Student-t df=6"),
+                      ("ATM + Student-t df=10", "Student-t df=10")]:
+        r = run_probability_engine(surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model=sm)
+        e = side_edge(p_of(r))
+        marginals.append({"model": label, "p1": p_of(r), "edge": e, "delta": e - base_edge})
+
+    corr_variants = [("0.3 (calm)", p7.constant_correlation(tickers, 0.3)),
+                     ("~est (Saved)", corr),
+                     ("0.8 (crisis)", p7.constant_correlation(tickers, 0.8))]
+    cop_variants = [("Gaussian", None), ("Student-t df=5", 5)]
+    grid = {}
+    for clabel, cmat in corr_variants:
+        for glabel, tdf in cop_variants:
+            r, _ = run_surface_probability_engine(surf_inputs, cmat, days_to_target=days, simulations=sims, seed=seed, surface_nodes=nodes, tail_df=tdf)
+            e = side_edge(p_of(r))
+            grid[(clabel, glabel)] = {"p1": p_of(r), "edge": e, "delta": e - base_edge}
+
+    base_pos = base_edge > 0
+    def flips(cell):
+        return (cell["edge"] > 0) != base_pos
+    realistic_flip = any(flips(grid[(c, g)]) for c in ["0.3 (calm)", "~est (Saved)"] for g in ["Gaussian", "Student-t df=5"]) or any(flips(m) for m in marginals)
+    crisis_flip = any(flips(grid[("0.8 (crisis)", g)]) for g in ["Gaussian", "Student-t df=5"])
+    if realistic_flip:
+        fragility = "HIGH - edge flips sign even at normal correlation / marginals"
+    elif crisis_flip:
+        fragility = "MEDIUM - edge holds except the crisis corner (high corr + joint crashes)"
+    else:
+        fragility = "LOW - edge holds across the realistic stress band"
+
+    corr_span = max(grid[(c, "Gaussian")]["edge"] for c, _ in corr_variants) - min(grid[(c, "Gaussian")]["edge"] for c, _ in corr_variants)
+    tail_span = abs(grid[("~est (Saved)", "Gaussian")]["edge"] - grid[("~est (Saved)", "Student-t df=5")]["edge"])
+    marg_span = max(m["edge"] for m in marginals) - min(m["edge"] for m in marginals)
+    dominant = max([("correlation", corr_span), ("tail dependence", tail_span), ("marginals", marg_span)], key=lambda x: x[1])[0]
+    all_edges = [grid[k]["edge"] for k in grid]
+    return {"base_edge": base_edge, "marginals": marginals, "grid": grid,
+            "corr_labels": [c for c, _ in corr_variants], "cop_labels": [g for g, _ in cop_variants],
+            "fragility": fragility, "dominant": dominant,
+            "edge_min": min(all_edges), "edge_max": max(all_edges)}
+
+
 def run(inputs: dict) -> str:
     resolution_iso = inputs["target_date"]
     target = date.fromisoformat(resolution_iso)
@@ -359,9 +415,10 @@ def run(inputs: dict) -> str:
         ivs = p7.iv_scaling_scan(surf_inputs, corr, selected_ticker=tk, days_to_target=days, simulations=sims, seed=seed, factors=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
         gps = p7.gap_scaling_scan(surf_inputs, corr, selected_ticker=tk, days_to_target=days, simulations=sims, seed=seed, factors=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
         gv = p7.gap_vs_randomness(ivs, gps)
-        variants_corr = {"Saved": corr, "Independent": p7.constant_correlation(tickers, 0.0), "High 0.8": p7.constant_correlation(tickers, 0.8)}
+        variants_corr = {"Calm 0.3": p7.constant_correlation(tickers, 0.3), "Saved": corr, "Crisis 0.8": p7.constant_correlation(tickers, 0.8)}
         grid = p7.model_robustness(surf_inputs, variants_corr, selected_ticker=tk, days_to_target=days, simulations=sims, seed=seed, shock_models=["Normal shocks", "Student-t copula df=5"])
         asmt = p7.assessment(disp, cop, gv, p7.robustness_summary(grid), selected_ticker=tk)
+        sens = sensitivity(surf_inputs, corr, tickers, tk, sd, ent, days=days, sims=sims, seed=seed, nodes=_surface_nodes_all)
         rm = p8.risk_metrics(result, pf)
         v5 = p8.value_at_risk(result, pf, 0.05)
         v1 = p8.value_at_risk(result, pf, 0.01)
@@ -371,30 +428,14 @@ def run(inputs: dict) -> str:
         msp = (1.0 - mp) if sd == "NO" else mp
         edg = msp - ent
         vd = "UNFAVORABLE" if edg <= 0.0 else ("MARGINAL" if edg <= 0.05 else "FAVORABLE")
-        ftext = " ".join(asmt["findings"]["Verdict"].astype(str)).lower()
-        if "flips sign" in ftext:
-            frag = "HIGH - edge is model-dependent (flips sign across models)"
-        elif ("not converged" in ftext) or ("sensitive to tail" in ftext):
-            frag = "MEDIUM - some assumptions move it (convergence / tail dependence)"
-        else:
-            frag = "LOW - holds across the robustness tests"
-
-        def _pt(res):
-            return float(res.results.set_index("Ticker").loc[tk, "Model probability"])
-        mprobs = {"IV surface + Gaussian copula": mp}
-        try:
-            mprobs["ATM lognormal + Normal"] = _pt(run_probability_engine(surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Normal shocks"))
-            mprobs["ATM lognormal + Student-t copula df=5"] = _pt(run_probability_engine(surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Student-t copula df=5"))
-            mprobs["ATM lognormal + Student-t df=6 (fat marginals)"] = _pt(run_probability_engine(surf_inputs, corr, days_to_target=days, simulations=sims, seed=seed, shock_model="Student-t df=6"))
-        except Exception:  # noqa: BLE001
-            pass
+        frag = sens["fragility"]
+        seeds_note = next((str(r["Verdict"]) for _, r in asmt["findings"].iterrows() if str(r["Area"]).strip().startswith("1")), "")
         return {
             "ticker": tk, "side": sd, "entry": ent, "spot": sp, "model_p": mp,
             "model_side_prob": msp, "edge": edg, "verdict": vd, "fragility": frag,
             "best": bestv, "variants": vlist, "portfolio": pf, "assessment": asmt,
             "rm": rm, "var5": v5, "var1": v1, "expected": exp, "max_loss": mloss,
-            "rocar": rcar, "model_probs": mprobs,
-            "prob_lo": min(mprobs.values()), "prob_hi": max(mprobs.values()),
+            "rocar": rcar, "sens": sens, "seeds_note": seeds_note,
         }
 
     _cache = {}
@@ -565,21 +606,34 @@ def run(inputs: dict) -> str:
             star = " (best)" if v is best else ""
             L.append(f"| {v['label']}{star} | {v['score']:.2f} | {v['p_win']:.0%} | {v['ev_sd']:+.2f} | {d(v['es5'])} | {v['roc_var5']:+.1%} | {d(v['expected'])} |")
         L.append("")
-        fmap = {str(r["Area"]).split(".")[0].strip(): str(r["Verdict"]) for _, r in A["assessment"]["findings"].iterrows()}
-        L.append("## Consistency check (across assumptions & simulation reruns)")
-        L.append(f"Overall fragility: **{A['fragility']}**. P({A['ticker']} #1) ranges {A['prob_lo']:.1%}-{A['prob_hi']:.1%} across models (spread {A['prob_hi'] - A['prob_lo']:.1%}).")
-        L.append("| Check | Result |")
-        L.append("|---|---|")
-        L.append(f"| Across simulation reruns (seeds) | {fmap.get('1', 'n/a')} |")
-        L.append(f"| Across models & tails (IV surface / ATM / copula) | {fmap.get('5', 'n/a')} |")
-        L.append(f"| Tail dependence (joint crashes) | {fmap.get('2', 'n/a')} |")
-        L.append(f"| Dominant lever | {fmap.get('3', 'n/a')} |")
+        sens = A["sens"]
+        L.append("## Sensitivity & stress")
+        L.append(f"Base edge (surface + est. correlation + Gaussian copula): **{sens['base_edge']:+.1%}**. Fragility: **{A['fragility']}**. Dominant lever: **{sens['dominant']}**. Edge across the realistic stress band: {sens['edge_min']:+.1%} to {sens['edge_max']:+.1%}.")
+        if A.get("seeds_note"):
+            L.append(f"Simulation reruns (seeds): {A['seeds_note']}")
         L.append("")
-        L.append(f"P({A['ticker']} #1) by model:")
-        L.append("| Model | P(#1) |")
-        L.append("|---|---|")
-        for name, val in A["model_probs"].items():
-            L.append(f"| {name} | {val:.1%} |")
+        L.append("**Volatility / marginals** (correlation = est., Gaussian copula; changes only how each name moves):")
+        L.append("| Marginal model | P(#1) | Edge | delta vs base |")
+        L.append("|---|---|---|---|")
+        for m in sens["marginals"]:
+            dstr = "base" if abs(m["delta"]) < 1e-9 else f"{m['delta']*100:+.1f} pp"
+            L.append(f"| {m['model']} | {m['p1']:.1%} | {m['edge']:+.1%} | {dstr} |")
+        L.append("")
+        L.append("**Correlation x tail copula** (marginals = surface; base cell marked):")
+        L.append("| correlation \\ tail | " + " | ".join(sens["cop_labels"]) + " |")
+        L.append("|---|" + "---|" * len(sens["cop_labels"]))
+        for c in sens["corr_labels"]:
+            cells = []
+            for g in sens["cop_labels"]:
+                cell = sens["grid"][(c, g)]
+                if c == "~est (Saved)" and g == "Gaussian":
+                    tag2 = "base"
+                else:
+                    tag2 = f"{cell['delta']*100:+.1f}"
+                cells.append(f"{cell['edge']:+.1%} ({tag2})")
+            L.append(f"| {c} | " + " | ".join(cells) + " |")
+        L.append("")
+        L.append("Reading: down = more correlation, right = joint crashes (tail dependence). () = edge change in pp vs base.")
         L.append("")
         L.append("## Watch-outs")
         for w in A["assessment"]["watch_outs"]:

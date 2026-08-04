@@ -35,7 +35,7 @@ def test_run_produces_report_with_all_sections(monkeypatch):
         return dict(_CAPS), dict(_SPOTS), "test", []
     monkeypatch.setattr(daily_report, "fetch_market_data", fake_fetch)
     report = daily_report.run(_inputs())
-    for section in ["## Verdict:", "## Edge", "## Best structure", "## Structure comparison", "## Consistency check", "## Watch-outs"]:
+    for section in ["## Verdict:", "## Edge", "## Best structure", "## Structure comparison", "## Sensitivity & stress", "## Watch-outs"]:
         assert section in report
     assert any(v in report for v in ["FAVORABLE", "UNFAVORABLE", "MARGINAL"])
 
