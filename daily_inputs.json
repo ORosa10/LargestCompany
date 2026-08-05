@@ -1,7 +1,7 @@
 {
   "target_date": "2026-08-31",
   "risk_free_rate": 0.04,
-  "simulations": 40000,
+  "simulations": 100000,
   "seed": 42,
   "shares": 100.0,
   "polymarket_yes": {

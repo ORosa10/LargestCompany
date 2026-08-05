@@ -430,12 +430,13 @@ def run(inputs: dict) -> str:
         vd = "UNFAVORABLE" if edg <= 0.0 else ("MARGINAL" if edg <= 0.05 else "FAVORABLE")
         frag = sens["fragility"]
         seeds_note = next((str(r["Verdict"]) for _, r in asmt["findings"].iterrows() if str(r["Area"]).strip().startswith("1")), "")
+        gap_note = next((str(r["Verdict"]) for _, r in asmt["findings"].iterrows() if str(r["Area"]).strip().startswith("3")), "")
         return {
             "ticker": tk, "side": sd, "entry": ent, "spot": sp, "model_p": mp,
             "model_side_prob": msp, "edge": edg, "verdict": vd, "fragility": frag,
             "best": bestv, "variants": vlist, "portfolio": pf, "assessment": asmt,
             "rm": rm, "var5": v5, "var1": v1, "expected": exp, "max_loss": mloss,
-            "rocar": rcar, "sens": sens, "seeds_note": seeds_note,
+            "rocar": rcar, "sens": sens, "seeds_note": seeds_note, "gap_note": gap_note,
         }
 
     _cache = {}
@@ -609,8 +610,6 @@ def run(inputs: dict) -> str:
         sens = A["sens"]
         L.append("## Sensitivity & stress")
         L.append(f"Base edge (surface + est. correlation + Gaussian copula): **{sens['base_edge']:+.1%}**. Fragility: **{A['fragility']}**. Dominant lever: **{sens['dominant']}**. Edge across the realistic stress band: {sens['edge_min']:+.1%} to {sens['edge_max']:+.1%}.")
-        if A.get("seeds_note"):
-            L.append(f"Simulation reruns (seeds): {A['seeds_note']}")
         L.append("")
         L.append("**Volatility / marginals** (correlation = est., Gaussian copula; changes only how each name moves):")
         L.append("| Marginal model | P(#1) | Edge | delta vs base |")
@@ -634,6 +633,20 @@ def run(inputs: dict) -> str:
             L.append(f"| {c} | " + " | ".join(cells) + " |")
         L.append("")
         L.append("Reading: down = more correlation, right = joint crashes (tail dependence). () = edge change in pp vs base.")
+        L.append("")
+        if "HIGH" in A["fragility"]:
+            comment = "Comment: the edge changes sign even at normal correlation - its direction is not reliable; do not size up on it."
+        elif "MEDIUM" in A["fragility"]:
+            comment = f"Comment: the edge stays positive from calm to the estimate and only turns negative in the crisis corner (correlation 0.8). {sens['dominant'].capitalize()} is the swing factor; marginals barely move it."
+        else:
+            comment = f"Comment: the edge stays positive across the whole realistic band - robust. {sens['dominant'].capitalize()} is the main lever but never flips it."
+        L.append(comment)
+        L.append("")
+        L.append("Notes (unchanged checks):")
+        if A.get("seeds_note"):
+            L.append(f"- Simulation reruns (seeds): {A['seeds_note']}")
+        if A.get("gap_note"):
+            L.append(f"- Gap vs randomness: {A['gap_note']}")
         L.append("")
         L.append("## Watch-outs")
         for w in A["assessment"]["watch_outs"]:
