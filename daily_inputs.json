@@ -5,17 +5,17 @@
   "seed": 42,
   "shares": 100.0,
   "polymarket_yes": {
-    "NVDA": 0.79,
-    "AAPL": 0.1,
-    "GOOGL": 0.104
+    "NVDA": 0.84,
+    "AAPL": 0.08,
+    "GOOGL": 0.082
   },
   "polymarket_no": {
-    "NVDA": 0.22,
-    "AAPL": 0.91,
-    "GOOGL": 0.897
+    "NVDA": 0.17,
+    "AAPL": 0.93,
+    "GOOGL": 0.92
   },
   "manual_market_caps": {},
   "manual_spots": {},
   "_regenerate": "candidates-section",
-  "_trigger": "2026-08-04T14:03:30.293379Z"
+  "_trigger": "2026-08-05T13:44:38.640159Z"
 }

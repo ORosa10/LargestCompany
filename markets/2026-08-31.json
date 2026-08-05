@@ -97,6 +97,27 @@
         "total_market": 1044422
       },
       "note": "NVDA 79% (up 11%); Alphabet & Apple both 10% (down 22%); Amazon <1%. Board now lists Amazon."
+    },
+    {
+      "date": "2026-08-05",
+      "captured": "2026-08-05",
+      "yes": {
+        "NVDA": 0.84,
+        "GOOGL": 0.082,
+        "AAPL": 0.08
+      },
+      "no": {
+        "NVDA": 0.17,
+        "GOOGL": 0.92,
+        "AAPL": 0.93
+      },
+      "volume_usd": {
+        "NVDA": 265305,
+        "GOOGL": 169555,
+        "AAPL": 166245,
+        "total_market": 1149674
+      },
+      "note": "NVDA 84% (up 16%); Alphabet & Apple both 8% (down 24%)."
     }
   ]
 }
