@@ -118,6 +118,27 @@
         "total_market": 1149674
       },
       "note": "NVDA 84% (up 16%); Alphabet & Apple both 8% (down 24%)."
+    },
+    {
+      "date": "2026-08-06",
+      "captured": "2026-08-06 (2)",
+      "yes": {
+        "NVDA": 0.85,
+        "AAPL": 0.1,
+        "GOOGL": 0.052
+      },
+      "no": {
+        "NVDA": 0.16,
+        "AAPL": 0.91,
+        "GOOGL": 0.949
+      },
+      "volume_usd": {
+        "NVDA": 304757,
+        "AAPL": 192432,
+        "GOOGL": 191871,
+        "total_market": 1283949
+      },
+      "note": "NVDA 85% (up 17%); Apple 10% (down 22%); Alphabet 5% (down 27%)."
     }
   ]
 }
