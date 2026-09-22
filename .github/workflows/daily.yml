@@ -1,29 +1,60 @@
 name: Daily report
 
+# GitHub-native replacement for the former cloud relay:
+# - price/IV input changes still trigger an immediate report;
+# - scheduled checkpoints are a safe fallback at 09:30, 12:30 and 17:00
+#   Europe/Prague (the Python guard handles DST and prevents duplicates);
+# - the generated Markdown and run outputs are persisted in the repository and
+#   uploaded as a GitHub Actions artifact.
+
 on:
-  # Runs only when Polymarket prices are updated (a push to daily_inputs.json),
-  # or on manual dispatch. No blind daily cron - no prices, no report.
-  workflow_dispatch: {}
   push:
     paths:
       - "daily_inputs.json"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Generate even when _trigger is not from today (debug only)"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # GitHub cron is UTC. These candidate slots cover both CET and CEST;
+    # scripts/report_freshness.py accepts only the three local checkpoints.
+    - cron: "30 7,8,10,11,15,16 * * *"
+    - cron: "0 15,16 * * *"
 
 permissions:
   contents: write
+
+concurrency:
+  group: largestcompany-daily-report
+  cancel-in-progress: false
 
 jobs:
   report:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          fetch-depth: 0
+
+      - name: Check whether a fresh report is due
+        id: due
+        env:
+          FORCE_REPORT: \${{ inputs.force || 'false' }}
+        run: python scripts/report_freshness.py
+
       - name: Install dependencies
+        if: steps.due.outputs.run_report == 'true'
         run: pip install -r requirements.txt
+
       - name: Run daily report
+        if: steps.due.outputs.run_report == 'true'
         run: python daily_report.py
-      - name: Commit report
+
+      - name: Commit report and model state
+        if: steps.due.outputs.run_report == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -34,3 +65,16 @@ jobs:
             git commit -m "Daily report $(date -u +%Y-%m-%d)"
             git push
           fi
+
+      - name: Upload report artifact
+        if: steps.due.outputs.run_report == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: largestcompany-report-\${{ steps.due.outputs.report_date }}
+          path: |
+            reports/latest.md
+            reports/\${{ steps.due.outputs.report_date }}.md
+            reports/market_snapshot.json
+            saved_state/phase6_execution_candidate.pkl
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,40 +1,61 @@
 # Handoff pro ChatGPT — LargestCompany
 
-> **▶ START ZDE (GPT):** Denní report generuje **GitHub Action v tomto repu**
-> (běží, jen když nahraješ ten den ceny) a ukládá ho do **`reports/latest.md`**.
-> To je nezávislé na jakémkoli AI. ChatGPT jen ten hotový soubor přečte a ukáže.
-> (Původní Claude verze je v `HANDOFF_SCHEDULED_TASK.md`, už jen historická.)
+> **▶ START ZDE (GPT):** Výpočet a report nyní běží v GitHub Actions. ChatGPT
+> pouze přečte hotový soubor reports/latest.md a zobrazí ho. Původní cloudová
+> varianta je zachována už jen historicky v HANDOFF_SCHEDULED_TASK.md.
 
 Last updated: 2026-09-22
 
-## Kde report je
-Report už teď končí v repu — netřeba ho nikam „doručovat":
-`https://raw.githubusercontent.com/ORosa10/LargestCompany/main/reports/latest.md`
+## Jak to teď funguje
+
+1. Ondřej vloží aktuální ceny/IV a Polymarket ceny do daily_inputs.json.
+2. .github/workflows/daily.yml se spustí okamžitě po změně tohoto souboru.
+3. Stejná Action má plánované kontrolní běhy v lokálním čase 09:30, 12:30
+   a 17:00 Europe/Prague. Kvůli letnímu/zimnímu času používá několik UTC
+   kandidátů; scripts/report_freshness.py přijme jen správný lokální termín.
+4. Pokud jsou vstupy z dneška nové, daily_report.py provede celý výpočet
+   a uloží:
+   - reports/YYYY-MM-DD.md,
+   - reports/latest.md,
+   - podpůrný stav do saved_state/ a markets/.
+5. Action změny commitne do main a zároveň nahraje report jako GitHub Actions
+   artifact s třicetidenní retencí. Staré vstupy se nikdy automaticky
+   nepřepočítávají jako nový dnešní report.
+
+Report je veřejně dostupný tady:
+
+https://raw.githubusercontent.com/ORosa10/LargestCompany/main/reports/latest.md
+
+Akce a její běhy jsou tady:
+
+https://github.com/ORosa10/LargestCompany/actions
 
 ## ChatGPT Task (volitelné doručení do chatu)
-V ChatGPT appce založ **Task**, rozvrh **jednou denně odpoledne** (např. 17:00),
-s tímto promptem:
 
-```
-Jsi naplánovaná úloha v ChatGPT. Jednou denně:
-1. Otevři (browsing) soubor:
-   https://raw.githubusercontent.com/ORosa10/LargestCompany/main/reports/latest.md
-2. Najdi v něm datum reportu (formát YYYY-MM-DD).
-3. POKUD je datum == dnešek: ukaž mi CELÝ obsah souboru tak, jak je (jsou to
-   Markdown tabulky — zachovej je), pod nadpisem "LargestCompany — denní report".
-   Na začátek přidej jednu českou větu s verdiktem (FAVORABLE / MARGINAL /
-   UNFAVORABLE) a obchodovaným tickerem + stranou.
-4. POKUD datum != dnešek: napiš jen jednu větu, že dnešní report ještě není
-   (ceny nebyly nahrané) — nikdy neukazuj starý report jako dnešní.
-5. Nikdy nevymýšlej čísla ani nespouštěj vlastní simulaci.
-```
+V ChatGPT appce lze založit jeden denní Task, například na 17:00
+Europe/Prague, s tímto promptem:
 
-> **Pozn.:** Původní Claude úloha běžela 3× denně a hlídala si, aby report
-> poslala „právě jednou" (podle git commit času). ChatGPT Tasks nemají spolehlivou
-> paměť mezi běhy, takže tady je to zjednodušené na **1 běh denně** — vyhne se to
-> duplicitám. Pokud chceš víc kontrol denně bez rizika duplicit, patří to spíš do
-> GitHub Action (mail/commit), ne do ChatGPT.
+~~~
+Jednou denně otevři (browsing) soubor
+https://raw.githubusercontent.com/ORosa10/LargestCompany/main/reports/latest.md.
+Najdi v něm datum reportu ve formátu YYYY-MM-DD. Pokud je datum stejné jako
+dnešek, ukaž mi CELÝ obsah souboru tak, jak je, včetně Markdown tabulek, pod
+nadpisem „LargestCompany — denní report“. Na začátek přidej jednu krátkou
+českou větu s verdiktem (FAVORABLE / MARGINAL / UNFAVORABLE) a obchodovaným
+tickerem + stranou. Pokud datum není dnešek, napiš pouze jednu větu, že dnešní
+report ještě není, protože dnešní ceny nebyly nahrané; nikdy nezobrazuj starý
+report jako dnešní. Nikdy nevymýšlej čísla ani nespouštěj vlastní simulaci.
+Pokud soubor nejde načíst nebo má neočekávaný formát, napiš přesnou chybu
+místo domýšlení.
+~~~
 
 ## Jak něco změnit
-- Generování reportu je beze změny (GitHub Action v tomto repu, spouští se při
-  nahrání cen). ChatGPT tu jen čte hotový `reports/latest.md`.
+
+- Rozvrh GitHub Action: .github/workflows/daily.yml.
+- Kontrola čerstvosti a ochrana před duplikací:
+  scripts/report_freshness.py.
+- Výpočet modelu, formát reportu a analýza rizika: daily_report.py.
+- Vstupy pro další běh: daily_inputs.json.
+- Ruční ověření: GitHub → Actions → Daily report → Run workflow.
+  Volbu force používej jen pro debugging; běžný běh má vyžadovat dnešní
+  _trigger.
