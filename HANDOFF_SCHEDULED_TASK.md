@@ -1,5 +1,9 @@
 # Naplánovaná úloha + migrace na nový Claude — handoff
 
+> **▶ START ZDE:** Přečti celý tento soubor a založ naplánovanou úlohu **1:1**
+> podle sekce níže — použij přesně uvedený `cron` a **doslovný** prompt z code
+> bloku. Po založení spusť „Run now" pro ověření.
+
 Popisuje Cowork úlohu, která denní „LargestCompany" report **přeposílá** do
 chatu, a jak ji obnovit na **novém Claude účtu**. Samotný report generuje
 **GitHub Action v tomto repu** (běží, jen když nahraješ ten den ceny) — to
